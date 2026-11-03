@@ -1,0 +1,134 @@
+name: coverage
+
+# 2026-10-22 新增：核对「应跑 vs 实跑」。
+# 以前跑完一轮没有任何地方核对「今天到底跑了多少个号」：250 片里有几片静默失败
+#（下载依赖失败、被取消、排队超 24h 被丢弃），整轮 job 依旧是绿的，谁也发现不了。
+# 数据来源：run.py 每片跑完把「真正跑到有效计数的 uid」随快照上报 → worker 写 D1 runs 表；
+# 这里读 /api/coverage 得到「今日计划听众数 / 实跑号数 / 缺号名单」，低于阈值就发邮件。
+on:
+  schedule:
+    # 北京 20:00（UTC 12:00）：此时上一轮（凌晨开跑）应已结束，而下一轮（22:23 触发）还没开始。
+    - cron: '0 12 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: compare expected vs ran
+        env:
+          WORKER_URL: 'https://xx1031.xyz'
+          ASSIGN_PASS: ${{ secrets.ASSIGN_PASS }}
+          POOL: 'hz'
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+          MIN_PCT: '90'
+        run: |
+          python3 - <<'EOF'
+          import json, os, smtplib, urllib.parse, urllib.request
+          from datetime import datetime, timedelta, timezone
+          from email.mime.text import MIMEText
+
+          BJ = timezone(timedelta(hours=8))
+          UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json"}
+          url = (os.environ.get("WORKER_URL") or "").rstrip("/")
+          pw = os.environ.get("ASSIGN_PASS") or ""
+          pool = os.environ.get("POOL") or "hz"
+          min_pct = float(os.environ.get("MIN_PCT") or "90")
+
+          def cov(day):
+              q = urllib.parse.urlencode({"pass": pw, "day": day, "pool": pool})
+              req = urllib.request.Request(url + "/api/coverage?" + q, headers=UA)
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  return json.loads(r.read().decode("utf-8"))
+
+          def mail(subject, body):
+              frm = os.environ.get("EMAIL_FROM") or ""
+              code = os.environ.get("EMAIL_AUTH_CODE") or ""
+              to = os.environ.get("ALERT_TO") or frm
+              if not (frm and code and to):
+                  print("未配置邮件凭据，跳过发信")
+                  return
+              msg = MIMEText(body, "plain", "utf-8")
+              msg["Subject"] = subject
+              msg["From"] = frm
+              msg["To"] = to
+              with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30) as s:
+                  s.login(frm, code)
+                  s.sendmail(frm, [x.strip() for x in to.split(",") if x.strip()], msg.as_string())
+              print("已发送告警邮件:", subject)
+
+          if not pw:
+              print("::error::缺 ASSIGN_PASS，无法核对覆盖率")
+              raise SystemExit(1)
+
+          now = datetime.now(BJ)
+          days = [(now - timedelta(days=1)).date().isoformat(), now.date().isoformat()]
+          got = []
+          for d in days:
+              try:
+                  r = cov(d)
+              except Exception as e:
+                  print(f"[{d}] 接口失败: {e}")
+                  continue
+              if r.get("ok"):
+                  print(f"[{d}] 计划 {r.get('expected')} / 实跑 {r.get('ran')} / "
+                        f"覆盖 {r.get('pct')}% / 缺 {r.get('missing_n')} / 多 {r.get('extra_n')}")
+                  got.append(r)
+
+          if not got:
+              mail(f"[650] {pool} 覆盖率核对失败（接口不可用）",
+                   f"时间：{now.isoformat()}\n"
+                   f"/api/coverage 两天都取不到数据，请检查 worker 与 D1 是否正常。")
+              raise SystemExit(1)
+
+          # 2026-10-29 修复（原逻辑取 pct 最大的那天下结论）：
+          # 以前把「昨天 / 今天」两轮一起比，然后 target = max(done, key=pct) —— 昨天正常 100%
+          # 就把今天掉到 64% 彻底盖住（10-28 那次覆盖率只有 64.2% 是人工发现的，告警没响）。
+          # 现在逐天独立判定：任何一天不达标都发信，一封邮件里列清是哪个日期锚点出的问题。
+          # 「一轮要跑 20 小时左右，凌晨刚开跑时覆盖率天然很低」→ 每天都要求 >=50% 才拿来判定，
+          # 不到 50% 的按「进行中」跳过，避免天天误报（与原行为一致）。
+          bad = []
+          for r in got:
+              d = r.get("day")
+              exp = r.get("expected") or 0
+              pct = r.get("pct") or 0
+              if exp <= 0 or pct < 50:
+                  print(f"[{d}] 计划 {exp} / 覆盖 {pct}%，判定为仍在进行中（或当天没有号），本次不判定")
+                  continue
+              miss_rate = (r.get("missing_n") or 0) / max(1, exp)
+              print(f"[{d}] 计划 {exp} / 实跑 {r.get('ran')} / 覆盖 {pct}% / "
+                    f"缺 {r.get('missing_n')}（{miss_rate*100:.1f}%）/ 多 {r.get('extra_n')}"
+                    f" → {'不达标' if (pct < min_pct or miss_rate > 0.03) else '正常'}")
+              if pct < min_pct or miss_rate > 0.03:
+                  bad.append((r, pct, miss_rate))
+
+          if not bad:
+              print("覆盖率正常（所有已收尾的轮次都达标）")
+              raise SystemExit(0)
+
+          blocks = []
+          for r, pct, miss_rate in bad:
+              sample = "、".join(r.get("missing") or [])[:600]
+              blocks.append(
+                  f"日期锚点：{r.get('day')}\n"
+                  f"  计划听众：{r.get('expected')} 个\n"
+                  f"  实跑：{r.get('ran')} 个（覆盖 {pct}%）\n"
+                  f"  缺号：{r.get('missing_n')} 个（{miss_rate*100:.1f}%，阈值 3%）\n"
+                  f"  多出（不在计划内）：{r.get('extra_n')} 个\n"
+                  f"  缺号样本：{sample}")
+          subject = ("[650] " + pool + " 覆盖率偏低："
+                     + "、".join(f"{r.get('day')}({p}%)" for r, p, _ in bad))
+          mail(subject, "\n\n".join(blocks) + "\n\n"
+               f"判定阈值：覆盖率 >= {min_pct}% 且缺号率 <= 3%。\n"
+               f"常见原因：\n"
+               f"  1) 某几片 job 下载依赖/checkout 失败、排队超 24h 被取消，或 run.py 整片播放失败；\n"
+               f"  2) 同一个号被多个分片重复播放，另一批号一片都没分到（分片键退化成数组下标时会出现：\n"
+               f"     每片单独向 /api/assign 取名单，而号池在整轮里一直在删死号/进新号，下标整体移位）。\n"
+               f"     判据：把各片日志里「完成 N 次播放」的条数加起来，若明显多于实跑号数，就是重复播放。\n"
+               f"处理：到 Actions 里看对应片的日志；若确认是分片键问题，检查 worker 的 sliceBucket（按 uid 哈希，不按数组下标），\n"
+               f"     必要时手动 workflow_dispatch 补跑。")
+          raise SystemExit(1)
+          EOF

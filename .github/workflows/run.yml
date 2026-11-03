@@ -1,0 +1,337 @@
+name: relay
+
+on:
+  schedule:
+    - cron: '23 14 * * *'      # UTC 14:23 ≈ 北京 22:23，错峰
+  # 2026-11-02：定向补跑入口（backfill.yml 与人工共用）。
+  # 为什么不用 rerun-failed-jobs：它跑的是「失败那一刻的旧 commit」，而且单 job 重跑拿不到
+  # plan 的输出（ASSIGN_DAY / NS 全空）→ 既用不到新代码，也会按执行当天重算分片。
+  # 这里改成 dispatch 一段新 run：用最新代码，且 ns/day 由调用方显式指定，才能精确补回原来那几片。
+  workflow_dispatch:
+    inputs:
+      only_slices:
+        description: '只跑指定分片（逗号分隔，如 55 或 55,64；留空=全跑）'
+        required: false
+        default: ''
+      ns_override:
+        description: '强制片数（补跑必须填失败那一轮的 ns，否则分片键全变）'
+        required: false
+        default: ''
+      day_override:
+        description: '强制日期锚点 YYYY-MM-DD（补跑那一天的北京日期）'
+        required: false
+        default: ''
+
+# 2026-10-22：允许一轮跑满一整天（不再要求 09:00 前结束），只要当天内把所有号跑完即可。
+# 代价是可能出现「昨天那轮还没跑完，今天这轮又到点了」→ 两轮抢同一个 GitHub 账号的 20 并发，
+# 队列越排越长、谁都不前进。用 concurrency 串起来：同一时刻只允许一轮 relay 在跑，
+# 新的进 pending 排队，等旧的自然结束后立刻开始（pending 只保留最新一个，不会堆积）。
+concurrency:
+  group: relay-run
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    # 动态扩片：按账号池实际人数算出需要的并行片数，人数涨片数自动涨，无需改代码
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      ns: ${{ steps.plan.outputs.ns }}
+      day: ${{ steps.plan.outputs.day }}
+    steps:
+      # 2026-10-28 新增：每轮 relay 开跑前，先把 D1 账号池（accounts/snapshots/kv_misc/dead_log）
+      # 全量导出一份加密快照。放在 plan 阶段 = 一定早于所有 brush 分片的验活/删号/发邮件，
+      # 万一哪天大批误判，能拿这份回滚到本轮之前（d1_restore.py 吃 .enc 文件）。
+      # 落地方式选 artifact 而不是 commit：每天 264KB 二进制进 git，一年近 100MB，
+      # 70 个分片每天都要 clone 一遍。git 里的长期备份交给每周的 d1-backup.yml。
+      # 失败只告警不拦路，备份不能挡住当天播放。
+      - uses: actions/checkout@v4
+      - name: D1 全量备份（删号/发邮件之前）
+        id: d1bak
+        continue-on-error: true
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          BACKUP_PASS: ${{ secrets.BACKUP_PASS }}
+          BACKUP_DIR: backup_daily
+        run: |
+          python3 d1_backup.py || echo "::warning::D1 备份失败（不影响本轮 relay）"
+          ls -lh backup_daily/ 2>/dev/null || true
+      - name: 上传快照 artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: d1-prebackup-${{ github.run_id }}
+          path: backup_daily/*.enc
+          retention-days: 30
+          if-no-files-found: warn
+      - name: plan slices
+        id: plan
+        env:
+          # 用 github.event.inputs 而不是 inputs：inputs 上下文在 schedule 触发下
+          # 有被解析成未定义的风险，一旦报错整个 plan job 挂掉 = 当晚一片都跑不起来。
+          # github.event.inputs 在非 dispatch 触发时必然是空值，脚本里已按「空=全跑」处理。
+          ONLY_SLICES: ${{ github.event.inputs.only_slices }}
+          NS_OVERRIDE: ${{ github.event.inputs.ns_override }}
+          DAY_OVERRIDE: ${{ github.event.inputs.day_override }}
+          # 2026-11-01：不再固定 12 片。manifest 最多 40 片，worker 写了几片这里就透出几片；
+          # 不存在的 secret 在 Actions 里会解析成空串，读取端自动跳过，无需改这里。
+          NB_POOL_1: ${{ secrets.NB_POOL_1 }}
+          NB_POOL_2: ${{ secrets.NB_POOL_2 }}
+          NB_POOL_3: ${{ secrets.NB_POOL_3 }}
+          NB_POOL_4: ${{ secrets.NB_POOL_4 }}
+          NB_POOL_5: ${{ secrets.NB_POOL_5 }}
+          NB_POOL_6: ${{ secrets.NB_POOL_6 }}
+          NB_POOL_7: ${{ secrets.NB_POOL_7 }}
+          NB_POOL_8: ${{ secrets.NB_POOL_8 }}
+          NB_POOL_9: ${{ secrets.NB_POOL_9 }}
+          NB_POOL_10: ${{ secrets.NB_POOL_10 }}
+          NB_POOL_11: ${{ secrets.NB_POOL_11 }}
+          NB_POOL_12: ${{ secrets.NB_POOL_12 }}
+          NB_POOL_13: ${{ secrets.NB_POOL_13 }}
+          NB_POOL_14: ${{ secrets.NB_POOL_14 }}
+          NB_POOL_15: ${{ secrets.NB_POOL_15 }}
+          NB_POOL_16: ${{ secrets.NB_POOL_16 }}
+          NB_POOL_17: ${{ secrets.NB_POOL_17 }}
+          NB_POOL_18: ${{ secrets.NB_POOL_18 }}
+          NB_POOL_19: ${{ secrets.NB_POOL_19 }}
+          NB_POOL_20: ${{ secrets.NB_POOL_20 }}
+          NB_POOL_21: ${{ secrets.NB_POOL_21 }}
+          NB_POOL_22: ${{ secrets.NB_POOL_22 }}
+          NB_POOL_23: ${{ secrets.NB_POOL_23 }}
+          NB_POOL_24: ${{ secrets.NB_POOL_24 }}
+          NB_POOL_25: ${{ secrets.NB_POOL_25 }}
+          NB_POOL_26: ${{ secrets.NB_POOL_26 }}
+          NB_POOL_27: ${{ secrets.NB_POOL_27 }}
+          NB_POOL_28: ${{ secrets.NB_POOL_28 }}
+          NB_POOL_29: ${{ secrets.NB_POOL_29 }}
+          NB_POOL_30: ${{ secrets.NB_POOL_30 }}
+          NB_POOL_31: ${{ secrets.NB_POOL_31 }}
+          NB_POOL_32: ${{ secrets.NB_POOL_32 }}
+          NB_POOL_33: ${{ secrets.NB_POOL_33 }}
+          NB_POOL_34: ${{ secrets.NB_POOL_34 }}
+          NB_POOL_35: ${{ secrets.NB_POOL_35 }}
+          NB_POOL_36: ${{ secrets.NB_POOL_36 }}
+          NB_POOL_37: ${{ secrets.NB_POOL_37 }}
+          NB_POOL_38: ${{ secrets.NB_POOL_38 }}
+          NB_POOL_39: ${{ secrets.NB_POOL_39 }}
+          NB_POOL_40: ${{ secrets.NB_POOL_40 }}
+          MIN_SLICES: '4'
+          MAX_SLICES: '250'  # 2026-10-22：160 → 250。数字由两个硬上限夹出来：
+                             # ① GitHub 单个 matrix 最多 256 个 job → 片数必须 ≤ 250（再加 plan 共 251 个）；
+                             # ② 1500 号 = 250 片 × 6 号，每片固定 6 个号；若片数 < 250，账号池满时会有片
+                             #    分到 7 个号 → 该片要跑两轮线程（≈3.2h），一天跑不完。
+                             # ⚠️ 2026-10-22 晚修正：登记上限从 1500 下调到 1200（见 POOL_LIMIT_G1）。
+                             #    原因不是 CPU，是排队：GitHub 官方「job 排队 > 24h 自动取消」。
+                             #    1500 号 = 250 片 = 12.5 波 × 单片 2.0~2.1h → 尾部片排队 23~24h，
+                             #    一旦某首歌唱得久一点就整片静默消失。1200 号 = 200 片 = 10 波，
+                             #    总时长 20~21h、尾部排队 18~19h，留 4~6h 余量。
+                             # 以后真要上 1500，得先把 ACCOUNTS_PER_SLICE 调到 8（188 片 9.4 波）。
+          ACCOUNTS_PER_SLICE: '6'   # 2026-10-20：改为「每个号独立线程并行」后，单号 85-95 分钟不再叠加。
+                                    # 6 个/片 ≈ 1.8~2.1h（并行，含 6~10 首混听）。
+          # 2026-10-22：片数优先按 D1 里的真实账号池人数算（问不到 worker 才回退数 Secrets），
+          # 这样 Secrets 分片过期/写失败都不会再导致排片数不对。
+          WORKER_URL: 'https://xx1031.xyz'
+          NB_PASS: ${{ secrets.NB_PASS }}
+          # 2026-10-22：/api/assign 与 /api/pool_stat 只认独立口令 ASSIGN_PASS（回明文 CK 的接口，
+          # 不能再拿发给全体成员的群口令鉴权）。未配置时接口直接 503。
+          ASSIGN_PASS: ${{ secrets.ASSIGN_PASS }}
+        run: |
+          python3 - <<'EOF'
+          import base64, gzip, json, os, math, urllib.parse, urllib.request
+          n = 0
+          url = (os.environ.get("WORKER_URL") or "").rstrip("/")
+          pw = os.environ.get("ASSIGN_PASS") or os.environ.get("NB_PASS") or ""
+          day0 = (__import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(hours=8)).date().isoformat()
+          if url and pw:
+              # 重试 3 次：deploy-worker 发布的那几十秒 worker 会 5xx/超时，
+              # 单次失败就落到「按 Secrets 的陈旧人数算片数」，会把整晚的片数算错。
+              for _try in range(1, 4):
+                  try:
+                      q = urllib.parse.urlencode({"pass": pw, "day": day0})
+                      req = urllib.request.Request(url + "/api/pool_stat?" + q, headers={
+                          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+                          "Accept": "application/json"})
+                      with urllib.request.urlopen(req, timeout=30) as r:
+                          d = json.loads(r.read().decode())
+                      if d.get("ok") and d.get("m_pool"):
+                          n = int(d["m_pool"])
+                          print(f"pool_stat: m_pool={n} l={d.get('l')} p={d.get('p')} m_all={d.get('m')}")
+                          break
+                      print(f"pool_stat 第 {_try} 次返回异常：{str(d)[:160]}")
+                  except Exception as e:
+                      print(f"pool_stat 第 {_try} 次失败，回退数 Secrets:", e)
+                  if _try < 3:
+                      __import__("time").sleep(15)
+          if not n:
+              for _key in sorted([k for k in os.environ if k.startswith("NB_POOL_")],
+                                 key=lambda k: int(k[8:]) if k[8:].isdigit() else 0):
+                  raw = os.environ.get(_key)
+                  if not raw:
+                      continue
+                  try:
+                      data = base64.b64decode(raw)
+                      if data[:2] == b"\x1f\x8b":   # 2026-10-22 起分片为 gzip+base64，兼容旧格式
+                          data = gzip.decompress(data)
+                      chunk = json.loads(data.decode("utf-8"))
+                      if isinstance(chunk, list):
+                          n += len(chunk)
+                  except Exception:
+                      pass
+          if not n:
+              # 以前这里会静默退化成 ns=MIN_SLICES(4)：一晚只有 4 片、每片 130 个号，
+              # 每号 ~55 分钟、5 线程也要 26 轮，一整天都跑不完，而且不报错，
+              # 看起来像「正常在跑」。快失败好过静默烂一晚上：直接红，coverage / guard 都看得见。
+              print("::error::问不到号池人数（worker 与 Secrets 都为空），拒绝按 ns=4 跑一整晚。"
+                    "先确认 worker 是否存活、ASSIGN_PASS 是否失效、NB_POOL_* 是否还在。")
+              raise SystemExit(1)
+          per = int(os.environ.get("ACCOUNTS_PER_SLICE", "8"))
+          lo = int(os.environ.get("MIN_SLICES", "4"))
+          hi = int(os.environ.get("MAX_SLICES", "30"))
+          ns = max(lo, min(hi, math.ceil(n / per) if n else lo))
+          # 2026-11-02：定向补跑。ns 必须和失败那一轮完全一致 ——
+          # sliceBucket(uid, ns) 是按 ns 取模的，ns 一变，「只补 55 片」就变成播另一批不相干的号。
+          _nsov = (os.environ.get("NS_OVERRIDE") or "").strip()
+          if _nsov.isdigit() and int(_nsov) > 0:
+              ns = int(_nsov)
+          _only = [int(x) for x in (os.environ.get("ONLY_SLICES") or "").replace(" ", "").split(",") if x.isdigit()]
+          _slices = [x for x in _only if 0 <= x < ns] if _only else list(range(ns))
+          if not _slices:
+              _slices = list(range(ns))
+          _dayov = (os.environ.get("DAY_OVERRIDE") or "").strip()
+          if len(_dayov) == 10 and _dayov[4] == "-" and _dayov[7] == "-":
+              day = _dayov
+          else:
+              day = (__import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(hours=8)).date().isoformat()
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"ns={ns}\n")
+              f.write("day=" + day + "\n")
+              f.write(f"matrix={json.dumps({'slice': _slices})}\n")
+          print(f"pool_size={n} ns={ns} slices={len(_slices)} day={day}")
+          EOF
+
+  brush:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      NS: ${{ needs.plan.outputs.ns }}
+      SLICE: ${{ matrix.slice }}
+      NB_PASS: ${{ secrets.NB_PASS }}
+      # 2026-10-22：/api/assign 只认，独立口令（回明文 CK 的接口不能用群口令）
+      ASSIGN_PASS: ${{ secrets.ASSIGN_PASS }}
+      # 2026-10-22：账号与「今天听哪几首」改为由 worker 从 D1 统一分配（每日轮转，零遗漏）。
+      # 置 0 即整体回退到旧的 Secrets 分片逻辑，无需改代码。
+      ASSIGN_ON: '1'
+      ASSIGN_DAY: ${{ needs.plan.outputs.day }}
+      # 跨群：只拉对端群的歌曲 id 列表，两个群的 KV 账号池/人数/上限仍然完全独立
+      PEER_WORKER_URL: 'https://dingzhi.xx1031.xyz'
+      # 跨群鉴权复用本群群口令 NB_PASS（对端 KV 的 PEER_PASS 存的是本群口令，无需新建 Secret）
+      # 2026-10-22：make_accounts.py 改成先问 worker 的 /api/assign（D1 轮转）取日常/内容账号，
+      # 取不到才回退 Secrets 分片。这里显式给本群 worker 地址，避免默认值写错群。
+      WORKER_URL: 'https://xx1031.xyz'
+      # 2026-10-26：跨群对穿改用独立强口令 PEER_KEY（两群 KV 同一个值），删除账号上报改用 ADMIN_PASS。
+      # 两者都没配时 run.py 自动回退 NB_PASS（老布局兼容）；worker 侧同样是「配了新口令就只认新的」。
+      PEER_KEY: ${{ secrets.PEER_KEY }}
+      ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
+      ACCOUNT_PARALLEL: '6'   # 每个号一个线程并行播放（单号大部分时间在等播放时长，不占 CPU）
+      # 2026-11-01：不再固定 12 片。manifest 最多 40 片，worker 写了几片这里就透出几片；
+      # 不存在的 secret 在 Actions 里会解析成空串，读取端自动跳过，无需改这里。
+      NB_POOL_1: ${{ secrets.NB_POOL_1 }}
+      NB_POOL_2: ${{ secrets.NB_POOL_2 }}
+      NB_POOL_3: ${{ secrets.NB_POOL_3 }}
+      NB_POOL_4: ${{ secrets.NB_POOL_4 }}
+      NB_POOL_5: ${{ secrets.NB_POOL_5 }}
+      NB_POOL_6: ${{ secrets.NB_POOL_6 }}
+      NB_POOL_7: ${{ secrets.NB_POOL_7 }}
+      NB_POOL_8: ${{ secrets.NB_POOL_8 }}
+      NB_POOL_9: ${{ secrets.NB_POOL_9 }}
+      NB_POOL_10: ${{ secrets.NB_POOL_10 }}
+      NB_POOL_11: ${{ secrets.NB_POOL_11 }}
+      NB_POOL_12: ${{ secrets.NB_POOL_12 }}
+      NB_POOL_13: ${{ secrets.NB_POOL_13 }}
+      NB_POOL_14: ${{ secrets.NB_POOL_14 }}
+      NB_POOL_15: ${{ secrets.NB_POOL_15 }}
+      NB_POOL_16: ${{ secrets.NB_POOL_16 }}
+      NB_POOL_17: ${{ secrets.NB_POOL_17 }}
+      NB_POOL_18: ${{ secrets.NB_POOL_18 }}
+      NB_POOL_19: ${{ secrets.NB_POOL_19 }}
+      NB_POOL_20: ${{ secrets.NB_POOL_20 }}
+      NB_POOL_21: ${{ secrets.NB_POOL_21 }}
+      NB_POOL_22: ${{ secrets.NB_POOL_22 }}
+      NB_POOL_23: ${{ secrets.NB_POOL_23 }}
+      NB_POOL_24: ${{ secrets.NB_POOL_24 }}
+      NB_POOL_25: ${{ secrets.NB_POOL_25 }}
+      NB_POOL_26: ${{ secrets.NB_POOL_26 }}
+      NB_POOL_27: ${{ secrets.NB_POOL_27 }}
+      NB_POOL_28: ${{ secrets.NB_POOL_28 }}
+      NB_POOL_29: ${{ secrets.NB_POOL_29 }}
+      NB_POOL_30: ${{ secrets.NB_POOL_30 }}
+      NB_POOL_31: ${{ secrets.NB_POOL_31 }}
+      NB_POOL_32: ${{ secrets.NB_POOL_32 }}
+      NB_POOL_33: ${{ secrets.NB_POOL_33 }}
+      NB_POOL_34: ${{ secrets.NB_POOL_34 }}
+      NB_POOL_35: ${{ secrets.NB_POOL_35 }}
+      NB_POOL_36: ${{ secrets.NB_POOL_36 }}
+      NB_POOL_37: ${{ secrets.NB_POOL_37 }}
+      NB_POOL_38: ${{ secrets.NB_POOL_38 }}
+      NB_POOL_39: ${{ secrets.NB_POOL_39 }}
+      NB_POOL_40: ${{ secrets.NB_POOL_40 }}
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+      EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -q pycryptodome requests pillow
+      - name: install CJK fonts (notes.py 笔记图片中文字体，2026-10-13 修复：runner 无中文字体时图片文字全是方块)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y fonts-arphic-uming fonts-noto-cjk
+      - name: stagger start
+        run: sleep $((RANDOM % 240 + 60))   # 错开各片启动，避免同刻批量特征
+      - name: run slice
+        run: python run.py
+      # 2026-10-22：日常/内容/取号三步一律 continue-on-error。
+      # 原因：guard.yml 的 rerun-failed-jobs 重跑的是「整个 job」，而 job 内是
+      # run.py → make_accounts → signin → notes 串行。日常被风控拦一次（很常见）就会
+      # 把这 6 个号的播放整片重跑一遍，当天播放翻倍，还沿用昨天的 ASSIGN_DAY 窗口。
+      # 播放本身的失败由 run.py 自己的退出码负责（见 run.py 第 7 步）。
+      - name: build accounts for signin/notes
+        id: mkacc
+        continue-on-error: true
+        run: python make_accounts.py
+      - name: daily signin
+        id: signin
+        continue-on-error: true
+        run: |
+          N=$(python -c "import json;print(len(json.load(open('accounts.json'))['accounts']))")
+          if [ "$N" -gt 0 ]; then python signin.py; else echo "本片无账号，跳过签到"; fi
+      - name: notes publish (per-account every 6 days)
+        id: notes
+        continue-on-error: true
+        run: |
+          N=$(python -c "import json;print(len(json.load(open('accounts.json'))['accounts']))")
+          if [ "$N" -gt 0 ]; then python notes.py; else echo "本片无账号，跳过笔记"; fi
+      - name: mark signin/notes failures (不重跑本片)
+        if: always()
+        env:
+          MKACC_OUTCOME: ${{ steps.mkacc.outcome }}
+          SIGNIN_OUTCOME: ${{ steps.signin.outcome }}
+          NOTES_OUTCOME: ${{ steps.notes.outcome }}
+        run: |
+          echo "取号=$MKACC_OUTCOME 签到=$SIGNIN_OUTCOME 笔记=$NOTES_OUTCOME"
+          if [ "$MKACC_OUTCOME" != "success" ] || [ "$SIGNIN_OUTCOME" != "success" ] || [ "$NOTES_OUTCOME" != "success" ]; then
+            echo "::error::本片签到/笔记/取号未全部成功（播放已完成，故意不让 job 失败，避免 guard 整片重播）"
+          fi
+      - name: upload diag
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-slice-${{ matrix.slice }}
+          path: diag_logs/
+          if-no-files-found: ignore

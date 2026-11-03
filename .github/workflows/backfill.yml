@@ -1,0 +1,258 @@
+name: relay-backfill
+
+# 2026-11-02 新增：下班后补跑。
+#
+# 为什么需要它（11-02 实锤）：guard.yml 在北京 07:30 检查，而 relay 是北京 02:58 创建、
+# 约 10:56 结束 —— 也就是说 guard 检查的那一刻「下一轮永远已经在跑」，它直接判「无需动作」，
+# 「上一轮 failure → rerun-failed-jobs」这条分支实践中几乎从不触发。
+# 11-02 主群 brush(55) 被托管 runner 杀掉后没有任何自动补偿，那片 5 个号当天永久缺播。
+#
+# 本工作流放在北京 14:30（UTC 06:30）：此时当天的 relay 已结束、下一轮（22:23 之后）还没创建，
+# 窗口内最后一条就是「今天这一轮」，failure 就精确补那几片。
+#
+# 补跑方式**不用** rerun-failed-jobs，改成 workflow_dispatch + only_slices/ns_override/day_override：
+#   1) rerun 跑的是「失败那一刻的旧 commit」，拿不到新代码（例如断点续跑这类修复）；
+#   2) rerun 单个 job 拿不到 plan 的输出，NS / ASSIGN_DAY 全空 → 按执行当天重算，
+#      片号（sliceBucket 按 ns 取模）和日期锚点都会错位，等于播另一批不相干的号。
+# 这里的 ns 从失败那轮的 plan job 日志解析（pool_size=529 ns=89），day 由 run 的 created_at
+# 换算成北京日期，两者与失败那轮逐字一致；新 run 还会带上 run.py 的断点续跑，已播完的号不会双播。
+
+on:
+  # 主路径（2026-11-02 新增）：relay 那个 run 一结束，GitHub 立刻叫醒本工作流。
+  # 为什么必须要它：本仓库实测 cron 延迟 1~5 小时（guard 计划 23:30Z 实际 02:20~02:49Z，
+  # relay 计划 14:23Z 实际 17:28~19:58Z）。只靠定时，失败片要等 3~5 小时才有人补，
+  # 补完早过 11:40 的采集门闩，那片号的增长就串到第二天去了。
+  # workflow_run 不走 cron 队列，relay 一 conclusion 就触发，延迟几秒。
+  workflow_run:
+    workflows: ["relay"]
+    types: [completed]
+  # 兜底：cron。管两种情况 —— GitHub 没触发 workflow_run；以及补跑轮本身又挂了（见脚本里的 self-loop 判断）。
+  schedule:
+    - cron: '30 6 * * *'     # UTC 06:30 ≈ 北京 14:30（实测会延迟到北京 17:30~20:00）
+  # 手动入口：
+  #   run_id   留空=自动取窗口内最近一条；填了就补那一轮（比如想追补前几天的某一轮）
+  #   dry_run  1=只打印「将要补哪些片、用哪个 ns/day」，不真的 dispatch（拿别人家的失败轮练手用）
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: '指定 relay run id（留空=窗口内最近一条）'
+        required: false
+        default: ''
+      dry_run:
+        description: '填 1 只预演不补跑'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: relay-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: check & backfill failed slices
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_RUN_ID: ${{ github.event.inputs.run_id }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          # workflow_run 触发时带过来的「刚结束的那一轮」；cron / 手动触发时三个都是空串。
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          TRIGGER_CONCL: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, re, urllib.error, urllib.request
+          from datetime import datetime, timezone, timedelta
+
+          TOK = os.environ["GH_TOKEN"]
+          REPO = os.environ["GITHUB_REPOSITORY"]
+          H = {"Authorization": "Bearer " + TOK,
+               "Accept": "application/vnd.github+json",
+               "User-Agent": "relay-backfill"}
+
+          # 只给 cron 兜底路径用（workflow_run 路径不查窗口）。
+          # 两边都会延迟：relay 计划 14:23Z，实测 17:28~19:58Z 才创建（延迟 3~5.5h）；
+          # cron 计划 06:30Z，同样实测会延迟（本仓库 guard/relay 都晚 3h 以上）。
+          # 最坏：06:30 迟到 5.5h = 12:00Z 才跑，窗口起点退到前一天 12:00Z，
+          # 而 relay 最早也在前一天 17:28Z 创建 —— 20h 只剩 1.5h 余量，太紧，改 24h。
+          WINDOW_HOURS = 24
+
+          FORCE_RUN = (os.environ.get("FORCE_RUN_ID") or "").strip()
+          DRY = (os.environ.get("DRY_RUN") or "").strip() in ("1", "true", "True")
+          # workflow_run 触发时这三项有值（刚结束那一轮的 id/来源事件/结论）；
+          # cron 与手动触发时一律是空串，走下面的窗口逻辑。
+          TRIG = (os.environ.get("TRIGGER_RUN_ID") or "").strip()
+          TRIG_EVENT = (os.environ.get("TRIGGER_EVENT") or "").strip()
+          TRIG_CONCL = (os.environ.get("TRIGGER_CONCL") or "").strip()
+
+          def get(url):
+              return json.load(urllib.request.urlopen(urllib.request.Request(url, headers=H), timeout=30))
+
+          class _NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          _no_redirect = urllib.request.build_opener(_NoRedirect)
+
+          def get_raw(url):
+              # job logs 接口不是直接回内容：先 302 到 Azure Blob 的签名 URL。
+              # 跟着 302 走的话 urllib 会把 Authorization 头一起带到 Azure，那边直接回
+              # 401 Server failed to authenticate（11-02 实测）。所以手动处理：
+              # 带 token 拿 Location → 不带任何认证头去下载 → 若是 zip 就解开。
+              loc = None
+              try:
+                  _no_redirect.open(urllib.request.Request(url, headers=H), timeout=60)
+              except urllib.error.HTTPError as e:
+                  loc = e.headers.get("Location")
+              except Exception:
+                  return b""
+              if not loc:
+                  return b""
+              try:
+                  raw = urllib.request.urlopen(
+                      urllib.request.Request(loc, headers={"User-Agent": "relay-backfill"}),
+                      timeout=60).read()
+              except Exception:
+                  return b""
+              if raw[:2] == b"PK":
+                  try:
+                      import io, zipfile
+                      z = zipfile.ZipFile(io.BytesIO(raw))
+                      raw = b" ".join(z.read(n) for n in z.namelist())
+                  except Exception:
+                      return b""
+              return raw
+
+          def post(url, payload=None):
+              req = urllib.request.Request(url, data=json.dumps(payload or {}).encode(),
+                                           headers={**H, "Content-Type": "application/json"},
+                                           method="POST")
+              return urllib.request.urlopen(req, timeout=30).status
+
+          def act(url, payload=None, what=""):
+              """所有会改变远端状态的动作都从这里走：dry_run 时只打印，绝不真发。
+              11-02 的教训：dry_run 只挡住了最后一步 dispatch，rerun 回退分支却漏了，
+              拿历史失败轮试跑时真的触发了一次 rerun（已及时取消）。"""
+              if DRY:
+                  print("::notice::dry_run=1，跳过动作 " + what + "：" + json.dumps(payload or {}, ensure_ascii=False))
+                  return 0
+              return post(url, payload)
+
+          def parse_ts(s):
+              return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+          now = datetime.now(timezone.utc)
+          window_start = now - timedelta(hours=WINDOW_HOURS)
+          if FORCE_RUN.isdigit():
+              latest = get(f"https://api.github.com/repos/{REPO}/actions/runs/{int(FORCE_RUN)}")
+              created = parse_ts(latest["created_at"])
+              print(f"手动指定 run {FORCE_RUN}（不受 {WINDOW_HOURS}h 窗口限制）")
+          elif TRIG.isdigit():
+              # workflow_run 触发：触发我们的就是「刚结束的那一轮」，直接用它。
+              # 不查窗口（0 延迟，不存在窗口漏掉的问题），也不会像窗口逻辑那样挑错轮。
+              if TRIG_EVENT == "workflow_dispatch":
+                  # 我们派出的补跑轮本身也是 relay run，跑完同样会触发这里。
+                  # 若它失败了还自动补，就会无限自我重启（GitHub 也不会拦），所以只留定时兜底。
+                  print("触发源是本工作流派出的补跑轮（event=workflow_dispatch），"
+                        "为避免 self-loop 不再自动重试；交给 14:30 的定时检查兜底。")
+                  raise SystemExit(0)
+              latest = get(f"https://api.github.com/repos/{REPO}/actions/runs/{int(TRIG)}")
+              created = parse_ts(latest["created_at"])
+              print(f"workflow_run 触发：run {TRIG}"
+                    f"（来源 event={TRIG_EVENT} conclusion={TRIG_CONCL}）")
+          else:
+              d = get(f"https://api.github.com/repos/{REPO}/actions/runs?per_page=30")
+              recent = []
+              for r in d.get("workflow_runs", []):
+                  if r.get("path") != ".github/workflows/run.yml":
+                      continue
+                  try:
+                      created = parse_ts(r.get("created_at", ""))
+                  except Exception:
+                      continue
+                  if created >= window_start:
+                      recent.append((created, r))
+              recent.sort(key=lambda x: x[0])
+              if not recent:
+                  print(f"窗口 {WINDOW_HOURS}h 内无 relay 记录，交给 guard 处理（整班补发是它的职责）")
+                  raise SystemExit(0)
+              created, latest = recent[-1]
+          run_id = latest["id"]
+          print(f"最近一条 relay run {run_id} created={latest['created_at']} "
+                f"status={latest.get('status')} conclusion={latest.get('conclusion')}")
+
+          if latest.get("status") in ("queued", "in_progress", "waiting", "pending"):
+              print("最近 relay 仍在运行，本轮不补（它自己跑完再看下一轮检查）")
+              raise SystemExit(0)
+          if latest.get("conclusion") == "success":
+              print("最近 relay 全部成功，无需补跑")
+              raise SystemExit(0)
+
+          # ---- 1) 找出失败的分片 ----
+          jobs = []
+          page = 1
+          while True:
+              # filter=all 必须带：默认只回「最新一次 attempt」的 job，一个 run 被 rerun 过之后
+              # （哪怕第二次 attempt 立刻被取消、一个 job 都没建）就会返回空列表，
+              # 于是「失败分片」判定成 0 个 —— 11-02 用被取消的 41339305339 自测时正是踩到这个。
+              j = get(f"https://api.github.com/repos/{REPO}/actions/runs/{run_id}/jobs?per_page=100&filter=all&page={page}")
+              batch = j.get("jobs", [])
+              jobs += batch
+              if len(batch) < 100:
+                  break
+              page += 1
+          failed = [x for x in jobs
+                    if x.get("conclusion") not in ("success", "skipped", "neutral", None)]
+          bad_slices = []
+          for x in failed:
+              m = re.match(r"^brush \((\d+)\)$", x.get("name") or "")
+              if m:
+                  bad_slices.append(int(m.group(1)))
+          bad_slices = sorted(set(bad_slices))
+          other = [x.get("name") for x in failed
+                   if not re.match(r"^brush \((\d+)\)$", x.get("name") or "")]
+          print(f"失败 job {len(failed)} 个：分片 {bad_slices}；非分片 {other}")
+          if not bad_slices:
+              print("没有失败的 brush 分片，无需补跑（非分片失败不影响播放）")
+              raise SystemExit(0)
+
+          # ---- 2) 取那一轮的 ns（必须逐字一致，否则 sliceBucket(uid,ns) 全变）----
+          ns = None
+          for x in jobs:
+              if x.get("name") == "plan":
+                  raw = get_raw(f"https://api.github.com/repos/{REPO}/actions/jobs/{x['id']}/logs")
+                  m = re.search(rb"pool_size=(\d+) ns=(\d+)", raw)
+                  if m:
+                      ns = int(m.group(2))
+                      print(f"从 plan 日志解析到 ns={ns}（pool_size={int(m.group(1))}）")
+                  break
+          if not ns:
+              # 以前这里会退回 rerun-failed-jobs。实测那样没用还可能更糟：
+              # rerun 走失败当时的旧 commit，且单 job 拿不到 plan 输出 → NS 为空（run.py 取 1）、
+              # sliceBucket(uid,1)=0 而 SLICE=55 → 一个号都分不到，run 却可能显示 success，把缺口盖住。
+              # 宁可明确告警留给人处理，也不要用错误的 ns 去播「另一批号」。
+              print("::warning::拿不到失败那轮的 ns（plan 日志不可得），本次不补跑。"
+                    "可先手动执行本工作流并把 run_id 填成 " + str(run_id) + " 重试，"
+                    "或确认后手工指定 only_slices / ns_override / day_override 触发 relay。")
+              raise SystemExit(0)
+
+          # ---- 3) 换算那一轮的日期锚点（北京日期 = created_at + 8h 的日期）----
+          day = (created + timedelta(hours=8)).date().isoformat()
+          print(f"补跑锚点 day={day} ns={ns} slices={bad_slices}")
+
+          # ---- 4) dispatch 一段新 run，只跑这几片（最新代码 + 断点续跑）----
+          payload = {"ref": "main", "inputs": {
+              "only_slices": ",".join(str(x) for x in bad_slices),
+              "ns_override": str(ns),
+              "day_override": day,
+          }}
+          print("dispatch HTTP", act(
+              f"https://api.github.com/repos/{REPO}/actions/workflows/run.yml/dispatches",
+              payload, "dispatch 补跑 run"))
+          EOF

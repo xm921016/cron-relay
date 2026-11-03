@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cron-relay",
+  "main": "worker/worker.js",
+  "compatibility_date": "2026-10-01",
+  // 2026-10-29：workers.dev 早已废弃（对外只认自定义域名），显式关掉避免误部署出一条
+  // workers.dev 域名，也避免 wrangler 在自定义域之外再挂一个入口。
+  "workers_dev": false,
+  "observability": {
+    "enabled": true
+  },
+  "kv_namespaces": [
+    {
+      "binding": "POOL",
+      "id": "12aac9fba6a04b8fb19ee88ffac7fc7a"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "netpool",
+      "database_id": "54f742fc-5f56-4723-a7a0-a832953d38c7"
+    }
+  ],
+  "vars": {
+    "GH_OWNER": "xm921016",
+    "GH_REPO": "cron-relay"
+  }
+}

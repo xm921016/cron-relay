@@ -1,0 +1,23 @@
+# 本地/敏感
+*.local
+.env
+.env.*
+secrets.*
+*.log
+diag_logs/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 凭证文件（含 Cloudflare/GitHub token，绝不进仓库）
+*令牌*.txt
+cloudflare-*.txt
+token*.txt
+*.token
+*口令*.txt
+
+# 本地管理员工具（含 CF 账号 / KV 命名空间 / 域名，纯本地使用，不入库）
+号池管理*
+
+# 分配结果缓存（含明文 CK，只在 runner 临时目录里存活，绝不入库）
+assign_cache.json
