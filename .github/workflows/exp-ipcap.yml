@@ -1,0 +1,68 @@
+name: exp-ipcap
+
+# 一次性实验（2026-11-04）：同一出口 IP 上的「同 IP 号数 → 计入率」曲线。
+# 一个 job = 一台 GitHub runner = 一个出口 IP；job 内 N 个号各串行播同一批 5 首歌。
+# 次日读 rpc30 涨幅差分，即得该臂的有效剂量。
+# ⚠ 实验读数完成后请删除本文件与 exp_ipcap.py。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ns:
+        description: '总片数（97 = 582 号 / ACCOUNTS_PER_SLICE 6）'
+        required: false
+        default: '97'
+
+concurrency:
+  group: exp-ipcap
+  cancel-in-progress: false
+
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: A6
+            n: 6
+            lo: 0
+            hi: 1
+            songs: '3323767531:149:580232405,3335157086:206:1291351619,3392635105:120:1528507619,2744767668:148:3870134977,2747972725:100:591607592'
+          - arm: B12
+            n: 12
+            lo: 2
+            hi: 4
+            songs: '3346774189:209:5053140767,2144767202:203:1412256361,3418669470:232:12136513231,2137195680:229:1574372494,2122020189:229:2107061093'
+          - arm: C24
+            n: 24
+            lo: 5
+            hi: 9
+            songs: '2746840136:120:1641345990,3450884143:242:418997869,3450939482:199:8617164363,3367543315:118:1747286417,3389086671:120:1801622598'
+          - arm: D48
+            n: 48
+            lo: 10
+            hi: 18
+            songs: '2054771728:122:2094226757,3377496033:166:1540066596,2155071879:199:338576899,3318808282:119:79362221,3332789788:197:2140879551'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: deps
+        run: pip install -q pycryptodome requests pillow
+
+      - name: arm ${{ matrix.arm }}
+        env:
+          WORKER_URL: 'https://xx1031.xyz'
+          ASSIGN_PASS: ${{ secrets.ASSIGN_PASS }}
+          EXP_ARM: ${{ matrix.arm }}
+          EXP_N: ${{ matrix.n }}
+          EXP_JOB_LO: ${{ matrix.lo }}
+          EXP_JOB_HI: ${{ matrix.hi }}
+          EXP_NS: ${{ github.event.inputs.ns }}
+          EXP_SONGS: ${{ matrix.songs }}
+        run: python exp_ipcap.py
