@@ -100,6 +100,9 @@ def dump_schema():
 
 
 def dump_accounts():
+    # OFFSET 分页在这里仍然安全：号池 660~1200 行，最大 OFFSET 不过 1000，
+    # 远离 D1 那条 5800 的暗线（见 dump_snapshots 的注释）。号池若涨到 5000+
+    # 必须一并改成游标分页。
     rows = []
     off = 0
     while True:
@@ -113,17 +116,36 @@ def dump_accounts():
 
 
 def dump_snapshots():
+    """按 (day,pool,uid) 游标翻页 —— 不要用 OFFSET。
+
+    2026-11-04 踩的坑：D1 的 HTTP 接口在 **OFFSET ≥ 5800** 时直接返回
+    HTTP 500 {"code":7500,"internal error"}（reference e_vBhBOP_*），
+    同样的 SQL 换个 OFFSET 就正常 —— 既不是网络问题，也不是库坏了。
+    当天 relay 跑完快照 6119 行，翻页到 OFFSET 5800 正好踩雷，导出连续
+    两次全挂（先误判成 Cloudflare 故障，本地复现才定位）。
+    游标翻页没有这个上限，且不用让数据库扫过前面所有行。
+    """
     since = (datetime.date.today() - datetime.timedelta(days=SNAP_DAYS)).isoformat()
+    cols = "day,pool,uid,name,rate,rpc30,missions,dur,at,cnt"
     rows = []
-    off = 0
+    last = None
     while True:
-        part = api("SELECT day,pool,uid,name,rate,rpc30,missions,dur,at,cnt "
-                   "FROM snapshots WHERE day >= ? ORDER BY day, pool, uid LIMIT ? OFFSET ?",
-                   [since, PAGE, off])
+        if last is None:
+            part = api(f"SELECT {cols} FROM snapshots WHERE day >= ? "
+                       "ORDER BY day, pool, uid LIMIT ?", [since, PAGE])
+        else:
+            part = api(f"SELECT {cols} FROM snapshots WHERE day >= ? "
+                       "AND (day, pool, uid) > (?, ?, ?) "
+                       "ORDER BY day, pool, uid LIMIT ?",
+                       [since, last[0], last[1], last[2], PAGE])
         rows.extend(part)
         if len(part) < PAGE:
             break
-        off += PAGE
+        nxt = (part[-1]["day"], part[-1]["pool"], part[-1]["uid"])
+        if nxt == last:          # 理论上不会发生；真卡住就退出，别死循环
+            print("::warning::快照游标没有前进（%s），提前结束翻页" % (nxt,))
+            break
+        last = nxt
     return rows
 
 
