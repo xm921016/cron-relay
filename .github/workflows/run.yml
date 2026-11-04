@@ -197,6 +197,8 @@ jobs:
           ns = max(lo, min(hi, math.ceil(n / per) if n else lo))
           # 2026-11-02：定向补跑。ns 必须和失败那一轮完全一致 ——
           # sliceBucket(uid, ns) 是按 ns 取模的，ns 一变，「只补 55 片」就变成播另一批不相干的号。
+          # 2026-11-04：分片键叠了日期盐（plan.day），所以 day 也必须一致，
+          # 补跑失败那一轮时务必同时给 DAY_OVERRIDE=那一轮的日期，否则同样会补错一批号。
           _nsov = (os.environ.get("NS_OVERRIDE") or "").strip()
           if _nsov.isdigit() and int(_nsov) > 0:
               ns = int(_nsov)
