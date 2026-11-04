@@ -362,6 +362,19 @@ if __name__ == "__main__":
                 "python lanzou_push.py --test-alert\n"
                 "它能送到，说明真出问题时你也会收到同样的一封。"))
         raise SystemExit(0 if ok else 1)
+    if "--alert-failure" in sys.argv:
+        # 由 d1-daily.yml 的 if: failure() 步骤调用：导出/推私库那几步挂了，
+        # 蓝奏云这步根本没文件可传，但「今天没备份」比「蓝奏云没存上」更要紧。
+        os.environ.setdefault("ALERT_TAG", "")
+        step = (os.environ.get("FAILED_STEP") or "导出 D1 或分发私库").strip()
+        ok = send_alert(
+            "[告警] D1 每日备份整体失败 —— 今天没有新增备份",
+            alert_body(
+                "d1-daily 这个 job 红了，失败发生在：「%s」之前的步骤。" % step,
+                "蓝奏云那一步因此没有文件可传（脚本会打印「没有 .enc，跳过」并算成功，"
+                "别被绿色误导）。\n"
+                "先看 Actions 日志定位是 Cloudflare 接口报错、还是 5 个私库的 token 失效。"))
+        raise SystemExit(0 if ok else 1)
     try:
         raise SystemExit(main())
     except SystemExit:

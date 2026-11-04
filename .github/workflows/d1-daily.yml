@@ -113,3 +113,16 @@ jobs:
           path: backup_daily/*.enc
           retention-days: 30
           if-no-files-found: warn
+
+      # 2026-11-04 新增：整条备份链挂了也要发邮件。
+      # 起因：导出 D1 那步因 D1 OFFSET 上限报 500，后面蓝奏云步骤「没文件→跳过」
+      # 反而显示绿色，整个 run 红了但没有任何主动通知 —— 备份断了没人知道。
+      - name: 备份失败告警（邮件）
+        if: failure()
+        continue-on-error: true
+        env:
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+          FAILED_STEP: '推送蓝奏云'
+        run: python3 lanzou_push.py --alert-failure
