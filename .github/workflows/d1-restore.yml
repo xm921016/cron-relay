@@ -2,7 +2,9 @@ name: d1-restore
 
 # D1 账号池手动恢复（危险操作，只手动触发，默认 dry-run）
 # 用法：Actions → d1-restore → Run workflow
-#   file:   备份文件名，例如 d1-2026-10-26.json.gz.enc（在仓库 backup/ 目录里）
+#   file:   备份文件名，例如 d1-2026-11-04.json.gz.enc
+#           文件会自动从 5 个账号的 private vault 仓取回（见 d1_vault_pull.py），
+#           不需要手工上传；若本地 backup/ 下已有同名文件则直接用本地的。
 #   tables: 要恢复哪些表，默认 accounts（与旧行为一致）
 #           all = schema + accounts + snapshots + kv_misc + dead_log（灾难重建用）
 #           也可写 accounts,snapshots,kv_misc,dead_log,schema 精确指定
@@ -15,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       file:
-        description: 'backup/ 下的备份文件名'
+        description: '备份文件名（如 d1-2026-11-04.json.gz.enc）'
         required: true
       tables:
         description: '恢复范围：accounts（默认）/ all / 逗号分隔表名'
@@ -34,6 +36,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: 取回备份文件
+        env:
+          VAULT_TOKENS: ${{ secrets.VAULT_TOKENS }}
+          FILE: ${{ inputs.file }}
+        run: |
+          set -e
+          mkdir -p backup
+          if [ -f "backup/$FILE" ]; then
+            echo "本地已有 backup/$FILE，直接使用"
+          else
+            python3 d1_vault_pull.py "$FILE" --out backup
+          fi
+          ls -lh "backup/$FILE"
 
       - name: 恢复
         env:

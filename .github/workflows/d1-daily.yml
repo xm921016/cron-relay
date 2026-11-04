@@ -1,0 +1,70 @@
+name: d1-daily-vault
+
+# D1 号池每日备份 → 分发到 5 个账号的私库（2026-11-04 新增）
+#
+# 取代了什么：
+#   · 原 d1-backup.yml（每周写 backup/*.enc 进 public 仓）已删除 —— 它从未成功跑过，
+#     且 public 仓放加密备份 = 口令是唯一边界，收益不值得。
+#   · 原「每月本机镜像」已取消 —— 依赖人手，实测停在 11-02 就断了。
+#
+# 现在只有一条链路：每日导出 D1 → 加密 → 推到 5 个账号各自的 private vault 仓，
+# 每仓滚动保留 30 份。任一账号存活即可取回全量号池。
+#
+# 触发方式（两个都留着，互为兜底）：
+#   1) workflow_run：relay 跑完立刻备份。relay 单轮 8 小时且结束时间随 schedule 延迟漂移，
+#      挂 schedule 根本对不上；挂在 relay 的 completed 上，无论 relay 成功/失败都会跑，
+#      而且拿到的一定是「当天删完号之后」的最新状态。
+#   2) schedule 11:40 UTC = 北京 19:40：万一 relay 整轮被 GitHub 跳过（低频 schedule 会
+#      整次不执行），这里还能补一份。同名文件自动覆盖，跑两次不会产生重复。
+#
+# ⚠ 与 relay 的 plan 阶段那份 d1-prebackup-* artifact 的关系：
+#   那份是「本轮删号/发邮件之前」的回滚点，价值独立，保留不动。
+#   这里这份是「跑完之后」的归档，两者互补。
+
+on:
+  workflow_run:
+    workflows: ["relay"]
+    types: [completed]
+  schedule:
+    - cron: '40 11 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: d1-daily-vault
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 导出 D1 并加密
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          BACKUP_PASS: ${{ secrets.BACKUP_PASS }}
+          BACKUP_DIR: backup_daily
+        run: |
+          python3 d1_backup.py
+          ls -lh backup_daily/
+
+      - name: 分发到 5 个账号的私库（各留 30 份）
+        env:
+          BACKUP_DIR: backup_daily
+          VAULT_TOKENS: ${{ secrets.VAULT_TOKENS }}
+          VAULT_KEEP: '30'
+        run: python3 d1_vault_push.py
+
+      - name: 顺手留一份 artifact（下载方便，但依附本账号，不算冗余）
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: d1-daily-${{ github.run_id }}
+          path: backup_daily/*.enc
+          retention-days: 30
+          if-no-files-found: warn

@@ -42,8 +42,11 @@ ACC = os.environ.get("CF_ACCOUNT_ID", "").strip() or "c60450bfb7f2c2becfd744ba25
 D1_UUID = (os.environ.get("D1_UUID", "").strip() or "54f742fc-5f56-4723-a7a0-a832953d38c7")
 TOK = (os.environ.get("CF_TOKEN", "") or "").strip()
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36"
+# 2026-11-04：与 d1_backup.py 同步补齐 suspect_at / pub / relogin_at，
+# 否则新备份里的这三列永远灌不回去（upsert 只写 COLS 里的列）。
 COLS = ["pool", "uid", "name", "song", "ck", "added", "exp", "no_listen",
-        "email", "updated_at", "note", "agent", "plan"]
+        "email", "updated_at", "note", "suspect_at", "agent", "plan",
+        "pub", "relogin_at"]
 BATCH = 7   # 上限值：7 行 × 13 列 = 91 个绑定参数，低于 D1 单查询 100 参数上限
             # 实际每批行数按「列数」重算（见 restore_table），备份列少时可以更宽
 

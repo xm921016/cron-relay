@@ -51,8 +51,12 @@ except ValueError:
 
 # 账号池全字段（含 ck，恢复时必需）
 # 2026-10-27：加 agent / plan（客服 + 套餐）。少备这两列的话，恢复一次客服归属就全没了。
+# 2026-11-04：补齐 suspect_at / pub / relogin_at。
+# 漏 pub 的后果最严重：恢复后公益号（pub=1）会变回正常号，去签到、发笔记、进互听环；
+# 漏 suspect_at 会让「判死加固」的存疑标记全丢；漏 relogin_at 会让复登闭环的名单归零。
 COLS = ["pool", "uid", "name", "song", "ck", "added", "exp", "no_listen",
-        "email", "updated_at", "note", "agent", "plan"]
+        "email", "updated_at", "note", "suspect_at", "agent", "plan",
+        "pub", "relogin_at"]
 PAGE = 200          # 单次查询行数，避免 D1 HTTP 响应过大被截断
 SNAP_DAYS = 60      # 快照只备最近 60 天（控制台最多回看 90 天，够用）
 
