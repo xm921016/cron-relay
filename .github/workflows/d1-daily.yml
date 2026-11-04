@@ -27,7 +27,12 @@ on:
     types: [completed]
   schedule:
     - cron: '40 11 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      test_alert:
+        description: '只测告警邮件（不发备份、不上传蓝奏云）'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,7 +42,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 演练：验证「蓝奏云 Cookie 过期时能不能收到告警邮件」。
+  # 邮件通道一年触发不了几次，不演练的话真出事那天才发现发信凭据也废了。
+  alert-test:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_alert }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 发一封演练告警
+        env:
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: python3 lanzou_push.py --test-alert
+
   backup:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.test_alert }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +88,8 @@ jobs:
       #
       # if: always() —— 前面推 5 私库若有账号失败，蓝奏云这份更应该照传；
       # continue-on-error —— 蓝奏云挂了（cookie 过期等）绝不能拖垮整条备份链。
+      # 2026-11-04 起：脚本自己在失败时发邮件（EMAIL_*/ALERT_TO），因为
+      # continue-on-error 会让步骤红而不报警，Cookie 过期就变成无声失守。
       - name: 推送蓝奏云「D1备份」（滚动 30 份）
         if: always()
         continue-on-error: true
@@ -77,6 +99,9 @@ jobs:
           LANZOU_FOLDER: ${{ secrets.LANZOU_FOLDER }}
           LANZOU_UID: ${{ secrets.LANZOU_UID }}
           LANZOU_KEEP: '30'
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
         run: python3 lanzou_push.py
 
       - name: 顺手留一份 artifact（下载方便，但依附本账号，不算冗余）
