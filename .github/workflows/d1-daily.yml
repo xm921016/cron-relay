@@ -59,6 +59,26 @@ jobs:
           VAULT_KEEP: '30'
         run: python3 d1_vault_push.py
 
+      # 2026-11-04 新增：蓝奏云「D1备份」文件夹（folder_id=14198686），滚动保留 30 份。
+      #
+      # 为什么是蓝奏云：5 个 GitHub 私库和 relay 在同一个平台上，该平台整体出问题时
+      # 备份跟着一起断。蓝奏云是第三条腿（异国、异供应商），只需要「能存」——
+      # 取回由人工在网页点下载（文件夹有密码，见 文档/D1备份-*）。
+      # 它的下载通道前置阿里云 WAF + 人机验证，脚本取不回来，这是已知且接受的取舍。
+      #
+      # if: always() —— 前面推 5 私库若有账号失败，蓝奏云这份更应该照传；
+      # continue-on-error —— 蓝奏云挂了（cookie 过期等）绝不能拖垮整条备份链。
+      - name: 推送蓝奏云「D1备份」（滚动 30 份）
+        if: always()
+        continue-on-error: true
+        env:
+          BACKUP_DIR: backup_daily
+          LANZOU_COOKIE: ${{ secrets.LANZOU_COOKIE }}
+          LANZOU_FOLDER: ${{ secrets.LANZOU_FOLDER }}
+          LANZOU_UID: ${{ secrets.LANZOU_UID }}
+          LANZOU_KEEP: '30'
+        run: python3 lanzou_push.py
+
       - name: 顺手留一份 artifact（下载方便，但依附本账号，不算冗余）
         if: always()
         continue-on-error: true
