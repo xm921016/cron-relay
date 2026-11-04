@@ -2087,7 +2087,11 @@ async function d1Upsert(e) {
     // 2026-10-27：agent/plan 用「新值非空才覆盖」——/api/d1_sync 之类从 KV 老数据回灌时，
     // KV 里没有这两列，无脑覆盖会把 505 个存量号的客服归属一次清空。
     'agent=CASE WHEN excluded.agent<>\'\' THEN excluded.agent ELSE accounts.agent END, ' +
-    'plan=CASE WHEN excluded.plan<>\'\' THEN excluded.plan ELSE accounts.plan END',
+    'plan=CASE WHEN excluded.plan<>\'\' THEN excluded.plan ELSE accounts.plan END, ' +
+    // 2026-11-04：号主重新登记（CK 真变了）→ 清掉「已通知重登」标记，下一轮自动回到听众环。
+    // 必须按 CK 变化判断而不是每次登记都清：/api/d1_sync 之类从 KV 老数据回灌时 CK 不变，
+    // 无脑清空会让刚通知过的号立刻又回到听众环、再失败一次、再发一封邮件。
+    'relogin_at=CASE WHEN accounts.ck<>excluded.ck THEN \'\' ELSE COALESCE(accounts.relogin_at,\'\') END',
     [POOL_NAME, uid, String(e.name || ''), String(e.song || ''), String(e.ck || ''), String(e.added || ''),
      String(e.exp || ''), e.noListen ? 1 : 0, String(e.email || ''), new Date().toISOString(),
      String(e.agent || ''), String(e.plan || ''), e.pub ? 1 : 0]
@@ -2356,6 +2360,9 @@ function planRow(r) {
     email: String(r.email || ''),
     hasCk: hasCk,
     no_listen: noListen,
+    // 2026-11-04：CK 已确认失效且已通知号主重登（report_dead 的 relogin 分支写的）。
+    // KV 兜底路径没有这一列 → undefined → false，行为与以前一致。
+    relogin: r.relogin_at ? 1 : 0,
     pub: pub,
     added: String(r.added || ''),
     exp: String(r.exp || ''),
@@ -2412,6 +2419,11 @@ function buildPlanFrom(rows, today) {
     const item = { pool: String(r.pool), uid, name: r.name || '', song: r.song || '',
                    ck: r.ck, email: r.email || '', pub: r.pub ? 1 : 0 };
     if (r.no_listen) { idle.push(item); continue; }
+    // 2026-11-04：CK 已确认失效、账号仍在（判死加固 B 保留的那批）→ 摘出听众环。
+    // 它留下来只会占一个「应跑」名额然后每天验活失败：coverage 天天缺这几个，页面上
+    // 又看不出原因。放进 idle 而不是直接丢：歌仍留在 songs 里（别人听它不受影响），
+    // 号也仍每轮验活；号主重新登记后 CK 变化会把 relogin_at 清空，下一轮自动回到听众环。
+    if (r.relogin) { idle.push(item); continue; }
     listeners.push(item);
   }
   const M = listeners.length, L = songs.length;
@@ -2451,7 +2463,7 @@ async function buildPlan(dayStr) {
   // 两群共用一个 D1：歌环与听众环都按「全池」计算，本 worker 只投递自己群的那批号。
   // 这样跨群互听继续有效（主群的号也会听到定制群的歌），且两边算出的计划完全一致。
   // 注意 SELECT 里那个 hasck：只回 0/1，用来判断「这条能不能播」，比把 ck 整列拉回来省 200 倍传输。
-  const rows = await d1All("SELECT pool,uid,name,song,no_listen,pub,added,exp,"
+  const rows = await d1All("SELECT pool,uid,name,song,no_listen,pub,added,exp,relogin_at,"
     + "(CASE WHEN ck IS NULL OR TRIM(ck)='' THEN 0 ELSE 1 END) AS hasck "
     + "FROM accounts ORDER BY pool, uid");
   if (rows) return buildPlanFrom(rows.map(planRow), today);
@@ -2883,10 +2895,15 @@ async function handle(request) {
       // 也就是说「确认」这一步从服务端的时间窗口挪到了客户端的重试，效果等价但不用等一天。
       // 不带 confirm 的旧客户端仍走原来的 suspect_at 双重确认，向后兼容。
       const forceConfirm = body.confirm === true;
-      const susRows = forceConfirm ? null
-        : await d1All('SELECT uid,suspect_at FROM accounts WHERE pool=?', [POOL_NAME]);
-      const susMap = {};
-      if (susRows) for (const r of susRows) susMap[String(r.uid)] = String(r.suspect_at || '');
+      // 2026-11-04：forceConfirm 也照常查一遍（多一次全池 SELECT，578 行 <1ms）。
+      // 原有「18~36 小时二次确认」口径不变；新增 relMap 用来判断这批号是否已通知过号主重登。
+      let susRows = null;
+      try { susRows = await d1All('SELECT uid,suspect_at,relogin_at FROM accounts WHERE pool=?', [POOL_NAME]); } catch (_e) { susRows = null; }
+      const susMap = {}, relMap = {};
+      if (susRows) for (const r of susRows) {
+        susMap[String(r.uid)] = String(r.suspect_at || '');
+        relMap[String(r.uid)] = String(r.relogin_at || '');
+      }
       const nowMs = Date.now();
       const suspects = [], confirmed = [];
       for (const e of deadEntries) {
@@ -2917,6 +2934,12 @@ async function handle(request) {
       // 无 uid 的历史条目无法用主页核验，维持原行为（照删）。
       let keptAlive = 0, keptUnknown = 0;
       const keptNames = [];
+      // 2026-11-04：判死加固 B 保留的号 = 「CK 确认失效、账号还在」。以前这条支路一发信
+      // 都没有 —— 发信只挂在 deleted 上，而它恰恰不删，于是号主永远不知道 CK 挂了，
+      // 号就一直躺在「待复核」里每天占应跑名额（11-04 定制群 7 个就是这么卡的）。
+      // 现在：relogin_at 为空（没通知过）就回给 run.py 去直邮，发信成功后回调
+      // /api/relogin_mailed 写 relogin_at —— 只发一封，不重复。
+      const reloginNotify = [];
       if (confirmed.length) {
         const aliveCk = ((master.find(e => e && e.ck && String(e.ck).length > 60
           && !deadSet.has(String(e.name)) && !deadSet.has(String(e.uid))) || {}).ck) || '';
@@ -2926,6 +2949,19 @@ async function handle(request) {
           if (st === false) continue;      // 网易确认账号已不存在 → 留在 confirmed，照常删
           if (st === true) keptAlive++; else keptUnknown++;
           keptNames.push(e.name || String(e.uid));
+          if (!relMap[String(e.uid)]) {
+            // 有邮箱 → 交给客户端直邮，发信成功才写 relogin_at（失败下一轮重试，不会漏）。
+            // 没邮箱 → 没人可通知，直接在这里写 relogin_at 把它摘出听众环，否则它会
+            // 永远占着应跑名额、每天验活失败、永远等不到人来处理。
+            if (String(e.email || '').trim()) {
+              reloginNotify.push(e.name || String(e.uid));
+            } else {
+              try {
+                await d1Run('UPDATE accounts SET relogin_at=? WHERE pool=? AND (name=? OR uid=?)',
+                            [stamp, POOL_NAME, String(e.name || ''), String(e.uid || '')]);
+              } catch (_e) {}
+            }
+          }
           if (e.uid) {
             try { await d1Run('UPDATE accounts SET suspect_at=? WHERE pool=? AND uid=?', [stamp, POOL_NAME, String(e.uid)]); } catch (_e) {}
           }
@@ -2984,11 +3020,35 @@ async function handle(request) {
       const failNote = delFail.length
         ? `；${delFail.length} 个 D1 删除失败（${delFail.map(e => e.name || e.uid).join('、')}）仍留在池内，未发信，下轮会重试`
         : '';
-      return json({ ok: true, deleted: deleted,
+      return json({ ok: true, deleted: deleted, relogin: reloginNotify,
         message: `本次确认清理 ${confirmed.length} 个${confirmed.length ? '（' + nm(confirmed) + '）' : ''}`
         + `，实际删除 ${reallyGone.length} 个${failNote}${keepNote}；`
         + `新增疑似 ${suspects.length} 个（需下一轮再次判死才删除${suspects.length ? '：' + nm(suspects) : ''}），`
         + `剩余 ${after.length} 个。` });
+    }
+    // ---- 2026-11-04：号主重登提醒的「已发信」回执（纯新增路由）----
+    // report_dead 把「CK 失效但账号还在」的号通过 relogin 字段回给 run.py，
+    // run.py 直邮成功后调本接口写 relogin_at。作用有二：
+    //   ① 之后不再重复发信，直到号主重新登记（d1Upsert 里 CK 变化会把它清空）；
+    //   ② buildPlanFrom 据此把这个号摘出听众环 —— 它已经听不了，不该再占应跑名额。
+    if (url.pathname === '/api/relogin_mailed' && request.method === 'POST') {
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
+      const c = await cfg();
+      if (!adminPassOk(c, body.pass)) return json({ message: '管理口令错误' }, 403);
+      if (!d1ok()) return json({ ok: false, message: 'D1 未绑定' }, 503);
+      const names = (Array.isArray(body.names) ? body.names : []).map(x => String(x)).filter(Boolean).slice(0, 100);
+      if (!names.length) return json({ ok: true, wrote: 0 });
+      const stamp = new Date().toISOString();
+      let wrote = 0;
+      for (const nm of names) {
+        try {
+          await d1Run('UPDATE accounts SET relogin_at=? WHERE pool=? AND (name=? OR uid=?)',
+                      [stamp, POOL_NAME, nm, nm]);
+          wrote++;
+        } catch (_e) {}
+      }
+      return json({ ok: true, wrote: wrote });
     }
     // ====================================================================
     // 手动删号的「通知号主」判定队列（2026-10-26 新增，纯新增路由）
@@ -3311,7 +3371,7 @@ async function handle(request) {
         buildPlan(date).catch(() => null),
         d1ok() ? d1All('SELECT pool,uid FROM runs WHERE day=?', [date]).catch(() => null) : Promise.resolve(null),
         d1ok() ? d1All('SELECT pool,uid,name,reason,at FROM dead_log ORDER BY at DESC LIMIT 12').catch(() => null) : Promise.resolve(null),
-        d1ok() ? d1All("SELECT pool,uid,name,suspect_at FROM accounts WHERE suspect_at!='' ORDER BY suspect_at DESC").catch(() => null) : Promise.resolve(null),
+        d1ok() ? d1All("SELECT pool,uid,name,suspect_at,relogin_at FROM accounts WHERE suspect_at!='' ORDER BY suspect_at DESC").catch(() => null) : Promise.resolve(null),
         d1ok() ? d1All('SELECT pool,MAX(at) AS last FROM snapshots WHERE day=? GROUP BY pool', [date]).catch(() => null) : Promise.resolve(null),
         fetchActionsStatus(),
         // 2026-10-23：最近 7 天快照，用于「连续不涨天数」。date-6 起（含当天）；
@@ -3409,8 +3469,11 @@ async function handle(request) {
       const dead = (deadRows || []).map(r => ({ pool: r.pool === 'dz' ? 'dz' : 'hz', uid: String(r.uid || ''),
                                                 name: r.name || '', reason: r.reason || '', at: r.at || '',
                                                 notice: noticeMap[(r.pool === 'dz' ? 'dz' : 'hz') + '|' + String(r.uid || '')] || null }));
+      // 2026-11-04：多带一个 relogin —— 非空 = 已经给号主发过「请重新登记」，正在等他自己处理。
+      // 页面上要能区分「刚判出来的待复核」和「通知了但一直没人管」，否则看不出卡了多久。
       const suspects = (suspectRows || []).map(r => ({ pool: r.pool === 'dz' ? 'dz' : 'hz', uid: String(r.uid || ''),
-                                                       name: r.name || '', since: r.suspect_at || '' }));
+                                                       name: r.name || '', since: r.suspect_at || '',
+                                                       relogin: r.relogin_at || '' }));
       // 2026-10-26：当日删除明细（用于「当日删号」统计）。只给 uid/pool/reason，
       // 前端拿当前号池做差集 —— 还在池里的算「已回池」（迁移/重登），不算真删。
       const deadToday = (deadTodayRows || []).map(r => ({ pool: r.pool === 'dz' ? 'dz' : 'hz',
@@ -3543,27 +3606,52 @@ async function fetchActionsStatus() {
       const H = { Authorization: 'Bearer ' + c.ghToken, Accept: 'application/vnd.github+json',
                   'User-Agent': 'cron-relay-worker' };
       const T = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 6000))]);
-      const rr = await T(fetch(base + '/actions/workflows/run.yml/runs?per_page=1&status=completed', { headers: H }));
+      // 2026-11-04：原来只查 status=completed 的最近一轮 —— 正在跑的那轮（queued/in_progress）
+      // 永远不会出现在这里，横条于是一直挂着上一轮的「成功 94/94」，看起来像今天已经跑完了。
+      // 现在取最近 5 轮，优先挑没跑完的那轮；全部结束才回落到最近一次已完成。
+      const rr = await T(fetch(base + '/actions/workflows/run.yml/runs?per_page=5', { headers: H }));
       if (!rr.ok) throw new Error('runs http ' + rr.status);
       const rd = await rr.json();
-      const run = (rd.workflow_runs || [])[0];
+      const _runs = rd.workflow_runs || [];
+      const run = _runs.filter(x => x.status !== 'completed')[0] || _runs[0];
       if (!run) return { pool: r.pool, ok: false, note: '无运行记录' };
-      let jobsOk = 0, jobsTotal = 0;
+      let jobsOk = 0, jobsTotal = 0, jobsDone = 0;
       try {
         const jr = await T(fetch(base + '/actions/runs/' + run.id + '/jobs?per_page=100', { headers: H }));
         if (jr.ok) {
           const jd = await jr.json();
-          jobsTotal = (jd.jobs || []).length;
-          jobsOk = (jd.jobs || []).filter(j => j.conclusion === 'success').length;
+          let list = jd.jobs || [];
+          // 2026-11-04：原来分母直接取第一页条数（per_page=100，不分页）。号池涨到 595 个号
+          // 以后 ns=100，job 总数 101 > 100 → 分母被截成 100、jobsOk 也只数第一页，
+          // 会永久显示 100/100 并把真实的失败片盖掉。改成用 total_count 当分母并补齐剩余页
+          // （单 matrix 上限 250 片 + plan + 少量其它 job，最多 3 页）。
+          const _tc = Number(jd.total_count) || list.length;
+          for (let pg = 2; pg <= 3 && list.length < _tc; pg++) {
+            try {
+              const jr2 = await T(fetch(base + '/actions/runs/' + run.id + '/jobs?per_page=100&page=' + pg, { headers: H }));
+              if (!jr2.ok) break;
+              const jd2 = await jr2.json();
+              const more = jd2.jobs || [];
+              if (!more.length) break;
+              list = list.concat(more);
+            } catch (e) { break; }
+          }
+          jobsTotal = Math.max(_tc, list.length);
+          jobsOk = list.filter(j => j.conclusion === 'success').length;
+          jobsDone = list.filter(j => j.status === 'completed').length;
         }
       } catch (e) { /* job 明细拉失败不影响概览展示 */ }
-      return { pool: r.pool, ok: true, conclusion: run.conclusion || '', created: run.created_at || '',
-               run_id: run.id, jobs_ok: jobsOk, jobs_total: jobsTotal, url: run.html_url || '' };
+      return { pool: r.pool, ok: true, conclusion: run.conclusion || '', status: run.status || '',
+               created: run.created_at || '', run_id: run.id, jobs_ok: jobsOk, jobs_done: jobsDone,
+               jobs_total: jobsTotal, url: run.html_url || '' };
     } catch (e) {
       return { pool: r.pool, ok: false, note: String((e && e.message) || e).slice(0, 60) };
     }
   }));
-  try { await POOL.put('actions:cache', JSON.stringify(out), { expirationTtl: 300 }); } catch (e) { /* 缓存写失败不致命 */ }
+  // 2026-11-04：有 run 在跑时缓存只留 60 秒（进度要看得见在动）；全部结束才用 5 分钟，
+  // 避免控制台每刷一次就去打 2 个仓库 x (1 次 runs + 1~3 次 jobs) 的 GitHub 接口。
+  const _live = out.some(x => x && x.ok && x.status && x.status !== 'completed');
+  try { await POOL.put('actions:cache', JSON.stringify(out), { expirationTtl: _live ? 60 : 300 }); } catch (e) { /* 缓存写失败不致命 */ }
   return out;
 }
 // ---- 2026-10-24：Cloudflare Cron 定时触发 snap650（GitHub schedule 靠不住）----
@@ -4754,9 +4842,22 @@ function renderRunbar(){
   A.forEach(function(a){
     var label=a.pool==='hz'?'主群作业':'定制群作业';
     if(a.ok){
-      var good=a.conclusion==='success';
+      // 2026-11-04：分出「进行中」这一档。以前只认 conclusion==='success'，在跑的那轮
+      // conclusion 为空 → 要么显示成失败、要么根本不出现，进度看不见。
+      var live=!!a.status&&a.status!=='completed';
       var jobTxt=a.jobs_total?(' · '+a.jobs_ok+'/'+a.jobs_total+' job'):'';
-      h+='<div class="rb"><b>'+label+'</b> <span class="'+(good?'good':'bad')+'">'+(good?'✓ 成功':'✗ '+esc(a.conclusion||'失败'))+esc(jobTxt)+'</span><br>'
+      var head;
+      if(live){
+        var dn=(a.jobs_done==null?a.jobs_ok:a.jobs_done);
+        var tot=(a.jobs_total||0);
+        head='<span style="color:#185FA5">● 进行中 '+(tot?(dn+'/'+tot+' job'):'（排队中）')+'</span>';
+        if(a.jobs_ok&&dn>a.jobs_ok)head+='<span class="muted"> · 成功 '+a.jobs_ok+'</span>';
+      }else if(a.conclusion==='success'){
+        head='<span class="good">✓ 成功'+esc(jobTxt)+'</span>';
+      }else{
+        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(jobTxt)+'</span>';
+      }
+      h+='<div class="rb"><b>'+label+'</b> '+head+'<br>'
         +'<span class="muted">'+bjTime(a.created)+(a.url?' · <a href="'+esc(a.url)+'" target="_blank">日志</a>':'')+'</span></div>';
     }else{
       h+='<div class="rb"><b>'+label+'</b> <span class="muted">'+(a.note?esc(a.note):'未配置')+'</span></div>';
@@ -4825,7 +4926,14 @@ function renderRunbar(){
     // 这里再兜一层，避免老数据或别处再传脏值。
     function nmTxt(n){ return esc(String(n||'').replace(/^manual:/,'')); }
     D.slice(0,12).forEach(function(d){dh+='<tr><td>'+(d.pool==='hz'?'主群':'定制')+'</td><td class="num">'+esc(d.uid)+'</td><td>'+nmTxt(d.name)+'</td><td>'+rsTxt(d.reason)+'</td><td>'+ntTxt(d)+'</td><td class="num">'+esc((d.at||'').slice(5,16))+'</td></tr>';});
-    S.slice(0,12).forEach(function(s){dh+='<tr><td>'+(s.pool==='hz'?'主群':'定制')+'</td><td class="num">'+esc(s.uid)+'</td><td>'+esc(s.name)+'</td><td colspan="3">待复核（suspect_at '+esc((s.since||'').slice(0,16))+'）</td></tr>';});
+    S.slice(0,12).forEach(function(s){
+      // 2026-11-04：已发过重登提醒的单独标出来 —— 这类号已摘出听众环、不再占应跑名额，
+      // 状态是「等号主重新登记」，跟刚判出来还没通知的待复核不是一回事。
+      var st=s.relogin
+        ?('已通知重登 '+(s.relogin||'').slice(0,10)+'，等号主重新登记后自动恢复')
+        :('待复核（suspect_at '+esc((s.since||'').slice(0,16))+'）');
+      dh+='<tr><td>'+(s.pool==='hz'?'主群':'定制')+'</td><td class="num">'+esc(s.uid)+'</td><td>'+esc(s.name)+'</td><td colspan="3">'+esc(st)+'</td></tr>';
+    });
     $('deadList').innerHTML='<table><thead><tr><th>池</th><th>UID</th><th>账号</th><th>原因</th><th>通知</th><th>时间</th></tr></thead><tbody>'+dh+'</tbody></table>';
   }
 }
