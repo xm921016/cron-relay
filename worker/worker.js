@@ -3907,7 +3907,13 @@ async function handle(request) {
           'SUM(CASE WHEN l.rb=0 AND l.price IS NOT NULL AND NOT EXISTS(SELECT 1 FROM accounts a WHERE a.uid=l.uid) ' +
           'THEN l.price ELSE 0 END) goneMoney, ' +
           'SUM(CASE WHEN l.rb=0 AND l.price IS NOT NULL AND EXISTS(SELECT 1 FROM accounts a WHERE a.uid=l.uid) ' +
-          'THEN l.price ELSE 0 END) aliveMoney ' +
+          'THEN l.price ELSE 0 END) aliveMoney, ' +
+          // 2026-11-05：goneValid =「号已删、且本来就是有效单（非补号、非赠号）」的单数。
+          // 退单/删号的单不提成 —— 客户的钱退了、服务也没了，再算提成就是给客服发空单的钱。
+          // 它同时从 valid 里扣掉，见下面 t.valid。
+          'SUM(CASE WHEN l.rb=0 ' +
+          "AND NOT (l.name LIKE 'name:%' OR l.name LIKE 'manual:%' OR l.name LIKE '%公益%') " +
+          'AND NOT EXISTS(SELECT 1 FROM accounts a WHERE a.uid=l.uid) THEN 1 ELSE 0 END) goneValid ' +
           'FROM ledger l WHERE ' + W, params),
       ]);
       const aliveSet = new Set();
@@ -3926,7 +3932,7 @@ async function handle(request) {
         t.money += num(r.money); t.unpriced += num(r.unpriced);
       }
       t.money = Math.round(t.money * 100) / 100;
-      t.valid = t.cnt - t.rbCnt - t.giftCnt;   // 有效单 = 总单 - 补号单 - 赠号/手动号（提成按这个算）
+      // 有效单（算提成）在下面拿到 g.goneValid 之后再算 —— 退单/删号的单要扣掉。
       const isGift = (nm) => /^name:|^manual:/.test(String(nm || '')) || String(nm || '').indexOf('公益') >= 0;
       // 2026-11-05：拆「实收」与「号在池」两个金额口径（金额由上面的 ghost 查询算出，不受明细截断影响）。
       //   实收（t.money）= 全部已定价有效单，钱已经收到了，删号不等于没收到；
@@ -3949,6 +3955,11 @@ async function handle(request) {
       t.gone = num(g.goneCnt);        // 号已被删的单数：跟控制台筛选出的单量差多少，就是它
       t.goneMoney = Math.round(num(g.goneMoney) * 100) / 100;
       t.aliveMoney = Math.round(num(g.aliveMoney) * 100) / 100;
+      t.goneValid = num(g.goneValid);
+      // 2026-11-05：有效单（算提成）= 总单 − 补号单 − 赠号/手动号 − 退单（号已删的那部分）。
+      // 退单/删号的单不提成：客户钱退了、服务也没了，再算提成等于给客服发空单的钱。
+      // 只扣「本来就是有效单」的那批（补号/赠号本来就没算过，不重复扣）。
+      t.valid = Math.max(0, t.cnt - t.rbCnt - t.giftCnt - t.goneValid);
       return json({
         ok: true, month: month, pool: poolF, agent: agentRaw, total: t,
         byPlan: fix(byPlan), byAgent: fix(byAgent), byPool: fix(byPool),
@@ -5007,7 +5018,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
 <!-- ===== 2026-11-05：月度结算 ===== -->
 <div class="modal" id="lgModal" hidden><div class="mbox" style="width:980px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
   <h3>月度结算</h3>
-  <p style="font-size:12px;color:#888;margin:4px 0 0">按<b>登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br>补号单、公益赠号/手动号都不计营收、不计提成，单独列出；「号已删」只是对账提示，不影响金额。</p>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">按<b>登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br><b>退单</b>（成交后号被删）不计收入、不计提成；补号单、公益赠号/手动号也都不计营收、不计提成，各自单列。</p>
   <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
     <div><label style="margin-top:0">月份</label><input type="month" id="lgMonth" style="width:150px"></div>
     <div><label style="margin-top:0">群</label><select id="lgPool" style="width:130px"><option value="">全部</option><option value="hz">主群</option><option value="dz">定制群</option></select></div>
@@ -5835,28 +5846,38 @@ $('eCancel').onclick=function(){$('modal').hidden=true;};
 // 只读口令看不到这个按钮（applyRole 会隐藏），服务端也会 403。
 var LGDATA=null;
 function lgMoney(v){return (Math.round((Number(v)||0)*100)/100).toFixed(2);}
-function lgStat(lbl,val,warn){
-  return '<div style="flex:1;min-width:118px;background:'+(warn?'#fdf3e3':'#f2f7ea')+';border-radius:10px;padding:8px 12px">'
-    +'<span style="font-size:12px;color:#666">'+lbl+'</span>'
-    +'<b style="display:block;font-size:19px;color:'+(warn?'#b06a00':'#3b6d11')+'">'+val+'</b></div>';
+// 2026-11-05：汇总卡改成「等宽 + 固定三行（标题 / 数值 / 小字）」。
+// 之前是 flex + min-width:118px，卡片宽度跟着文案走 —— 「C庆林 · 有效单（算提成）」这种长标题
+// 把前几张撑宽，第 7 张直接被挤到第二排；标题一折行，数值也跟着往下掉，看着像错位。
+// 现在由外面用 grid 固定列宽，卡内三行都 nowrap + ellipsis，所以永远一排、数值永远对齐。
+function lgStat(lbl,val,warn,sub){
+  return '<div style="background:'+(warn?'#fdf3e3':'#f2f7ea')+';border-radius:10px;padding:8px 10px;min-width:0">'
+    +'<span style="display:block;font-size:11.5px;color:#777;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="'+esc(lbl)+'">'+lbl+'</span>'
+    +'<b style="display:block;font-size:18px;line-height:1.45;color:'+(warn?'#b06a00':'#3b6d11')+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+val+'</b>'
+    +'<span style="display:block;font-size:11px;line-height:1.3;color:'+(warn?'#b06a00':'#7c9866')+';opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+(sub||'&nbsp;')+'</span>'
+    +'</div>';
 }
 function lgTable(firstCol,arr,withPrice){
   if(!arr||!arr.length)return '<p style="color:#999;margin:6px 0 12px">没有数据</p>';
-  var h='<table style="border-collapse:collapse;width:100%;font-size:13px;margin:0 0 12px"><thead><tr>'
-    +'<th style="text-align:left;padding:7px 9px;background:#f5f6f8;color:#444">'+firstCol+'</th>'
-    +(withPrice?'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">单价</th>':'')
-    +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">单数</th>'
-    +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">其中补号</th>'
-    +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">其中赠号</th>'
-    +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">金额</th></tr></thead><tbody>';
+  // 2026-11-05：三张表并排后每张只有 ~300px，「其中补号/其中赠号」这种长表头会把表格撑爆，
+  // 改成「补号/赠号」并收窄字号与内边距；完整含义挂在 title 上。
+  var TH='padding:5px 6px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;font-size:11.5px';
+  var TD='padding:5px 6px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
+  var h='<table style="border-collapse:collapse;width:100%;font-size:12px;margin:0;table-layout:auto"><thead><tr>'
+    +'<th style="text-align:left;'+TH+'">'+firstCol+'</th>'
+    +(withPrice?'<th style="text-align:right;'+TH+'">单价</th>':'')
+    +'<th style="text-align:right;'+TH+'">单数</th>'
+    +'<th style="text-align:right;'+TH+'" title="其中补号：免费补偿的单，不算钱不提成">补号</th>'
+    +'<th style="text-align:right;'+TH+'" title="其中赠号：公益赠号 / 手动加的号，不算单不提成">赠号</th>'
+    +'<th style="text-align:right;'+TH+'">金额</th></tr></thead><tbody>';
   for(var i=0;i<arr.length;i++){
     var r=arr[i];
-    h+='<tr><td style="padding:6px 9px;border-bottom:1px solid #f2f2f2">'+esc(r.k==null?'—':r.k)+'</td>'
-      +(withPrice?'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2">'+(r.price>=0?r.price+' 元':'<span style="color:#b06a00">未定价</span>')+'</td>':'')
-      +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2">'+r.cnt+'</td>'
-      +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2;color:#255ea6">'+r.rbCnt+'</td>'
-      +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2;color:#b06a00">'+(r.giftCnt||0)+'</td>'
-      +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2;font-weight:600">'+lgMoney(r.money)+'</td></tr>';
+    h+='<tr><td style="'+TD+';max-width:110px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.k==null?'—':r.k)+'">'+esc(r.k==null?'—':r.k)+'</td>'
+      +(withPrice?'<td style="'+TD+';text-align:right">'+(r.price>=0?r.price+' 元':'<span style="color:#b06a00">未定价</span>')+'</td>':'')
+      +'<td style="'+TD+';text-align:right">'+r.cnt+'</td>'
+      +'<td style="'+TD+';text-align:right;color:#255ea6">'+r.rbCnt+'</td>'
+      +'<td style="'+TD+';text-align:right;color:#b06a00">'+(r.giftCnt||0)+'</td>'
+      +'<td style="'+TD+';text-align:right;font-weight:600">'+lgMoney(r.money)+'</td></tr>';
   }
   return h+'</tbody></table>';
 }
@@ -5875,59 +5896,67 @@ function lgRender(o){
     agSel.innerHTML=opts;
   }
   var who=o.agent?(o.agent==='__none__'?'（无客服）':o.agent):'';
-  var h='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">'
-    +lgStat('实收合计（元）',lgMoney(t.money),false)
-    +lgStat('号在池营收（对账）',lgMoney(t.aliveMoney),false)
-    +lgStat((who?who+' · ':'')+'有效单（算提成）',(t.valid||0),false)
-    +lgStat('补号单（不算钱）',(t.rbCnt||0),false)
-    +lgStat('赠号/手动号（不算单）',(t.giftCnt||0),(t.giftCnt||0)>0)
-    +lgStat('号已删（单 / 元）',(t.gone||0)+' / '+lgMoney(t.goneMoney),(t.gone||0)>0)
-    +lgStat('待补价',(t.unpriced||0),(t.unpriced||0)>0)
+  // 2026-11-05：固定 7 列网格（不再用 flex 自适应），7 张卡恒定一排；客服名不再并进卡标题
+  // （它太长会把整行撑爆），当前筛选的是谁由下面那条绿底提示说明。
+  // 口径顺序按「先看钱、再看提成、最后看构成」排：收入 → 有效单 → 成交 → 退单 → 补号/赠号/待补价。
+  var h='<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px;margin-bottom:12px">'
+    +lgStat('实际收入（元）',lgMoney(t.aliveMoney),false,'退单不计')
+    +lgStat('有效单（算提成）',(t.valid||0),false,'已扣退单')
+    +lgStat('成交单数',(t.cnt||0),false,(t.gone||0)>0?('含退单 '+t.gone+' 单'):'全部有效')
+    +lgStat('退单·号已删',(t.gone||0),(t.gone||0)>0,lgMoney(t.goneMoney)+' 元')
+    +lgStat('补号单',(t.rbCnt||0),false,'不算钱')
+    +lgStat('赠号/手动号',(t.giftCnt||0),(t.giftCnt||0)>0,'不算单')
+    +lgStat('待补价',(t.unpriced||0),(t.unpriced||0)>0,'套餐空着')
     +'</div>';
   if(who){
-    h+='<p style="font-size:12px;color:#3b6d11;margin:0 0 10px;background:#f2f7ea;padding:6px 10px;border-radius:8px">'
-      +'当前只统计<b>'+esc(who)+'</b> 在 '+esc(o.month)+' 的单；下面的合计、按套餐、明细全部是这个人。点「全部客服」看全群。</p>';
+    h+='<p style="font-size:11.5px;color:#3b6d11;margin:0 0 8px;background:#f2f7ea;padding:5px 10px;border-radius:7px">'
+      +'仅统计 <b>'+esc(who)+'</b> · '+esc(o.month)+' 的单（点「全部客服」看全群）</p>';
   }
   if(t.unpriced>0){
-    h+='<p style="font-size:12px;color:#b06a00;margin:0 0 10px">有 '+t.unpriced+' 单没定价（历史回填时套餐空着，或档位配置里没填价格），这批<b>没有算进上面的合计</b>。'
-      +'<button class="mini" id="lgFix" style="margin-left:8px;padding:4px 10px;font-size:12px">按当前配置价补齐</button></p>';
+    h+='<p style="font-size:11.5px;color:#b06a00;margin:0 0 8px">有 '+t.unpriced+' 单没定价（历史回填时套餐空着，或档位配置里没填价格），这批<b>没算进合计</b>。'
+      +'<button class="mini" id="lgFix" style="margin-left:8px;padding:3px 10px;font-size:11.5px">按当前配置价补齐</button></p>';
   }
   if((t.gone||0)>0){
-    h+='<p style="font-size:12px;color:#666;margin:0 0 10px">「号已删」= 这单成交后号被删了（掉线判死 / 手动删），共 '
-      +(t.gone||0)+' 单 '+lgMoney(t.goneMoney)+' 元。控制台按账号筛选看不到它们，'
-      +'所以网页筛出来的单量/金额对应的是<b>号在池营收 '+lgMoney(t.aliveMoney)+' 元</b>；实收合计 '+lgMoney(t.money)+' 元，差的正好是这几单。</p>';
+    h+='<p style="font-size:11.5px;color:#777;margin:0 0 8px;line-height:1.6">「退单·号已删」= 成交后号被删了（掉线判死 / 手动删），共 '
+      +(t.gone||0)+' 单 '+lgMoney(t.goneMoney)+' 元，这部分<b>不计收入、不计提成</b>。'
+      +'成交 '+t.cnt+' 单 / 账面 '+lgMoney(t.money)+' 元，扣掉退单后：实际收入 <b>'+lgMoney(t.aliveMoney)+' 元</b>、有效单 <b>'+(t.valid||0)+'</b> 单。</p>';
   }
   // 2026-11-05：三张分组表改并排（原来一张一行，竖向占掉大半屏，害得整个弹窗要滚）。
   // 并排后高度只取决于最高的那张，弹窗外层不再出滚动条，只有下面的成交明细自己滚。
   h+='<div style="display:flex;gap:10px;align-items:flex-start;margin-top:10px">'
     +'<div style="flex:1;min-width:0"><h4 style="margin:0 0 6px;font-size:13px">按套餐</h4>'+lgTable('套餐',o.byPlan,true)+'</div>';
-  if(!who)h+='<div style="flex:1;min-width:0"><h4 style="margin:0 0 6px;font-size:13px">按客服（提成看「有效单」）</h4>'+lgTable('客服',o.byAgent,false)+'</div>';
+  if(!who)h+='<div style="flex:1;min-width:0"><h4 style="margin:0 0 6px;font-size:13px">按客服</h4>'+lgTable('客服',o.byAgent,false)+'</div>';
   if(!o.pool)h+='<div style="flex:1;min-width:0"><h4 style="margin:0 0 6px;font-size:13px">按群</h4>'+lgTable('群',o.byPool,false)+'</div>';
   h+='</div>';
   // 明细
   var rows=o.rows||[];
-  h+='<details'+(rows.length<=80?' open':'')+'><summary style="cursor:pointer;color:#3b6d11;font-size:13px">成交明细（'+rows.length+(rows.length>=1200?' 条，只显示前 1200':' 条')+'）</summary>';
-  h+='<div style="max-height:calc(92vh - 560px);min-height:170px;overflow:auto;margin-top:8px"><table style="border-collapse:collapse;width:100%;font-size:12.5px"><thead><tr>'
-    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">登记日</th>'
-    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">群</th>'
-    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">账号</th>'
-    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">客服</th>'
-    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">套餐</th>'
-    +'<th style="text-align:right;padding:6px 8px;background:#f5f6f8">金额</th>'
-    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">备注</th></tr></thead><tbody>';
+  h+='<details'+(rows.length<=80?' open':'')+' style="margin-top:2px">'
+    +'<summary style="cursor:pointer;color:#3b6d11;font-size:13px;padding:4px 0">成交明细（'+rows.length+(rows.length>=1200?' 条，只显示前 1200':' 条')+'）</summary>';
+  // 2026-11-05：表头改 sticky（滚长列表时列名不跟着跑）；列宽按内容收窄，账号/备注可省略号。
+  var MH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;position:sticky;top:0;z-index:2;border-bottom:1px solid #e6e8ec';
+  var MD='padding:5px 8px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
+  h+='<div style="max-height:calc(92vh - 560px);min-height:170px;overflow:auto;margin-top:6px;border:1px solid #eef0f3;border-radius:8px">'
+    +'<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px"><thead><tr>'
+    +'<th style="text-align:left;'+MH+'">登记日</th>'
+    +'<th style="text-align:left;'+MH+'">群</th>'
+    +'<th style="text-align:left;'+MH+'">账号</th>'
+    +'<th style="text-align:left;'+MH+'">客服</th>'
+    +'<th style="text-align:left;'+MH+'">套餐</th>'
+    +'<th style="text-align:right;'+MH+'">金额</th>'
+    +'<th style="text-align:left;'+MH+'">备注</th></tr></thead><tbody>';
   for(var i=0;i<rows.length;i++){
     var r=rows[i];
     h+='<tr'+(r.rb?' style="background:#f7fafd"':'')+'>'
-      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.day)+'</td>'
-      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+(r.pool==='hz'?'主群':'定制')+'</td>'
-      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.name||r.uid)
-        +(r.alive?'':' <span class="badge b-gray" title="这单成交后号已被删除（掉线判死/手动删），控制台按账号筛选看不到它">号已删</span>')
+      +'<td style="'+MD+'">'+esc(r.day)+'</td>'
+      +'<td style="'+MD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
+      +'<td style="'+MD+';max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.name||r.uid)+'">'+esc(r.name||r.uid)
+        +(r.alive?'':' <span class="badge b-red" title="退单：成交后号被删了（掉线判死 / 手动删），不计收入、不计提成">退单</span>')
         +(r.gift?' <span class="badge b-yellow" title="公益赠号或手动加的号，不是客户买的，不算提成">赠号</span>':'')
       +'</td>'
-      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.agent||'—')+'</td>'
-      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.plan||'未标注')+'</td>'
-      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2;text-align:right">'+(r.rb?'<span class="badge b-blue">补</span> 0.00':(r.gift?'<span style="color:#999">赠号</span>':(r.price==null?'<span style="color:#b06a00">待补价</span>':lgMoney(r.price))))+'</td>'
-      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2;color:#666">'+esc(r.remark||'')+'</td></tr>';
+      +'<td style="'+MD+'">'+esc(r.agent||'—')+'</td>'
+      +'<td style="'+MD+'">'+esc(r.plan||'未标注')+'</td>'
+      +'<td style="'+MD+';text-align:right">'+(r.rb?'<span class="badge b-blue">补</span> 0.00':(r.gift?'<span style="color:#999">赠号</span>':(r.price==null?'<span style="color:#b06a00">待补价</span>':lgMoney(r.price))))+'</td>'
+      +'<td style="'+MD+';color:#777;max-width:220px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.remark||'')+'">'+esc(r.remark||'')+'</td></tr>';
   }
   h+='</tbody></table></div></details>';
   $('lgBody').innerHTML=h;
@@ -5963,10 +5992,10 @@ $('lgPool').onchange=lgLoad;
 if($('lgAgent'))$('lgAgent').onchange=lgLoad;
 $('lgCsv').onclick=function(){
   if(!LGDATA||!LGDATA.rows||!LGDATA.rows.length){$('lgm').textContent='还没有数据，先点查询';$('lgm').className='msg err';return;}
-  var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','号是否还在','备注']];
+  var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','是否退单','备注']];
   for(var i=0;i<LGDATA.rows.length;i++){var r=LGDATA.rows[i];
     out.push([r.day,r.pool==='hz'?'主群':'定制群',r.name,r.uid,r.agent,r.plan,
-      r.rb?'0':(r.gift?'赠号':(r.price==null?'':r.price)),r.rb?'补号':'',r.alive?'在':'已删',r.remark]);}
+      r.rb?'0':(r.gift?'赠号':(r.price==null?'':r.price)),r.rb?'补号':'',r.alive?'':'退单',r.remark]);}
   var csv='\\ufeff'+out.map(function(a){return a.map(function(v){return '"'+String(v==null?'':v).replace(/"/g,'""')+'"';}).join(',');}).join('\\r\\n');
   var a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
