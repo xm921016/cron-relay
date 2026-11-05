@@ -4310,10 +4310,22 @@ input,select{padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:
 button{padding:9px 14px;border:0;border-radius:8px;background:#3b6d11;color:#fff;font-size:13px;cursor:pointer}
 button.gray{background:#888}button.warn{background:#a32d2d}button:disabled{opacity:.55;cursor:default}
 .msg{font-size:13px;min-height:16px;margin-top:8px}.ok{color:#3b6d11}.err{color:#a32d2d}
-.stats{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
-.stat{flex:1;min-width:96px;background:#f2f7ea;border-radius:10px;padding:8px 10px;text-align:center}
-.stat b{display:block;font-size:19px;color:#3b6d11}.stat span{font-size:11px;color:#666}
+/* 2026-11-05 改（用户要求）：统计卡从 flex 换成 grid —— 以前 13 张卡里第 13 张会被挤到第二行
+   并被 flex:1 拉成整行宽（「已达100%」那块），非常难看。grid 的 auto-fit 会把空轨道折叠、
+   item 平分到各列，行不齐时最后一行也只占一列宽；同时整体尺寸收小一档（min 96→88px，
+   数字 19→18px，标签 11→10.5px），13 张卡在 1400px 以上宽度就能排成一行。
+   每张卡现在还是「按钮」：点一下按这一项筛表格（见 pickStat），所以加了 cursor/hover/on 态。 */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:7px;margin:0 0 12px}
+.stat{background:#f2f7ea;border:1px solid transparent;border-radius:10px;padding:7px 6px;text-align:center;min-width:0;cursor:pointer}
+.stat b{display:block;font-size:18px;line-height:1.2;color:#3b6d11}
+.stat span{display:block;font-size:10.5px;line-height:1.3;color:#666;overflow-wrap:break-word}
+.stat:hover{background:#e9f3dc;border-color:#d5e5bd}
 .stat.warn{background:#fdf3e3}.stat.warn b{color:#b06a00}
+.stat.on{background:#3b6d11;border-color:#3b6d11}
+/* 卡片 b 上有内联色（红/绿/灰/橙），选中态必须 !important 才盖得住 */
+.stat.on b,.stat.on span{color:#fff!important}
+.stat.warn.on{background:#b06a00;border-color:#b06a00}
+.stat.on:hover{background:#31590e}
 /* 2026-10-27 新增：套餐汇总条（按「登记时买的套餐」统计，跟着客服/套餐筛选一起变） */
 .plans{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
 .pl{background:#fff;border:1px solid #e8eaee;border-radius:9px;padding:6px 12px;font-size:12px;color:#555}
@@ -4385,9 +4397,10 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   .head{margin-bottom:8px}.page-title{font-size:16px}.page-sub{font-size:11px;line-height:1.5}
   .abox{padding:12px;border-radius:12px;margin-bottom:10px}
   #loginBox{max-width:100%}
-  .stats{gap:6px;margin-bottom:10px}
-  .stat{flex:1 1 30%;min-width:0;padding:7px 5px;border-radius:9px}
-  .stat b{font-size:16px}.stat span{font-size:10.5px;line-height:1.25}
+  /* 2026-11-05：统计卡改 grid 后，手机端只换列宽/尺寸（flex 属性对 grid item 无效，已删） */
+  .stats{grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:5px;margin-bottom:10px}
+  .stat{padding:6px 4px;border-radius:9px}
+  .stat b{font-size:15px}.stat span{font-size:10px;line-height:1.25}
   .plans{gap:6px;margin-bottom:10px}
   .pl{flex:1 1 40%;padding:5px 9px;font-size:11.5px}
   .pl b{font-size:14px}
@@ -4566,7 +4579,9 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
 var TOKEN=null, DATA=null, POOLF='all';
 // 2026-10-27：ROLE='full' 满权限 / 'ro' 只读（只能看，编辑、删号、客服名单全部关掉）。
 // AGENTF/PLANF 是客服/套餐筛选值；AGENTS/PLANS 来自服务端 reg_cfg（控制台可改，不用重发软件）。
-var ROLE='ro', AGENTF='', PLANF='', AGENTS=[], PLANS=[];
+// STATF（2026-11-05）：顶部统计卡点出来的筛选值。空串=不筛；'__xxx' 是特殊口径（总数/有数据/上涨/下跌/3天+未涨），
+// 其它值直接当行内标记文本用（和搜索框同一套匹配，所以「顶部有数、点开搜不到」的老问题不会再出现）。
+var ROLE='ro', AGENTF='', PLANF='', STATF='', AGENTS=[], PLANS=[];
 function $(id){return document.getElementById(id);}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function todayBJ(){var d=new Date(Date.now()+8*3600*1000);return d.toISOString().slice(0,10);}
@@ -4627,6 +4642,15 @@ $('dClear').onclick=function(){$('date').value='';$('dateTo').value='';render();
 $('q').oninput=render;$('sort').onchange=render;
 $('fagent').onchange=function(){AGENTF=this.value;render();};
 $('fplan').onchange=function(){PLANF=this.value;render();};
+// 2026-11-05：顶部统计卡点击 = 按这一项筛选（再点一次取消）。用 data-sv + 事件委托，
+// 不写内联 onclick —— 这段脚本住在模板字符串里，内联写法要跨两层转义，10-27 因而崩过整段脚本。
+// 监听挂在 #stats 容器上，卡片本身每次 render 都重画也不影响。
+$('stats').onclick=function(ev){
+  var el=ev.target;
+  while(el&&el!==this&&!(el.getAttribute&&el.getAttribute('data-sv')))el=el.parentNode;
+  if(!el||el===this||!el.getAttribute)return;
+  pickStat(el.getAttribute('data-sv'));
+};
 // 2026-10-27 二次改：入池范围控件已删（用户不要）。两个日期框都要重新拉数据，
 // 因为起止日直接决定取哪两天的快照，纯前端过滤做不到。
 // 2026-10-24：表格区高度自适应视口剩余空间 → 滚动发生在 .twrap 内部，配合 .twrap th 的 sticky 实现表头冻结
@@ -4923,7 +4947,7 @@ function render(){
   // added 形如 2026-10-27，截前 10 位后按字符串比大小（yyyy-mm-dd 正好可比）。
   var rg=drngOf(),rOn=!!(rg.from||rg.to);
   var drEl=$('dr');if(drEl)drEl.className='dr'+(rOn?' on':'');
-  var rows=all.filter(function(r){
+  var baseRows=all.filter(function(r){
     if(POOLF!=='all'&&r.pool!==POOLF)return false;
     // 2026-10-27：客服 / 套餐 两个下拉筛选（顶部所有统计都跟着它变）
     if(AGENTF&&String(r.e.agent||'')!==AGENTF)return false;
@@ -4940,18 +4964,32 @@ function render(){
     // 2026-10-25：搜索也能命中标记文本（如搜「绑错歌」「共创」「未开刷」直接筛出同类号）
     return ((e.name||'')+' '+(e.email||'')+' '+(e.uid||'')+' '+(e.song||'')+' '+(e.agent||'')+' '+(e.plan||'')+' '+r.markText).toLowerCase().indexOf(q)>=0;
   });
-  var dnEl=$('dn');if(dnEl)dnEl.textContent=rOn?('筛出 '+rows.length+' 个'):'';
+  // 2026-11-05：统计卡筛选（点一下卡片 = 按这一项筛表格）。
+  // 必须分两层：baseRows = 除统计卡以外的所有筛选，stats 的数字全部按 baseRows 算，
+  // rows = baseRows 再叠 STATF，只喂表格。否则点完「今日上涨」后其它卡片全变 0，
+  // 再点「今日下跌」就永远筛出空表，等于把按钮点废。
+  function statHit(r,v){
+    if(v==='__all')return true;
+    if(v==='__data')return !!r.a;
+    if(v==='__up')return r.delta!=null&&r.delta>0;
+    if(v==='__down')return r.delta!=null&&r.delta<0&&!r.reset;
+    // 连续 N 天未涨：N 从行内标记里取，≥3 天才算（和顶部数字同一口径）
+    if(v==='__stuck3'){var mm=/连续([0-9]+)天未涨/.exec(r.markText||'');return !!mm&&+mm[1]>=3;}
+    return (r.markText||'').indexOf(v)>=0;
+  }
+  var rows=STATF?baseRows.filter(function(r){return statHit(r,STATF);}):baseRows;
+  var dnEl=$('dn');if(dnEl)dnEl.textContent=(rOn||STATF)?('筛出 '+rows.length+' 个'):'';
   var s=$('sort').value;
   if(s==='delta')rows.sort(function(x,y){return (y.delta==null?-999:y.delta)-(x.delta==null?-999:x.delta);});
   else if(s==='rate')rows.sort(function(x,y){return ((y.a&&y.a.rate)||-1)-((x.a&&x.a.rate)||-1);});
-  var withData=rows.filter(function(r){return r.a;});
+  var withData=baseRows.filter(function(r){return r.a;});
   // 2026-10-26：顶部只保留「看了要知道该不该动手」的字段。
   // 已删：平均650进度（一个池的均值没有行动意义）、次日才入池 / 新号未开刷（新号正常爬坡，行内也不打标记了）。
   // 新增：3天+未涨（真正需要人工的停滞号）、无650任务（刷多少都不会涨）、今日入池（当天新登记号数）。
   // 每个数字都来自行内标记文本，搜索框输入同一个词能拉到完全相同的行，不会再出现「顶部有数、搜不到」。
-  var cntTxt=function(t){return rows.filter(function(r){return (r.markText||'').indexOf(t)>=0;}).length;};
-  var ups=rows.filter(function(r){return r.delta!=null&&r.delta>0;}).length;
-  var downs=rows.filter(function(r){return r.delta!=null&&r.delta<0&&!r.reset;}).length;
+  var cntTxt=function(t){return baseRows.filter(function(r){return (r.markText||'').indexOf(t)>=0;}).length;};
+  var ups=baseRows.filter(function(r){return r.delta!=null&&r.delta>0;}).length;
+  var downs=baseRows.filter(function(r){return r.delta!=null&&r.delta<0&&!r.reset;}).length;
   var resets=cntTxt('周期归零');
   var zeroGrow=cntTxt('今日零增长');
   var unsettled=cntTxt('650未结算');
@@ -4961,7 +4999,7 @@ function render(){
   // 连续 N 天未涨：N 从行内「连续N天未涨」标记里取，≥3 天进这个数，≥7 天在 title 里单说。
   // 已满 100%、周期归零、歌曲有问题的号本来就不会有这个标记，所以不用再排除一次。
   var stuck3=0,stuck7=0;
-  rows.forEach(function(r){var m=/连续([0-9]+)天未涨/.exec(r.markText||'');if(m){var n=+m[1];if(n>=3)stuck3++;if(n>=7)stuck7++;}});
+  baseRows.forEach(function(r){var m=/连续([0-9]+)天未涨/.exec(r.markText||'');if(m){var n=+m[1];if(n>=3)stuck3++;if(n>=7)stuck7++;}});
   var noTask=cntTxt('无650任务');
   // 「有播放·650为0」和它的升级版「有播放·650为0·卡住」现在是同一个前缀（2026-10-26 改名），
   // 一次 cntTxt 就两类全算，搜索框搜「有播放」也两类全中，数字和搜索结果终于对得上。
@@ -4972,23 +5010,31 @@ function render(){
   // 直接比日期字符串，不经过 daysSince —— 那条路径依赖正则，模板字符串里踩过一次转义的坑。
   var newIn=cntTxt('今日入池');
   var done100=cntTxt('已达100%');
+  // 2026-11-05：每张统计卡都是按钮 —— 点一下按这一项筛表格，再点一次取消（见 pickStat）。
+  // data-sv 就是筛选值：__all/__data/__up/__down/__stuck3 是特殊口径，其余值直接当行内标记文本，
+  // 和搜索框同一套匹配，所以不会再出现「卡上有数、点开筛不到」。
+  var statCard=function(v,val,label,o){
+    o=o||{};
+    return '<div class="stat'+(o.warn?' warn':'')+(STATF===v?' on':'')+'" data-sv="'+v+'" title="'
+      +(o.title?o.title+'。':'')+'点一下按「'+label+'」筛选表格，再点一次取消">'
+      +'<b'+(o.color?' style="color:'+o.color+'"':'')+'>'+val+'</b><span>'+label+'</span></div>';
+  };
   $('stats').innerHTML=
-    '<div class="stat"><b>'+rows.length+'</b><span>账号总数</span></div>'
-   +'<div class="stat"><b>'+withData.length+'</b><span>今日有数据</span></div>'
-   +'<div class="stat"><b style="color:#c0392b">'+ups+'</b><span>今日上涨</span></div>'
-   +'<div class="stat"><b style="color:#1e8449">'+downs+'</b><span>今日下跌</span></div>'
-   +'<div class="stat" title="added 日期就是今天的号：明天才进轮转开始被听，今天没有快照/进度是正常的。'
-   +'点「入池」列排序可以看各自登记日"><b style="color:#255ea6">'+newIn+'</b><span>今日入池</span></div>'
-   +'<div class="stat"><b style="color:#888">'+resets+'</b><span>周期归零</span></div>'
-   +'<div class="stat'+(zeroGrow?' warn':'')+'"><b>'+zeroGrow+'</b><span>今日零增长</span></div>'
-   +'<div class="stat'+(netLoss?' warn':'')+'" title="近30日播放量今天没涨或略降、650 进度也没涨：今天补的播放被 30 天前的老播放到期退出抵掉了（30 天滚动窗口的正常现象），不是播放没算进去。只统计两边快照采集时刻相差 3 小时以内的号，避免拿今早的数和昨晚的数硬比。搜索「净增≤0」可筛出这批号"><b>'+netLoss+'</b><span>净增≤0</span></div>'
-   +'<div class="stat" title="650 进度没动但近30日播放量在涨：播放已入账，网易分批结算未滚到 650（入账窗口实测持续到 11:30~12:00），停 1~2 天属正常，不算真停滞。搜索「650未结算」可筛出"><b>'+unsettled+'</b><span>650未结算</span></div>'
-   +'<div class="stat'+(stuck3?' warn':'')+'" title="连续 ≥3 天 650 进度没涨（已排除已满 100%、周期归零、歌曲有问题的号）。'+(stuck7?'其中 ≥7 天 '+stuck7+' 个。':'')+'先看「近30日播放量」：在跌=30天滚动窗口老播放退出（做过满 100% 的号常见，属自然衰减）；在涨却不动=播放被判无效。搜索「天未涨」可筛出这批号"><b>'+stuck3+'</b><span>3天+未涨</span></div>'
-   +'<div class="stat'+(noTask?' warn':'')+'" title="后台没返回 650 任务：可能不是音乐人、没报名该任务或歌曲未过审 —— 这类号刷再多也不会涨，必须让号主去音乐人后台确认。搜索「无650任务」可筛出"><b style="color:#b85c00">'+noTask+'</b><span>无650任务</span></div>'
-   +'<div class="stat'+(played0?' warn':'')+'" title="近30日播放已有 650 次以上，但快照里的 650 进度是 0%：多半是这一轮快照采在网易结算之前（结算窗口到 11:30~12:00）。控制台会对这批号实时复核一次：实时有进度就不计入本数（改标灰的「实时已恢复」'+(liveOk?'，本次 '+liveOk+' 个':'')+'），实时仍 0% 才计入。带「·卡住」后缀的是已连续 2 天以上 0%。搜索「有播放」可把两类都筛出来（搜「卡住」只看连续 0% 的那批）"><b>'+played0+'</b><span>有播放·650为0</span></div>'
-   +'<div class="stat'+(svcWrong?' warn':'')+'" title="歌曲无效 = 绑错歌（歌的作者里没有他）或 查无此歌（已下架/删除）：刷多少都不会涨，必须改绑。搜索框直接搜「歌曲无效」可筛出这一类"><b style="color:#a32d2d">'+svcWrong+'</b><span>歌曲无效</span></div>'
-   +'<div class="stat'+(svcCoop?' warn':'')+'" title="共创歌曲 = 多人合唱：播放会被分摊给其他艺人，非主艺的号实测恒定 0%。搜索「共创歌曲」可筛出这一类"><b style="color:#b85c00">'+svcCoop+'</b><span>共创歌曲</span></div>'
-   +'<div class="stat" title="本周期已做满 100% 的号：继续刷没有额外收益，等下个 31 天周期归零重爬。搜索「已达100%」可筛出"><b>'+done100+'</b><span>已达100%</span></div>'
+    statCard('__all',baseRows.length,'账号总数',{title:'当前筛选条件下的全部账号。点一下把池/客服/套餐/日期/搜索一起清掉'})
+   +statCard('__data',withData.length,'今日有数据',{title:'今天这一轮快照采到了该号数据的号'})
+   +statCard('__up',ups,'今日上涨',{color:'#c0392b',title:'650 进度比昨天高的号'})
+   +statCard('__down',downs,'今日下跌',{color:'#1e8449',title:'650 进度比昨天低、且不是周期归零的号'})
+   +statCard('今日入池',newIn,'今日入池',{color:'#255ea6',title:'added 日期就是今天的号：明天才进轮转开始被听，今天没有快照/进度是正常的。点「入池」列排序可以看各自登记日'})
+   +statCard('周期归零',resets,'周期归零',{color:'#888',title:'昨日 650 已接近满、今天突然 0% 的号（31 天周期到点，不是掉量）'})
+   +statCard('今日零增长',zeroGrow,'今日零增长',{warn:true,title:'650 进度和昨天完全一样，且近30日播放量也没涨（=不多不少刚好持平）'})
+   +statCard('近30日净增≤0',netLoss,'净增≤0',{warn:true,title:'近30日播放量今天没涨或略降、650 进度也没涨：今天补的播放被 30 天前的老播放到期退出抵掉了（30 天滚动窗口的正常现象），不是播放没算进去。只统计两边快照采集时刻相差 3 小时以内的号，避免拿今早的数和昨晚的数硬比'})
+   +statCard('650未结算',unsettled,'650未结算',{title:'650 进度没动但近30日播放量在涨：播放已入账，网易分批结算未滚到 650（入账窗口实测持续到 11:30~12:00），停 1~2 天属正常，不算真停滞'})
+   +statCard('__stuck3',stuck3,'3天+未涨',{warn:true,title:'连续 ≥3 天 650 进度没涨（已排除已满 100%、周期归零、歌曲有问题的号）'+(stuck7?'，其中 ≥7 天 '+stuck7+' 个':'')+'。先看「近30日播放量」：在跌=30天滚动窗口老播放退出（做过满 100% 的号常见，属自然衰减）；在涨却不动=播放被判无效'})
+   +statCard('无650任务',noTask,'无650任务',{warn:true,color:'#b85c00',title:'后台没返回 650 任务：可能不是音乐人、没报名该任务或歌曲未过审 —— 这类号刷再多也不会涨，必须让号主去音乐人后台确认'})
+   +statCard('有播放·650为0',played0,'有播放·650为0',{warn:true,title:'近30日播放已有 650 次以上，但快照里的 650 进度是 0%：多半是这一轮快照采在网易结算之前（结算窗口到 11:30~12:00）。控制台会对这批号实时复核一次：实时有进度就不计入本数（改标「实时已恢复」'+(liveOk?'，本次 '+liveOk+' 个':'')+'），实时仍 0% 才计入。带「·卡住」后缀的是已连续 2 天以上 0%'})
+   +statCard('歌曲无效',svcWrong,'歌曲无效',{warn:true,color:'#a32d2d',title:'歌曲无效 = 绑错歌（歌的作者里没有他）或 查无此歌（已下架/删除）：刷多少都不会涨，必须改绑'})
+   +statCard('共创歌曲',svcCoop,'共创歌曲',{warn:true,color:'#b85c00',title:'共创歌曲 = 多人合唱：播放会被分摊给其他艺人，非主艺的号实测恒定 0%'})
+   +statCard('已达100%',done100,'已达100%',{title:'本周期已做满 100% 的号：继续刷没有额外收益，等下个 31 天周期归零重爬'})
    ;
   // ===== 2026-10-27：套餐汇总 =====
   // 口径：按「登记时买的套餐」（accounts.plan）统计，不按剩余天数反推 —— exp 可改可续，反推会漂。
@@ -5086,6 +5132,23 @@ function pickPlan(label){
   if(!el)return;
   PLANF=(el.value===label)?'':label;
   el.value=PLANF;
+  render();
+}
+// 2026-11-05：点顶部统计卡 = 按这一项筛选（再点一次取消）。
+// '__all' 是「解除筛选」：把池/客服/套餐/入池日期/搜索一起清掉，回到全部号。
+// 统计数字本身是按 baseRows 算的（不含 STATF），所以点卡片不会让其它卡片的数字跟着变。
+function pickStat(v){
+  if(!v)return;
+  if(v==='__all'){
+    STATF='';POOLF='all';AGENTF='';PLANF='';
+    var qe=$('q');if(qe)qe.value='';
+    var d1=$('date'),d2=$('dateTo');if(d1)d1.value='';if(d2)d2.value='';
+    var fe=$('fagent');if(fe)fe.value='';
+    var pe=$('fplan');if(pe)pe.value='';
+    document.querySelectorAll('.tab').forEach(function(t){t.className='tab'+(t.getAttribute('data-p')==='all'?' on':'');});
+    render();return;
+  }
+  STATF=(STATF===v)?'':v;
   render();
 }
 // 2026-10-23：运行状态横条（作业状态/应跑实跑/快照新鲜度/今日删号与待复核）
