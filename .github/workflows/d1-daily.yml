@@ -33,6 +33,10 @@ on:
         description: '只测告警邮件（不发备份、不上传蓝奏云）'
         type: boolean
         default: false
+      force:
+        description: '强制重跑（无视「今天已备份」的幂等闸门）'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -62,7 +66,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ── 幂等闸门（2026-11-05 新增）────────────────────────────────────────
+      # 同一份备份现在有 4 个触发源：relay 结束(workflow_run) / 19:40 schedule /
+      # CF cron 发令 / 手动 dispatch。它们同一天完全可能全部命中，没闸门就会
+      # 重复导 D1（38 次查询 —— 正是 7500 随机报错的来源）→ 重复推 5 个私库。
+      #
+      # 判据：5 个私库里有没有「北京今天」的 backup/d1-YYYY-MM-DD.json.gz.enc
+      # （文件名日期由 d1_backup.py 用 UTC+8 生成，跨时区不会错位）。
+      #   任一存在 → skip=true，后面全部步骤跳过，本次几秒结束、不占并发
+      #   都查不到 → skip=false，正常备份
+      # 想强制重跑：手动 dispatch 时勾 force。
+      - name: 幂等闸门（今天已备份过就跳过）
+        id: gate
+        env:
+          VAULT_TOKENS: ${{ secrets.VAULT_TOKENS }}
+          FORCE: ${{ inputs.force }}
+        run: python3 d1_vault_check.py
+
       - name: 导出 D1 并加密
+        if: steps.gate.outputs.skip != 'true'
         env:
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
@@ -73,6 +95,7 @@ jobs:
           ls -lh backup_daily/
 
       - name: 分发到 5 个账号的私库（各留 30 份）
+        if: steps.gate.outputs.skip != 'true'
         env:
           BACKUP_DIR: backup_daily
           VAULT_TOKENS: ${{ secrets.VAULT_TOKENS }}
@@ -91,7 +114,7 @@ jobs:
       # 2026-11-04 起：脚本自己在失败时发邮件（EMAIL_*/ALERT_TO），因为
       # continue-on-error 会让步骤红而不报警，Cookie 过期就变成无声失守。
       - name: 推送蓝奏云「D1备份」（滚动 30 份）
-        if: always()
+        if: always() && steps.gate.outputs.skip != 'true'
         continue-on-error: true
         env:
           BACKUP_DIR: backup_daily
@@ -105,7 +128,7 @@ jobs:
         run: python3 lanzou_push.py
 
       - name: 顺手留一份 artifact（下载方便，但依附本账号，不算冗余）
-        if: always()
+        if: always() && steps.gate.outputs.skip != 'true'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -118,7 +141,7 @@ jobs:
       # 起因：导出 D1 那步因 D1 OFFSET 上限报 500，后面蓝奏云步骤「没文件→跳过」
       # 反而显示绿色，整个 run 红了但没有任何主动通知 —— 备份断了没人知道。
       - name: 备份失败告警（邮件）
-        if: failure()
+        if: failure() && steps.gate.outputs.skip != 'true'
         continue-on-error: true
         env:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
