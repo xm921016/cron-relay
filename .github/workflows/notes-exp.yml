@@ -1,0 +1,55 @@
+name: notes-exp
+
+# 笔记「发完延时删」A/B 实验（2026-11-05）
+# 一次 job 内跑完：发 -> 等 delay 秒 -> A 组删 / B 组留 -> 三处时点记录笔记任务进度。
+# 只手动触发，不进 schedule；与 relay 的 concurrency group 不同，不会抢并发。
+on:
+  workflow_dispatch:
+    inputs:
+      uids:
+        description: '实验号 uid，逗号分隔（今天必须还没发过笔记）'
+        required: true
+        default: ''
+      arm_del:
+        description: '其中要删除的 uid（逗号分隔；其余的只发不删，做对照）'
+        required: true
+        default: ''
+      delay:
+        description: '发布后等待多少秒再删（默认 3600 = 1 小时）'
+        required: false
+        default: '3600'
+
+concurrency:
+  group: notes-exp
+  cancel-in-progress: false
+
+jobs:
+  exp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 220
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -q pycryptodome requests pillow
+      - name: install CJK fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y fonts-arphic-uming fonts-noto-cjk
+      - name: run experiment
+        env:
+          WORKER_URL: 'https://xx1031.xyz'
+          NB_PASS: ${{ secrets.NB_PASS }}
+          ASSIGN_PASS: ${{ secrets.ASSIGN_PASS }}
+          UIDS: ${{ inputs.uids }}
+          ARM_DEL: ${{ inputs.arm_del }}
+          DELAY: ${{ inputs.delay }}
+        run: python notes_exp.py
+      - name: upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notes-exp-result
+          path: notes_exp_result.json
+          if-no-files-found: warn
