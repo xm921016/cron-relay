@@ -1457,10 +1457,14 @@ const groupLimitOf = (c, isG2) => (isG2 ? c.poolLimitG2 : c.poolLimitG1);
 // 满员闸口的计数口径（2026-10-26 修复）：排除「已过期但还没被 pruneExpired 清掉」的号。
 // 这些号到期后已不参与轮转，却仍然占着人数上限，导致满员提示比实际可登记名额早出现。
 // 口径：exp 为空 / forever → 在册；形如 YYYY-MM-DD 且 < 今天 → 不计；其它异常格式按在册处理（保守）。
+// 2026-11-05 补充：公益号（pub=1）不占登记名额。
+// 原因：公益号从今天起一律 exp='forever'（到期降级时写死），forever 按上面的规则属于「在册」，
+// 会永久占掉一个名额，越积越多最终把新登记的号挤掉。公益号本来就不是付费客户，不该占额度。
 function activePoolSize(arr, today) {
   const t = today || beijingDate();
   let n = 0;
   for (const e of (arr || [])) {
+    if (e && e.pub) continue;
     const x = String((e && e.exp) || '').trim();
     if (!x || x === 'forever') { n++; continue; }
     if (/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(x) && x < t) continue;
@@ -1755,8 +1759,8 @@ function planOf(cfg, x) {
 // 为什么改：到期的号直接删掉会让池子突然缩水（原本它在帮别人听），而且号主的记录全没了、
 //   续费还得重新走一遍登记；降级成公益号后：自己的歌不再分给别人听（pub=1 天然如此），
 //   但仍然帮别人听，号主随时续费（重新登记同一个号）就恢复普通号。
-// 保留过期的 exp 原值（不改成 forever）—— 这样它仍然【不占】登记名额（见 activePoolSize），
-//   否则到期号会白占名额，把新登记的号挤掉。
+// 2026-11-05 用户要求：降级时直接写成 exp='forever'（公益号永久有效）+ 清空 email。
+//   为了防止永久有效的号白占登记名额，activePoolSize 已改成「pub=1 不计入」。
 async function pruneExpired() {
   const master = await mergePool();
   // 已经是公益号的跳过，否则每天都会把同一批号重复写一遍
@@ -1764,15 +1768,20 @@ async function pruneExpired() {
   if (!dead.length) return { master: master, count: 0 };
   await Promise.all(dead.map(async e => {
     e.pub = 1;
+    // 2026-11-05 用户要求：公益号一律「永久有效」+ 清掉邮箱（不再发任何提醒），
+    // 就这么挂着帮别人听，直到 cookie 失效被判死删除为止。
+    // 设 forever 后必须配 activePoolSize 的「pub 不占名额」，否则到期号会永久白占额度。
+    e.exp = 'forever';
+    e.email = '';
     await POOL.put(entryKeyOf(e), JSON.stringify(e));
     if (!(await d1Upsert(e))) console.error('D1 到期降级公益号失败:', e && (e.name || e.uid));
   }));
   // 审计留档：dead_log 里记一条 expired_pub（不是删除，控制台「删号记录」里能看出是到期降级）
   await d1LogDead(dead, 'expired_pub');
-  // 号主仍然要收到「到期了、已降级为公益号」的提醒 ——
-  // 但 dead_notice 的常规判定是「号还在池里就算回池、不发」，所以这里写 kind='expired'，
-  // 由 /api/dead_pending 用「号还在且 pub=1（没续费）」来判定该不该发。
-  try { for (const e of dead) await d1QueueNotice(e, 'expired'); } catch (e) { console.error('通知队列写入失败:', e && e.message); }
+  // 2026-11-05：到期降公益后【不再发提醒】（用户口径：公益号不需要再提醒）。
+  // 原来这里会给号主发 kind='expired' 的「到期了快续费」，现在公益号本身是永久的，
+  // 发信只会变成噪音。要恢复的话把下面这行 try 解注释即可。
+  // try { for (const e of dead) await d1QueueNotice(e, 'expired'); } catch (e) { console.error('通知队列写入失败:', e && e.message); }
   // 池内容变了（pub 变了）→ 刷新应急快照。号没删，所以不推 Secrets。
   try { await refreshPoolSnap(); } catch (e) {}
   return { master: master, count: dead.length };
@@ -3834,48 +3843,77 @@ async function handle(request) {
       const month = String(body.month || '').slice(0, 7);
       if (!/^\d{4}-\d{2}$/.test(month)) return json({ message: '请选择月份（YYYY-MM）' }, 400, CORS);
       const poolF = (['hz', 'dz'].indexOf(String(body.pool || '')) >= 0) ? String(body.pool) : '';
-      const where = ['day>=?', 'day<=?'];
-      const params = [month + '-01', month + '-31'];
-      if (poolF) { where.push('pool=?'); params.push(poolF); }
+      // 2026-11-05：加「客服」筛选。__none__ = 没有客服归属的历史单。
+      // 选中客服后所有汇总/明细都只算这个人，不再挂一个全群总数（否则很容易看错行）。
+      const agentRaw = String(body.agent == null ? '' : body.agent).trim();
+      const whereBase = ['day>=?', 'day<=?'];
+      const paramsBase = [month + '-01', month + '-31'];
+      if (poolF) { whereBase.push('pool=?'); paramsBase.push(poolF); }
+      const WH = whereBase.join(' AND ');
+      const where = whereBase.slice();
+      const params = paramsBase.slice();
+      if (agentRaw === '__none__') where.push("(agent IS NULL OR agent='')");
+      else if (agentRaw) { where.push('agent=?'); params.push(agentRaw); }
       const W = where.join(' AND ');
       // 统计口径：money 只累加「非补号 + 已定价」，unpriced 单独计数（不当 0 元混进合计）
+      // 2026-11-05：增 giftCnt —— 名字带 name: / manual: / 公益 的是公益赠号或手动加的号，
+      //   客户没为它付钱，必须从「有效单」里剔出去单列，否则提成被免费号抬高。
+      //   同时 unpriced 排除这类号：公益号没价格是正常的，不该显示成「待补价」诱导去定价。
+      const GIFT = "(name LIKE 'name:%' OR name LIKE 'manual:%' OR name LIKE '%公益%')";
       const AGG = "COUNT(*) cnt, SUM(CASE WHEN rb=1 THEN 1 ELSE 0 END) rbCnt, " +
+        "SUM(CASE WHEN " + GIFT + " THEN 1 ELSE 0 END) giftCnt, " +
         "SUM(CASE WHEN rb=0 AND price IS NOT NULL THEN price ELSE 0 END) money, " +
-        "SUM(CASE WHEN rb=0 AND price IS NULL THEN 1 ELSE 0 END) unpriced";
-      const [byPlan, byAgent, byPool, rows, cfgNow] = await Promise.all([
+        "SUM(CASE WHEN rb=0 AND price IS NULL AND NOT " + GIFT + " THEN 1 ELSE 0 END) unpriced";
+      const [byPlan, byAgent, byPool, rows, cfgNow, byAgentAll, accRows] = await Promise.all([
         d1All('SELECT plan, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY plan ORDER BY cnt DESC', params),
         d1All('SELECT agent, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY agent ORDER BY cnt DESC', params),
         d1All('SELECT pool, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY pool', params),
         d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,remark,src FROM ledger WHERE ' +
-              W + ' ORDER BY rb, day DESC, id DESC LIMIT 600', params),
+              W + ' ORDER BY rb, day DESC, id DESC LIMIT 1200', params),
         regCfg().catch(() => REG_CFG_DEFAULT),
+        // 下拉框要用「这个人之外还有谁」，所以客服列表不带 agent 过滤
+        d1All('SELECT agent, COUNT(*) cnt FROM ledger WHERE ' + WH + ' GROUP BY agent ORDER BY cnt DESC', paramsBase),
+        // 号在不在：用来给明细打「号已删」，并统计对账差额（账本只增不改，删号不会抹掉成交）
+        d1All('SELECT uid FROM accounts' + (poolF ? ' WHERE pool=?' : ''), poolF ? [poolF] : []),
       ]);
+      const aliveSet = new Set();
+      for (const r of (accRows || [])) aliveSet.add(String(r.uid == null ? '' : r.uid));
       const num = (x) => Number(x) || 0;
       const fix = (arr) => (arr || []).map(r => ({
         k: r.plan !== undefined ? r.plan : (r.agent !== undefined ? r.agent : r.pool),
         plan: r.plan, agent: r.agent, pool: r.pool,
         price: r.plan !== undefined ? planPrice(cfgNow, r.plan) : undefined,
-        cnt: num(r.cnt), rbCnt: num(r.rbCnt),
+        cnt: num(r.cnt), rbCnt: num(r.rbCnt), giftCnt: num(r.giftCnt),
         money: Math.round(num(r.money) * 100) / 100, unpriced: num(r.unpriced),
       }));
-      const t = { cnt: 0, rbCnt: 0, money: 0, unpriced: 0 };
+      const t = { cnt: 0, rbCnt: 0, giftCnt: 0, money: 0, unpriced: 0 };
       for (const r of (byPool || [])) {
-        t.cnt += num(r.cnt); t.rbCnt += num(r.rbCnt);
+        t.cnt += num(r.cnt); t.rbCnt += num(r.rbCnt); t.giftCnt += num(r.giftCnt);
         t.money += num(r.money); t.unpriced += num(r.unpriced);
       }
       t.money = Math.round(t.money * 100) / 100;
-      t.valid = t.cnt - t.rbCnt;      // 有效单 = 总单 - 补号单（提成按这个算）
-      return json({
-        ok: true, month: month, pool: poolF, total: t,
-        byPlan: fix(byPlan), byAgent: fix(byAgent), byPool: fix(byPool),
-        plans: (cfgNow.plans || []),
-        rows: (rows || []).map(r => ({
+      t.valid = t.cnt - t.rbCnt - t.giftCnt;   // 有效单 = 总单 - 补号单 - 赠号/手动号（提成按这个算）
+      const isGift = (nm) => /^name:|^manual:/.test(String(nm || '')) || String(nm || '').indexOf('公益') >= 0;
+      let gone = 0;
+      const outRows = (rows || []).map(r => {
+        const al = aliveSet.has(String(r.uid == null ? '' : r.uid));
+        if (!al) gone++;
+        return {
           id: r.id, pool: r.pool, uid: String(r.uid || ''), name: String(r.name || ''),
           agent: String(r.agent || ''), plan: String(r.plan || ''),
           price: (r.price === null || r.price === undefined) ? null : Number(r.price),
           day: String(r.day || ''), start: String(r.start || ''), exp: String(r.exp || ''),
           rb: num(r.rb), rbFrom: num(r.rb_from), remark: String(r.remark || ''), src: String(r.src || ''),
-        })),
+          gift: isGift(r.name) ? 1 : 0, alive: al ? 1 : 0,
+        };
+      });
+      t.gone = gone;   // 号已被删的单数：跟控制台筛选出的单量差多少，就是它
+      return json({
+        ok: true, month: month, pool: poolF, agent: agentRaw, total: t,
+        byPlan: fix(byPlan), byAgent: fix(byAgent), byPool: fix(byPool),
+        agents: (byAgentAll || []).map(x => ({ agent: String(x.agent == null ? '' : x.agent), cnt: num(x.cnt) })),
+        plans: (cfgNow.plans || []),
+        rows: outRows,
       }, 200, CORS);
     }
     // 给「待补价」的单子按当前配置价补齐（历史回填时套餐未知的那批）。
@@ -4928,10 +4966,11 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
 <!-- ===== 2026-11-05：月度结算 ===== -->
 <div class="modal" id="lgModal" hidden><div class="mbox" style="width:900px">
   <h3>月度结算</h3>
-  <p style="font-size:12px;color:#888;margin:4px 0 0">按<b>登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br>补号单单独列出：<b>不计营收、不计客服提成</b>。</p>
+  <p style="font-size:12px;color:#888;margin:4px 0 0">按<b>登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br>补号单、公益赠号/手动号都不计营收、不计提成，单独列出；「号已删」只是对账提示，不影响金额。</p>
   <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
     <div><label style="margin-top:0">月份</label><input type="month" id="lgMonth" style="width:150px"></div>
     <div><label style="margin-top:0">群</label><select id="lgPool" style="width:130px"><option value="">全部</option><option value="hz">主群</option><option value="dz">定制群</option></select></div>
+    <div><label style="margin-top:0">客服</label><select id="lgAgent" style="width:160px"><option value="">全部客服</option></select></div>
     <button class="mini" id="lgGo" style="margin-top:0;padding:9px 16px">查询</button>
     <button class="mini gray" id="lgCsv" style="margin-top:0">导出明细CSV</button>
   </div>
@@ -5767,6 +5806,7 @@ function lgTable(firstCol,arr,withPrice){
     +(withPrice?'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">单价</th>':'')
     +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">单数</th>'
     +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">其中补号</th>'
+    +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">其中赠号</th>'
     +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">金额</th></tr></thead><tbody>';
   for(var i=0;i<arr.length;i++){
     var r=arr[i];
@@ -5774,6 +5814,7 @@ function lgTable(firstCol,arr,withPrice){
       +(withPrice?'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2">'+(r.price>=0?r.price+' 元':'<span style="color:#b06a00">未定价</span>')+'</td>':'')
       +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2">'+r.cnt+'</td>'
       +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2;color:#255ea6">'+r.rbCnt+'</td>'
+      +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2;color:#b06a00">'+(r.giftCnt||0)+'</td>'
       +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2;font-weight:600">'+lgMoney(r.money)+'</td></tr>';
   }
   return h+'</tbody></table>';
@@ -5781,22 +5822,44 @@ function lgTable(firstCol,arr,withPrice){
 function lgRender(o){
   LGDATA=o;
   var t=o.total||{};
+  // 客服下拉：选项来自服务端返回的全量分组（不受当前筛选影响），保留当前选择
+  var agSel=$('lgAgent');
+  if(agSel){
+    var cur=agSel.value||o.agent||'';
+    var arr=o.agents||[], opts='<option value="">全部客服</option>';
+    for(var j=0;j<arr.length;j++){
+      var a=arr[j].agent||'';
+      opts+='<option value="'+(a?esc(a):'__none__')+'"'+((cur===(a||'__none__'))?' selected':'')+'>'+(a?esc(a):'(无客服)')+'（'+arr[j].cnt+'）</option>';
+    }
+    agSel.innerHTML=opts;
+  }
+  var who=o.agent?(o.agent==='__none__'?'（无客服）':o.agent):'';
   var h='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">'
     +lgStat('营收合计（元）',lgMoney(t.money),false)
-    +lgStat('有效单（算提成）',(t.valid||0),false)
+    +lgStat((who?who+' · ':'')+'有效单（算提成）',(t.valid||0),false)
     +lgStat('补号单（不算钱）',(t.rbCnt||0),false)
+    +lgStat('赠号/手动号（不算单）',(t.giftCnt||0),(t.giftCnt||0)>0)
+    +lgStat('号已删（对账差额）',(t.gone||0),(t.gone||0)>0)
     +lgStat('待补价',(t.unpriced||0),(t.unpriced||0)>0)
     +'</div>';
+  if(who){
+    h+='<p style="font-size:12px;color:#3b6d11;margin:0 0 10px;background:#f2f7ea;padding:6px 10px;border-radius:8px">'
+      +'当前只统计<b>'+esc(who)+'</b> 在 '+esc(o.month)+' 的单；下面的合计、按套餐、明细全部是这个人。点「全部客服」看全群。</p>';
+  }
   if(t.unpriced>0){
     h+='<p style="font-size:12px;color:#b06a00;margin:0 0 10px">有 '+t.unpriced+' 单没定价（历史回填时套餐空着，或档位配置里没填价格），这批<b>没有算进上面的合计</b>。'
       +'<button class="mini" id="lgFix" style="margin-left:8px;padding:4px 10px;font-size:12px">按当前配置价补齐</button></p>';
   }
+  if((t.gone||0)>0){
+    h+='<p style="font-size:12px;color:#666;margin:0 0 10px">「号已删」= 这单成交后号被删了（掉线判死 / 手动删）。控制台按账号筛选是看不到它的，'
+      +'所以筛选出来的单量会比这里少 '+(t.gone||0)+' 单，属正常：账本只增不改，删号不抹营收。</p>';
+  }
   h+='<h4 style="margin:10px 0 6px;font-size:13px">按套餐</h4>'+lgTable('套餐',o.byPlan,true);
-  h+='<h4 style="margin:10px 0 6px;font-size:13px">按客服（提成看「有效单」这一列）</h4>'+lgTable('客服',o.byAgent,false);
+  if(!who)h+='<h4 style="margin:10px 0 6px;font-size:13px">按客服（提成看「有效单」这一列）</h4>'+lgTable('客服',o.byAgent,false);
   if(!o.pool)h+='<h4 style="margin:10px 0 6px;font-size:13px">按群</h4>'+lgTable('群',o.byPool,false);
   // 明细
   var rows=o.rows||[];
-  h+='<details'+(rows.length<=80?' open':'')+'><summary style="cursor:pointer;color:#3b6d11;font-size:13px">成交明细（'+rows.length+(rows.length>=600?' 条，只显示前 600':' 条')+'）</summary>';
+  h+='<details'+(rows.length<=80?' open':'')+'><summary style="cursor:pointer;color:#3b6d11;font-size:13px">成交明细（'+rows.length+(rows.length>=1200?' 条，只显示前 1200':' 条')+'）</summary>';
   h+='<div style="max-height:320px;overflow:auto;margin-top:8px"><table style="border-collapse:collapse;width:100%;font-size:12.5px"><thead><tr>'
     +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">登记日</th>'
     +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">群</th>'
@@ -5810,10 +5873,13 @@ function lgRender(o){
     h+='<tr'+(r.rb?' style="background:#f7fafd"':'')+'>'
       +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.day)+'</td>'
       +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+(r.pool==='hz'?'主群':'定制')+'</td>'
-      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.name||r.uid)+'</td>'
+      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.name||r.uid)
+        +(r.alive?'':' <span class="badge b-gray" title="这单成交后号已被删除（掉线判死/手动删），控制台按账号筛选看不到它">号已删</span>')
+        +(r.gift?' <span class="badge b-yellow" title="公益赠号或手动加的号，不是客户买的，不算提成">赠号</span>':'')
+      +'</td>'
       +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.agent||'—')+'</td>'
       +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.plan||'未标注')+'</td>'
-      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2;text-align:right">'+(r.rb?'<span class="badge b-blue">补</span> 0.00':(r.price==null?'<span style="color:#b06a00">待补价</span>':lgMoney(r.price)))+'</td>'
+      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2;text-align:right">'+(r.rb?'<span class="badge b-blue">补</span> 0.00':(r.gift?'<span style="color:#999">赠号</span>':(r.price==null?'<span style="color:#b06a00">待补价</span>':lgMoney(r.price))))+'</td>'
       +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2;color:#666">'+esc(r.remark||'')+'</td></tr>';
   }
   h+='</tbody></table></div></details>';
@@ -5826,7 +5892,7 @@ function lgLoad(){
   if(!m){$('lgm').textContent='请先选月份';$('lgm').className='msg err';return;}
   $('lgm').textContent='查询中…';$('lgm').className='msg';
   $('lgGo').disabled=true;
-  api('/api/console/ledger',{user:t.user,pass:t.pass,month:m,pool:$('lgPool').value}).then(function(o){
+  api('/api/console/ledger',{user:t.user,pass:t.pass,month:m,pool:$('lgPool').value,agent:($('lgAgent')?$('lgAgent').value:'')}).then(function(o){
     $('lgGo').disabled=false;
     if(!(o.ok&&o.d&&o.d.ok)){$('lgm').textContent=(o.d&&o.d.message)||'查询失败';$('lgm').className='msg err';$('lgBody').innerHTML='';return;}
     $('lgm').textContent='';$('lgm').className='msg';
@@ -5847,16 +5913,17 @@ $('lgClose').onclick=function(){$('lgModal').hidden=true;};
 $('lgGo').onclick=lgLoad;
 $('lgMonth').onchange=lgLoad;
 $('lgPool').onchange=lgLoad;
+if($('lgAgent'))$('lgAgent').onchange=lgLoad;
 $('lgCsv').onclick=function(){
   if(!LGDATA||!LGDATA.rows||!LGDATA.rows.length){$('lgm').textContent='还没有数据，先点查询';$('lgm').className='msg err';return;}
-  var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','备注']];
+  var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','号是否还在','备注']];
   for(var i=0;i<LGDATA.rows.length;i++){var r=LGDATA.rows[i];
     out.push([r.day,r.pool==='hz'?'主群':'定制群',r.name,r.uid,r.agent,r.plan,
-      r.rb?'0':(r.price==null?'':r.price),r.rb?'补号':'',r.remark]);}
+      r.rb?'0':(r.gift?'赠号':(r.price==null?'':r.price)),r.rb?'补号':'',r.alive?'在':'已删',r.remark]);}
   var csv='\\ufeff'+out.map(function(a){return a.map(function(v){return '"'+String(v==null?'':v).replace(/"/g,'""')+'"';}).join(',');}).join('\\r\\n');
   var a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
-  a.download='结算_'+(LGDATA.month||'')+'_'+(LGDATA.pool||'全部')+'.csv';
+  a.download='结算_'+(LGDATA.month||'')+'_'+(LGDATA.pool||'全部')+'_'+(LGDATA.agent?(LGDATA.agent==='__none__'?'无客服':LGDATA.agent):'全部客服')+'.csv';
   document.body.appendChild(a);a.click();document.body.removeChild(a);
 };
 $('btnLedger').onclick=function(){
