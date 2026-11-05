@@ -14,6 +14,7 @@
     snapshots   每日快照（650/rate/rpc30 历史；网易后台只给当前值，过了就查不到 → 不可再生）
     kv_misc     配置（reg_cfg = 套餐档位 + 客服名单的唯一权威）
     dead_log    判死流水（审计用；按原 id 插入，已存在则跳过，不覆盖）
+    ledger      记账流水（2026-11-05 新增；同样按原 id 插入、已存在则跳过，绝不覆盖线上成交流水）
   2026-10-29 之前只恢复 accounts，快照和配置在备份文件里躺着却从不写回 —— 一旦真出事，
   650 历史要重新长 60 天、登记页套餐/客服下拉框会回默认值。
 
@@ -44,9 +45,10 @@ TOK = (os.environ.get("CF_TOKEN", "") or "").strip()
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131.0.0.0 Safari/537.36"
 # 2026-11-04：与 d1_backup.py 同步补齐 suspect_at / pub / relogin_at，
 # 否则新备份里的这三列永远灌不回去（upsert 只写 COLS 里的列）。
+# 2026-11-05：再加 rb / rb_from / rb_start（补号标记 + 关联原单 + 原单登记日）。
 COLS = ["pool", "uid", "name", "song", "ck", "added", "exp", "no_listen",
         "email", "updated_at", "note", "suspect_at", "agent", "plan",
-        "pub", "relogin_at"]
+        "pub", "relogin_at", "rb", "rb_from", "rb_start"]
 BATCH = 7   # 上限值：7 行 × 13 列 = 91 个绑定参数，低于 D1 单查询 100 参数上限
             # 实际每批行数按「列数」重算（见 restore_table），备份列少时可以更宽
 
@@ -61,8 +63,13 @@ SPECS = {
     "kv_misc": {"pkey": ["k"], "cols": ["k", "v", "updated_at"], "coalesce": (), "mode": "upsert"},
     "dead_log": {"pkey": ["id"], "cols": ["id", "pool", "uid", "name", "reason", "at"],
                  "coalesce": (), "mode": "ignore"},
+    # 记账流水（2026-11-05）：只增不改，恢复用 ignore —— 库里已存在的成交记录不被备份覆盖。
+    "ledger": {"pkey": ["id"],
+               "cols": ["id", "pool", "uid", "name", "agent", "plan", "price", "days",
+                        "day", "start", "exp", "rb", "rb_from", "remark", "src", "at"],
+               "coalesce": (), "mode": "ignore"},
 }
-DATA_ORDER = ["accounts", "snapshots", "kv_misc", "dead_log"]
+DATA_ORDER = ["accounts", "snapshots", "kv_misc", "dead_log", "ledger"]
 
 
 def api(sql, params=None):
@@ -230,7 +237,8 @@ def main():
     rows = api("SELECT (SELECT COUNT(*) FROM accounts) AS accounts, "
                "(SELECT COUNT(*) FROM snapshots) AS snapshots, "
                "(SELECT COUNT(*) FROM kv_misc) AS kv_misc, "
-               "(SELECT COUNT(*) FROM dead_log) AS dead_log")
+               "(SELECT COUNT(*) FROM dead_log) AS dead_log, "
+               "(SELECT COUNT(*) FROM ledger) AS ledger")
     print(f"[restore] 写入 {total} 行；恢复后库内计数：",
           (rows.get("result") or [{}])[0].get("results"))
 

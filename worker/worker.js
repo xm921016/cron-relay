@@ -1620,6 +1620,15 @@ function isSoonExpired(e) {
 function beijingDatePlus(n) {
   return new Date(Date.now() + 8 * 3600 * 1000 + n * 86400 * 1000).toISOString().slice(0, 10);
 }
+// 2026-11-05：从指定日期起加 n 天（补号「继承原单」用：原单登记日 + 套餐天数 = 新到期日，
+// 而不是从今天重算 —— 否则客户掉线补一次号就白赚剩下的月份）。
+function datePlusFrom(base, n) {
+  const s = String(base || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
+  const d = new Date(s + 'T00:00:00Z');
+  if (isNaN(d.getTime())) return '';
+  return new Date(d.getTime() + (Number(n) || 0) * 86400000).toISOString().slice(0, 10);
+}
 function parseExpInput(x) {
   if (x == null || String(x).trim() === '') return { ok: true };
   const s = String(x).trim();
@@ -1640,14 +1649,18 @@ function parseExpInput(x) {
 // ====================================================================
 const REG_CFG_KEY = 'reg_cfg';
 const REG_CFG_KV = 'REG_CFG';
+// 2026-11-05：套餐加 price（单价，元）并补「半年」档。
+// price 只用于控制台「月度结算」算钱，不参与播放/有效期任何判定；
+// 0 元或缺省 = 该档位没定价，结算页会把它单独列成「待补价」，绝不按 0 元混进合计。
 const REG_CFG_DEFAULT = {
   agents: ['徐'],
-  // 2026-10-27：加「1月」（30 天）档。档位顺序 = 客户端下拉顺序，从短到长排。
+  // 档位顺序 = 客户端下拉顺序，从短到长排。
   plans: [
-    { key: '1m', label: '1月', days: 30 },
-    { key: '1y', label: '1年', days: 365 },
-    { key: '2y', label: '2年', days: 730 },
-    { key: 'forever', label: '永久', days: 0 },
+    { key: '1m', label: '1月', days: 30, price: 3 },
+    { key: '6m', label: '半年', days: 180, price: 10 },
+    { key: '1y', label: '1年', days: 365, price: 15 },
+    { key: '2y', label: '2年', days: 730, price: 20 },
+    { key: 'forever', label: '永久', days: 0, price: 80 },
   ],
 };
 
@@ -1671,11 +1684,31 @@ function normRegCfg(o) {
     const days = Math.max(0, Math.min(36500, parseInt(p.days, 10) || 0));
     const key = String(p.key || label).trim().slice(0, 16) || label;
     if (out.plans.some(x => x.key === key)) continue;
-    out.plans.push({ key: key, label: label, days: days });
+    // 2026-11-05：单价（元）。缺省/非法 = -1（未定价），不是 0 —— 0 会被结算当成免费，
+    // 让一整档的收入凭空消失；-1 会显式落到「待补价」里等人填。
+    let price = Number(p.price);
+    if (p.price === undefined || p.price === null || String(p.price).trim() === ''
+        || !isFinite(price) || price < 0) {
+      // ⚠ 老配置（11-05 之前存的 reg_cfg）里根本没有 price 字段。这里按内置默认价的同名档位兜底，
+      // 否则升级 Worker 的那一刻，全群 4 个档位会一起变成「未定价」，月度结算全是待补价。
+      const dft = REG_CFG_DEFAULT.plans.find(x => x.label === label);
+      price = dft ? dft.price : -1;
+    }
+    price = Math.round(price * 100) / 100;
+    out.plans.push({ key: key, label: label, days: days, price: price });
   }
   if (!out.agents.length) out.agents = REG_CFG_DEFAULT.agents.slice();
-  if (!out.plans.length) out.plans = REG_CFG_DEFAULT.plans.map(p => ({ key: p.key, label: p.label, days: p.days }));
+  if (!out.plans.length) out.plans = REG_CFG_DEFAULT.plans.map(p => ({ key: p.key, label: p.label, days: p.days, price: p.price }));
   return out;
+}
+
+// 套餐显示名 → 单价（元）。返回 -1 表示没定价（结算页单列，不计入合计）。
+function planPrice(cfg, label) {
+  const s = String(label == null ? '' : label).trim();
+  if (!s) return -1;
+  const p = ((cfg && cfg.plans) || []).find(it => it.key === s || it.label === s);
+  if (!p) return -1;
+  return (typeof p.price === 'number' && p.price >= 0) ? p.price : -1;
 }
 
 // 读配置：D1 → KV → 内置默认。任何异常都不抛，绝不阻塞登记。
@@ -1950,6 +1983,8 @@ async function addEntry(entry) {
       if (!(await d1Upsert(entry))) {
         console.error('D1 登记镜像失败（KV 已写入，可用 /api/resync 补齐）');
       }
+      // 2026-11-05：落一笔记账流水（成交台账）。写失败只告警 —— 记账出错不能反过来让登记失败。
+      try { await ledgerAdd(entry); } catch (e) { console.error('记账流水写入失败:', e && e.message); }
       // 重新登记 → 清墓碑（只影响 KV 回退路径）
       try {
         const deadLog = new Set(await getDeadLog());
@@ -2000,6 +2035,8 @@ async function addEntry(entry) {
   await POOL.put(ekey, JSON.stringify(entry));
   // D1 影子库同步（2026-10-22）：失败只记日志，绝不影响登记结果
   try { await d1Upsert(entry); } catch (e) { console.error('D1 镜像失败:', e && e.message); }
+  // 2026-11-05：记账流水（与 D1 路径同口径）。D1 已经不可用时这里也会是 no-op。
+  try { await ledgerAdd(entry); } catch (e) { console.error('记账流水写入失败:', e && e.message); }
   // 重新登记成功 → 清掉墓碑（dead_log 里移除本账号的 uid 键与 name 键两种形态）
   if (deadLog.size) {
     const cleared = [...deadLog].filter(k => k !== ekey
@@ -2149,15 +2186,27 @@ async function d1Run(sql, params) {
 // 2026-10-26 修复：无 uid 的历史条目以前直接 return false，导致这些号在控制台上的
 // 「改歌 / 改邮箱 / 改有效期」只写进 KV，而读路径走 D1 → 刷新一次就变回旧值（假成功）。
 // D1 里这类行的定位键是 'name:<name>' 占位（见 d1RowToEntry 的反向还原），这里按同一口径写。
-async function d1Upsert(e) {
+// opt.keepEmpty === false → 这次是「控制台明确编辑」，允许把 note/rb/rb_start 写成空/0（清空）。
+// 默认保持「非空才覆盖」：/api/d1_sync 之类从 KV 老数据回灌时，KV 里没有这几列，
+// 无脑覆盖会把 640 个存量号的备注和补号标记一次清空（agent/plan 当年就是这么被清过的）。
+async function d1Upsert(e, opt) {
   if (!d1ok() || !e) return false;
+  const clearable = !!(opt && opt.keepEmpty === false);
   let uid = e.uid != null ? String(e.uid) : '';
   if (!uid) {
     if (!e.name) return false;
     uid = 'name:' + String(e.name);
   }
+  const noteSet = clearable
+    ? 'note=excluded.note'
+    : 'note=CASE WHEN excluded.note<>\'\' THEN excluded.note ELSE accounts.note END';
+  const rbSet = clearable
+    ? 'rb=excluded.rb, rb_from=excluded.rb_from, rb_start=excluded.rb_start'
+    : 'rb=CASE WHEN excluded.rb=1 THEN 1 ELSE COALESCE(accounts.rb,0) END, ' +
+      'rb_from=CASE WHEN excluded.rb_from>0 THEN excluded.rb_from ELSE COALESCE(accounts.rb_from,0) END, ' +
+      'rb_start=CASE WHEN excluded.rb_start<>\'\' THEN excluded.rb_start ELSE COALESCE(accounts.rb_start,\'\') END';
   return d1Run(
-    'INSERT INTO accounts (pool,uid,name,song,ck,added,exp,no_listen,email,updated_at,agent,plan,pub) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ' +
+    'INSERT INTO accounts (pool,uid,name,song,ck,added,exp,no_listen,email,updated_at,agent,plan,pub,note,rb,rb_from,rb_start) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ' +
     'ON CONFLICT(pool,uid) DO UPDATE SET name=excluded.name, song=excluded.song, ck=excluded.ck, ' +
     'added=excluded.added, exp=excluded.exp, no_listen=excluded.no_listen, email=excluded.email, ' +
     'updated_at=excluded.updated_at, pub=excluded.pub, ' +
@@ -2165,13 +2214,16 @@ async function d1Upsert(e) {
     // KV 里没有这两列，无脑覆盖会把 505 个存量号的客服归属一次清空。
     'agent=CASE WHEN excluded.agent<>\'\' THEN excluded.agent ELSE accounts.agent END, ' +
     'plan=CASE WHEN excluded.plan<>\'\' THEN excluded.plan ELSE accounts.plan END, ' +
+    // 2026-11-05：备注/补号标记（按上面的 clearable 决定是否允许写空）
+    noteSet + ', ' + rbSet + ', ' +
     // 2026-11-04：号主重新登记（CK 真变了）→ 清掉「已通知重登」标记，下一轮自动回到听众环。
     // 必须按 CK 变化判断而不是每次登记都清：/api/d1_sync 之类从 KV 老数据回灌时 CK 不变，
     // 无脑清空会让刚通知过的号立刻又回到听众环、再失败一次、再发一封邮件。
     'relogin_at=CASE WHEN accounts.ck<>excluded.ck THEN \'\' ELSE COALESCE(accounts.relogin_at,\'\') END',
     [POOL_NAME, uid, String(e.name || ''), String(e.song || ''), String(e.ck || ''), String(e.added || ''),
      String(e.exp || ''), e.noListen ? 1 : 0, String(e.email || ''), new Date().toISOString(),
-     String(e.agent || ''), String(e.plan || ''), e.pub ? 1 : 0]
+     String(e.agent || ''), String(e.plan || ''), e.pub ? 1 : 0,
+     String(e.note || ''), e.rb ? 1 : 0, Number(e.rbFrom) || 0, String(e.rbStart || '')]
   );
 }
 async function d1Delete(e) {
@@ -2183,13 +2235,92 @@ async function d1Delete(e) {
 }
 
 // ====================================================================
+// 记账流水 ledger（2026-11-05 新增）
+// 背景：客服按「登记单数」单独拿提成，但掉线的客户要免费补一个号（补号不给提成）；
+//       结算是次月 15 号回头算上月，所以必须有一份【不会随删号/改套餐漂移】的成交台账。
+//       accounts 是「当前状态」——删号整行消失、改套餐原地覆盖，拿它算历史月账会凭空少单。
+// 语义：
+//   day      成交日（= 登记日 added 的日期部分），结算按这个月分组
+//   start    服务开始日（补号时继承原单的 start）
+//   exp      到期日（补号时继承原单的 exp，不重置）
+//   price    单价（元）；NULL = 该档位没定价 → 结算页单列「待补价」，绝不当 0 元混进合计
+//   rb       1 = 补号（免费补偿）：不计营收、不计提成，明细里单独一块
+//   rb_from  关联的原单 ledger.id
+//   src      reg=登记时自动记 / backfill=历史回填 / manual=人工补录
+// 唯一键 (pool,uid,day)：同一个号同一天只留一笔，重复登记走更新不新增。
+// ====================================================================
+function ledgerUidOf(e) {
+  const u = (e && e.uid != null && String(e.uid) !== '') ? String(e.uid) : ('name:' + String((e && e.name) || ''));
+  return (u === 'name:' || !u) ? '' : u;
+}
+// 写一笔成交流水。任何异常都吞掉（记账失败绝不能让登记失败）。
+async function ledgerAdd(e, opt) {
+  if (!d1ok() || !e) return false;
+  const o = opt || {};
+  const uid = ledgerUidOf(e);
+  if (!uid) return false;
+  let price = -1;
+  let days = 0;
+  try {
+    const rc = await regCfg();
+    price = planPrice(rc, e.plan);
+    const pl = (rc.plans || []).find(it => it.key === e.plan || it.label === e.plan);
+    days = pl ? (Number(pl.days) || 0) : 0;
+  } catch (_e) { price = -1; }
+  const added = String(e.added || '') || beijingDateTime();
+  const day = added.slice(0, 10) || beijingDate();
+  const exp = String(e.exp || '') || 'forever';
+  // 已标记补号的那笔不能被「重新登记/回灌」洗回正常单 —— 否则免费补号下个月又被算一次提成
+  return d1Run(
+    'INSERT INTO ledger (pool,uid,name,agent,plan,price,days,day,start,exp,rb,rb_from,remark,src,at) ' +
+    'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ' +
+    'ON CONFLICT(pool,uid,day) DO UPDATE SET name=excluded.name, agent=excluded.agent, ' +
+    'plan=excluded.plan, price=excluded.price, exp=excluded.exp, at=excluded.at, ' +
+    'rb=CASE WHEN ledger.rb=1 THEN 1 ELSE excluded.rb END, ' +
+    'rb_from=CASE WHEN ledger.rb=1 THEN ledger.rb_from ELSE excluded.rb_from END, ' +
+    'remark=CASE WHEN excluded.remark<>\'\' THEN excluded.remark ELSE ledger.remark END',
+    [POOL_NAME, uid, String(e.name || ''), String(e.agent || ''), String(e.plan || ''),
+     price >= 0 ? price : null, days, day, String(o.start || day), exp,
+     o.rb ? 1 : 0, Number(o.rbFrom) || 0, String(o.remark || ''), String(o.src || 'reg'),
+     beijingDateTime()]
+  );
+}
+// 把某个号的成交记录打上/去掉「补号」标记（控制台编辑弹窗调用）。
+// 只动这个号【最近一笔】流水，老月份已经结过账的记录绝不回改。
+async function ledgerMarkRebind(pool, uid, name, on, rbFrom, rbStart, remark, newExp, fallbackEntry) {
+  if (!d1ok()) return false;
+  const p = String(pool || POOL_NAME);
+  const idQ = uid
+    ? await d1All('SELECT id,day,price FROM ledger WHERE pool=? AND uid=? ORDER BY day DESC, id DESC LIMIT 1', [p, String(uid)])
+    : await d1All('SELECT id,day,price FROM ledger WHERE pool=? AND name=? ORDER BY day DESC, id DESC LIMIT 1', [p, String(name || '')]);
+  if (!idQ || !idQ.length) {
+    // 账本里还没有这个号（例如历史回填没覆盖到的老号）→ 直接补写一笔，别让「补号」标记凭空丢掉。
+    if (on && fallbackEntry) {
+      return ledgerAdd(fallbackEntry, { rb: 1, rbFrom: rbFrom, start: rbStart || '', remark: remark || '' });
+    }
+    return false;
+  }
+  const id = idQ[0].id;
+  // 注意：ledger 没有 rb_start 列 —— 补号时继承后的「服务开始日」直接写进 start。
+  // start / exp 只在有值时才更新：取消补号标记（on=false）时不该把已记录的日期抹掉。
+  const sets = ['rb=?', 'rb_from=?', 'remark=?'];
+  const params = [on ? 1 : 0, Number(rbFrom) || 0, String(remark || '')];
+  if (rbStart) { sets.push('start=?'); params.push(String(rbStart)); }
+  if (newExp) { sets.push('exp=?'); params.push(String(newExp)); }
+  params.push(id);
+  return d1Run('UPDATE ledger SET ' + sets.join(', ') + ' WHERE id=?', params);
+}
+
+// ====================================================================
 // D1 读路径（2026-10-22 第二批：读也切到 D1）
 // 背景：KV 的 mergePool 要 list 一次 + 把每个 entry 键读一遍（213 次读），
 // 这是「日读 3.6 万」和「p50 CPU 9ms」的主要来源。D1 一条 SELECT 就够。
 // 设计原则：D1 只做读，写仍然「KV 权威 + D1 镜像」不变；D1 任何异常都回退 KV，
 // 所以即使 D1 挂了，登记/控制台/分配也不会停，只是慢回旧路。
 // ====================================================================
-const D1_COLS = 'uid,name,song,ck,added,exp,no_listen,email,agent,plan,pub';
+// 2026-11-05：加 note（备注，复用库里已有的 note 列）/ rb（补号标记）/ rb_from（关联原单）/
+// rb_start（原单登记日）。缺这几个的话控制台改完备注一刷新就变回空。
+const D1_COLS = 'uid,name,song,ck,added,exp,no_listen,email,agent,plan,pub,note,rb,rb_from,rb_start';
 
 // D1 行 → KV entry 结构（保持字段名完全一致，上层代码无需改动）
 // ====================================================================
@@ -2244,6 +2375,11 @@ function d1RowToEntry(r) {
     agent: String(r.agent || ''),
     plan: String(r.plan || ''),
   };
+  // 2026-11-05：备注（D1 列名 note）+ 补号标记。空值不写进 entry，保持 KV 条目干净。
+  if (r.note) e.note = String(r.note);
+  if (r.rb) e.rb = 1;
+  if (r.rb_from) e.rbFrom = Number(r.rb_from) || 0;
+  if (r.rb_start) e.rbStart = String(r.rb_start);
   if (uidRaw && !uidRaw.startsWith('name:')) e.uid = r.uid;
   if (r.no_listen) e.noListen = 1;
   // 2026-11-01：公益号（只帮别人听、自己的歌不进互听环、不签到）。列缺失/老库读不到时按 0 处理。
@@ -3478,6 +3614,9 @@ async function handle(request) {
         agent: e.agent || '', plan: e.plan || '',
         // 2026-11-01：公益号（只帮别人听，自己的歌不进互听环，不签到）
         pub: !!e.pub,
+        // 2026-11-05：备注（存在 D1 的 note 列）+ 补号标记。
+        // 前端据此渲染「备注」列和「补」标签，也是编辑弹窗回填的初值。
+        note: e.note || '', rb: !!e.rb, rbFrom: Number(e.rbFrom) || 0, rbStart: e.rbStart || '',
       });
       const hz = master.map(disp);
       // 定制群账号列表：实时向对端 worker 拉（对穿口令；拉失败不阻塞主群展示）
@@ -3634,7 +3773,9 @@ async function handle(request) {
           if (!fwdPass) return json({ message: '本 worker 未配置对穿口令（KV 键 PEER_KEY / GROUP_PASS），无法编辑定制群账号' }, 503, CORS);
           const fwd = { pass: fwdPass, action: body.action, uid: body.uid, name: body.name,
             ck: body.ck, link: body.link, email: body.email, exp: body.exp, noListen: body.noListen,
-            agent: body.agent, plan: body.plan };
+            agent: body.agent, plan: body.plan,
+            // 2026-11-05：备注 / 补号标记也要转发，否则在控制台给定制群的号打补号标会静默无效
+            note: body.note, rb: body.rb, rbStart: body.rbStart, rbFrom: body.rbFrom };
           const r = await fetch(peerUrl + '/api/peer/entry', { method: 'POST',
             headers: { 'Content-Type': 'application/json', 'User-Agent': 'cron-relay-worker' },
             body: JSON.stringify(fwd) });
@@ -3664,6 +3805,125 @@ async function handle(request) {
       return json({ ok: true, d1: saved.ok, cfg: saved.cfg,
         message: '已保存：客服 ' + saved.cfg.agents.length + ' 人、套餐 ' + saved.cfg.plans.length + ' 档'
           + (saved.ok ? '' : '（⚠️ D1 写入失败，已写 KV 兜底，请稍后重试）') }, 200, CORS);
+    }
+    // ================= 记账（2026-11-05 新增）=================
+    // 需求：客服按登记单数拿提成，掉线补的号不给提成；每月结清、次月 15 号结算，
+    //   所以「12 月回头查 11 月一共多少钱」必须能一次算出来，且不受后续删号/改套餐影响。
+    // 数据源是 ledger 成交流水（不是 accounts 当前状态）。
+    // ⚠ 只认满权限口令：只读口令是给客服用的，绝不能让他们看到全群营收和各客服金额。
+    if (url.pathname === '/api/console/ledger' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) {
+        const who = await consoleRole(body);
+        return json({ message: who === 'ro' ? '当前是只读口令：结算金额只对群主开放' : '账号或密码错误' }, 403, CORS);
+      }
+      if (!d1ok()) return json({ message: 'D1 不可用，暂时读不到账本' }, 503, CORS);
+      const month = String(body.month || '').slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(month)) return json({ message: '请选择月份（YYYY-MM）' }, 400, CORS);
+      const poolF = (['hz', 'dz'].indexOf(String(body.pool || '')) >= 0) ? String(body.pool) : '';
+      const where = ['day>=?', 'day<=?'];
+      const params = [month + '-01', month + '-31'];
+      if (poolF) { where.push('pool=?'); params.push(poolF); }
+      const W = where.join(' AND ');
+      // 统计口径：money 只累加「非补号 + 已定价」，unpriced 单独计数（不当 0 元混进合计）
+      const AGG = "COUNT(*) cnt, SUM(CASE WHEN rb=1 THEN 1 ELSE 0 END) rbCnt, " +
+        "SUM(CASE WHEN rb=0 AND price IS NOT NULL THEN price ELSE 0 END) money, " +
+        "SUM(CASE WHEN rb=0 AND price IS NULL THEN 1 ELSE 0 END) unpriced";
+      const [byPlan, byAgent, byPool, rows, cfgNow] = await Promise.all([
+        d1All('SELECT plan, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY plan ORDER BY cnt DESC', params),
+        d1All('SELECT agent, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY agent ORDER BY cnt DESC', params),
+        d1All('SELECT pool, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY pool', params),
+        d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,remark,src FROM ledger WHERE ' +
+              W + ' ORDER BY rb, day DESC, id DESC LIMIT 600', params),
+        regCfg().catch(() => REG_CFG_DEFAULT),
+      ]);
+      const num = (x) => Number(x) || 0;
+      const fix = (arr) => (arr || []).map(r => ({
+        k: r.plan !== undefined ? r.plan : (r.agent !== undefined ? r.agent : r.pool),
+        plan: r.plan, agent: r.agent, pool: r.pool,
+        price: r.plan !== undefined ? planPrice(cfgNow, r.plan) : undefined,
+        cnt: num(r.cnt), rbCnt: num(r.rbCnt),
+        money: Math.round(num(r.money) * 100) / 100, unpriced: num(r.unpriced),
+      }));
+      const t = { cnt: 0, rbCnt: 0, money: 0, unpriced: 0 };
+      for (const r of (byPool || [])) {
+        t.cnt += num(r.cnt); t.rbCnt += num(r.rbCnt);
+        t.money += num(r.money); t.unpriced += num(r.unpriced);
+      }
+      t.money = Math.round(t.money * 100) / 100;
+      t.valid = t.cnt - t.rbCnt;      // 有效单 = 总单 - 补号单（提成按这个算）
+      return json({
+        ok: true, month: month, pool: poolF, total: t,
+        byPlan: fix(byPlan), byAgent: fix(byAgent), byPool: fix(byPool),
+        plans: (cfgNow.plans || []),
+        rows: (rows || []).map(r => ({
+          id: r.id, pool: r.pool, uid: String(r.uid || ''), name: String(r.name || ''),
+          agent: String(r.agent || ''), plan: String(r.plan || ''),
+          price: (r.price === null || r.price === undefined) ? null : Number(r.price),
+          day: String(r.day || ''), start: String(r.start || ''), exp: String(r.exp || ''),
+          rb: num(r.rb), rbFrom: num(r.rb_from), remark: String(r.remark || ''), src: String(r.src || ''),
+        })),
+      }, 200, CORS);
+    }
+    // 给「待补价」的单子按当前配置价补齐（历史回填时套餐未知的那批）。
+    // 只补 price 为 NULL 的行，已经有价的一律不动 —— 防止把过去按老价成交的单改成新价。
+    if (url.pathname === '/api/console/ledger_reprice' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) return json({ message: '只读口令不能改账' }, 403, CORS);
+      if (!d1ok()) return json({ message: 'D1 不可用' }, 503, CORS);
+      const month = String(body.month || '').slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(month)) return json({ message: '请选择月份（YYYY-MM）' }, 400, CORS);
+      const cfgNow = await regCfg();
+      const where = ['day>=?', 'day<=?', 'price IS NULL', "plan<>''"];
+      const params = [month + '-01', month + '-31'];
+      const W = where.join(' AND ');
+      const plans = await d1All('SELECT plan, COUNT(*) n FROM ledger WHERE ' + W + ' GROUP BY plan', params);
+      let fixed = 0, left = [];
+      for (const p of (plans || [])) {
+        const pr = planPrice(cfgNow, p.plan);
+        if (pr < 0) { left.push(p.plan + '(' + p.n + ')'); continue; }
+        const ok = await d1Run('UPDATE ledger SET price=? WHERE ' + W + ' AND plan=?',
+                               [pr, month + '-01', month + '-31', String(p.plan)]);
+        if (ok) fixed += Number(p.n) || 0;
+      }
+      return json({ ok: true, fixed: fixed,
+        message: '已按当前配置价补齐 ' + fixed + ' 单'
+          + (left.length ? '；这些档位配置里也没定价，补不了：' + left.join('、') : '') }, 200, CORS);
+    }
+    // 补号时找原单：按手机号 / 网易 UID / 备注片段搜成交台账。
+    // 原号早被删了也能搜到 —— 这正是流水表的意义（accounts 里早没这行了）。
+    if (url.pathname === '/api/console/findorder' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) return json({ message: '只读口令不能查订单' }, 403, CORS);
+      if (!d1ok()) return json({ message: 'D1 不可用' }, 503, CORS);
+      const q = String(body.q || '').trim().slice(0, 40);
+      if (q.length < 4) return json({ message: '至少输入 4 位（手机号 / UID / 备注片段）' }, 400, CORS);
+      const like = '%' + q + '%';
+      const rows = await d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,remark ' +
+        'FROM ledger WHERE name LIKE ? OR uid LIKE ? OR remark LIKE ? ORDER BY day DESC, id DESC LIMIT 20',
+        [like, like, like]);
+      // 顺手标出「这个号现在还在不在池里」，避免把在用的号误当原单
+      const uids = [...new Set((rows || []).map(r => String(r.uid || '')).filter(Boolean))];
+      const alive = {};
+      if (uids.length) {
+        const ph = uids.map(() => '?').join(',');
+        const a = await d1All('SELECT pool,uid FROM accounts WHERE uid IN (' + ph + ')', uids);
+        for (const x of (a || [])) alive[String(x.pool) + '|' + String(x.uid)] = 1;
+      }
+      return json({ ok: true, rows: (rows || []).map(r => ({
+        id: r.id, pool: r.pool, uid: String(r.uid || ''), name: String(r.name || ''),
+        agent: String(r.agent || ''), plan: String(r.plan || ''),
+        price: (r.price === null || r.price === undefined) ? null : Number(r.price),
+        day: String(r.day || ''), start: String(r.start || ''), exp: String(r.exp || ''),
+        rb: Number(r.rb) || 0, rbFrom: Number(r.rb_from) || 0, remark: String(r.remark || ''),
+        alive: !!alive[String(r.pool) + '|' + String(r.uid)],
+      })) }, 200, CORS);
     }
     return json({ message: 'not found' }, 404);
 }
@@ -4117,12 +4377,70 @@ async function applyEntryEdit(body) {
       target.plan = plE ? plE.label : normAgent(body.plan).slice(0, 8);
       changes.push('套餐=' + target.plan);
     }
+    // ===== 2026-11-05：备注 + 补号标记 =====
+    // 补号 = 客户掉线后免费补的一个新号：不计营收、不给客服提成，到期日继承原单（不重置）。
+    // 注意顺序：这段放在「有效期」分支之后，所以下面算出来的继承到期日会覆盖掉手工填的值
+    // —— 只有当本次没手工填有效期时才覆盖（见 body.exp 判断）。
+    // 「没有要修改的内容」这个兜底判断必须留在这段之后：只改备注也是一次有效修改。
+    let rbLog = null;
+    if (body.note !== undefined && body.note !== null) {
+      target.note = String(body.note).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 200);
+      changes.push(target.note ? '备注=' + target.note : '清空备注');
+    }
+    if (body.rb !== undefined && body.rb !== null) {
+      const on = !!body.rb;
+      if (on) {
+        const rs = String(body.rbStart || '').trim().slice(0, 10);
+        let newExp = '';
+        if (/^\d{4}-\d{2}-\d{2}$/.test(rs)) {
+          target.rbStart = rs;
+          // 只在本单有效期没被手工改过时才自动算 —— 手工填的值优先
+          if (body.exp === undefined || body.exp === null || String(body.exp).trim() === '') {
+            const rcR = await regCfg();
+            const plR = (rcR.plans || []).find(it => it.key === target.plan || it.label === target.plan);
+            const dys = plR ? (Number(plR.days) || 0) : 0;
+            if (dys > 0) {
+              newExp = datePlusFrom(rs, dys);
+              if (newExp) { target.exp = newExp; changes.push('到期日继承原单=' + newExp); }
+            } else if (plR) {
+              newExp = 'forever'; target.exp = 'forever';
+              changes.push('到期日继承原单=永久');
+            }
+          }
+        }
+        target.rb = 1;
+        target.rbFrom = Number(body.rbFrom) || 0;
+        changes.push('标记为补号（不计营收、不计提成）');
+        rbLog = { on: true, from: target.rbFrom, start: target.rbStart || '', exp: newExp };
+      } else {
+        target.rb = 0;
+        target.rbFrom = 0;
+        target.rbStart = '';
+        changes.push('取消补号标记（恢复为正常单）');
+        rbLog = { on: false };
+      }
+    }
     if (!changes.length) return json({ message: '没有要修改的内容（各栏留空=不改）' }, 400, CORS);
     await POOL.put(entryKeyOf(target), JSON.stringify(target));
     // 2026-10-22：D1 已是唯一读路径，镜像写失败必须显式告诉调用方 ——
     // 否则界面显示"已修改"，第二天读 D1 又变回旧值，谁都不知道出了事。
     let d1okEdit = false;
-    try { d1okEdit = await d1Upsert(target); } catch (e) { console.error('D1 修改镜像失败:', e && e.message); }
+    // keepEmpty:false —— 控制台是「明确编辑」，允许把备注清空、把补号标记取消（写空/0 生效）。
+    try { d1okEdit = await d1Upsert(target, { keepEmpty: false }); } catch (e) { console.error('D1 修改镜像失败:', e && e.message); }
+    // 流水表同步：只改这个号最近一笔（老月份已结过账的记录不动）。
+    // 写失败只记日志 —— 账本这一刻没跟上，下次编辑/重新登记会再补上，不该让整次编辑报错。
+    if (rbLog) {
+      try {
+        await ledgerMarkRebind(POOL_NAME, target.uid != null ? String(target.uid) : '',
+          target.name, rbLog.on, rbLog.from, rbLog.start, target.note || '', rbLog.exp, target);
+      } catch (e) { console.error('流水补号标记同步失败:', e && e.message); }
+    } else if (body.note !== undefined && body.note !== null) {
+      // 只改备注也要同步流水（结算明细里显示的就是流水那条 remark）
+      try {
+        await ledgerMarkRebind(POOL_NAME, target.uid != null ? String(target.uid) : '',
+          target.name, !!target.rb, Number(target.rbFrom) || 0, '', target.note || '', '');
+      } catch (e) { console.error('流水备注同步失败:', e && e.message); }
+    }
     // master 缓存不再回写（2026-10-22）：读者全走 D1，entry: 独立键才是权威
     await pushPool(master);
     try { await refreshPoolSnap(); } catch (e) {}
@@ -4492,11 +4810,12 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <select id="sort"><option value="default">排序：默认</option><option value="delta">排序：日涨幅↓</option><option value="rate">排序：今日进度↓</option></select>
     <button class="mini" id="btnCsv">导出CSV</button>
     <button class="mini" id="btnRefresh">刷新</button>
+    <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成">月度结算</button>
     <button class="mini gray" id="btnCfg" style="display:none">客服名单</button>
     <button class="mini gray" id="btnOut">退出</button>
   </div>
   <div class="twrap"><table><thead><tr>
-    <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人">邮箱</th><th>绑定歌曲</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="除 650 播放外的同组小任务（如发布笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">其他<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th>标记</th><th>操作</th>
+    <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人">邮箱</th><th>绑定歌曲</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="除 650 播放外的同组小任务（如发布笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">其他<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成">备注</th><th>标记</th><th>操作</th>
   </tr></thead><tbody id="tb"></tbody></table></div>
   <details class="deadbox" id="deadBox" hidden><summary>删号记录 / 待复核账号（最近 12 条，来自 D1 dead_log 与 accounts.suspect_at）</summary>
   <div class="muted" style="margin:6px 0 8px">原因：<b>手动删除</b>＝你在控制台/号池工具点的删除；<b>Cookie失效</b>＝播放前验活自动判死；<b>到期清理</b>＝账号有效期到了自动移除。已回池（迁移到另一群或当天重登）的号不算删号。<br>通知：<b>已通知</b>＝确认发出；<b>已回池·不发</b>＝号还在跑；<b>无邮箱·不发</b>＝没登记邮箱；<b>待判·12h</b>＝删后满 12 小时才判定该不该发；<b>自动判死·run.py 发信</b>＝早期记录，发信由播放任务临时触发，发没发事后查不到。</div><div id="deadList"></div></details>
@@ -4559,6 +4878,26 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <select id="ePlan"><option value="">不修改</option></select>
   <label>有效期（天数 / 日期 / 永久，留空不改）</label><input id="eExp">
   <label>暂停互听（只收不听）</label><select id="eNo"><option value="">不修改</option><option value="0">参与互听</option><option value="1">暂停互听</option></select>
+  <!-- ===== 2026-11-05：备注 + 补号 ===== -->
+  <div style="margin-top:14px;padding:10px 12px;background:#f7f9fb;border:1px solid #e6ebf1;border-radius:10px">
+    <label style="margin-top:0">备注（内部记录，号主看不到）</label>
+    <input id="eNote" maxlength="200" placeholder="例：11月原号 138xxxx 掉线，免费补登">
+    <label>补号标记（客户掉线后免费补的新号：<b>不计营收、不给客服提成</b>）</label>
+    <select id="eRb"><option value="">不修改</option><option value="1">是补号（免费补偿，不算钱）</option><option value="0">改成正常单（算钱）</option></select>
+    <p style="font-size:12px;color:#666;margin:6px 0 0" id="rbNow"></p>
+    <div id="rbBox" hidden style="margin-top:8px;border-top:1px dashed #dde3ea;padding-top:8px">
+      <label style="margin-top:0">① 找原单（填手机号 / 原网易 UID，原号早被删了也能查到）</label>
+      <div style="display:flex;gap:8px">
+        <input id="rbQ" placeholder="如 13800138000" style="flex:1">
+        <button class="mini" id="rbFind" type="button" style="margin-top:0">查原单</button>
+      </div>
+      <div id="rbList" style="max-height:160px;overflow:auto;margin-top:6px;font-size:12.5px"></div>
+      <label>② 原单登记日（填了就自动算继承到期日）</label>
+      <input id="rbStart" placeholder="YYYY-MM-DD">
+      <p style="font-size:11.5px;color:#888;margin:6px 0 0" id="rbHint">到期日 = 原单登记日 + 本单套餐天数。这样客户不会因为补号白得剩下的月份；想手工指定到期日，就填上面的「有效期」，以你填的为准。</p>
+      <input type="hidden" id="rbFrom">
+    </div>
+  </div>
   <label>账号类型（公益号 = 只帮别人听歌，自己登记的歌不再分给别人听，也不签到）</label><select id="ePub"><option value="">不修改</option><option value="0">普通号（参加互听 + 签到）</option><option value="1">公益号（只帮别人听）</option></select>
   <label>更换 CK（MUSIC_U，留空不改；保存前服务端会先校验有效性）</label><input id="eCk" placeholder="粘贴新的 MUSIC_U 值">
   <div class="row2"><button id="eSave">保存修改</button><button class="warn" id="eDel">删除账号</button><button class="gray" id="eCancel">关闭</button></div>
@@ -4569,11 +4908,25 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <p style="font-size:12px;color:#888;margin:4px 0 0">改完保存立即生效：APK / EXE 下次登记前会自动拉到新名单，<b>不用重新打包</b>。只读口令进不来这一页。</p>
   <label>客服（一行一个，顺序即下拉顺序）</label>
   <textarea id="cAgents" rows="5" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:ui-monospace,Consolas,monospace"></textarea>
-  <label>套餐（一行一个，格式 <code>显示名=天数</code>；天数填 0 表示永久）</label>
-  <textarea id="cPlans" rows="4" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:ui-monospace,Consolas,monospace"></textarea>
-  <p style="font-size:11.5px;color:#999;margin:6px 0 0">例：<code>1年=365</code> / <code>2年=730</code> / <code>永久=0</code>。删掉某个套餐不会影响已登记的号（它们的套餐名照旧显示）。</p>
+  <label>套餐（一行一个，格式 <code>显示名=天数=单价</code>；天数填 0 表示永久，单价单位元）</label>
+  <textarea id="cPlans" rows="6" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:ui-monospace,Consolas,monospace"></textarea>
+  <p style="font-size:11.5px;color:#999;margin:6px 0 0">例：<code>1月=30=3</code> / <code>半年=180=10</code> / <code>1年=365=15</code> / <code>2年=730=20</code> / <code>永久=0=80</code>。<br>单价的第三段不写就等于「没定价」，月度结算里会把它单列成「待补价」，<b>不会当 0 元算进合计</b>。删掉某个套餐不影响已登记的号（它们的套餐名照旧显示）。</p>
   <div class="row2"><button id="cSave">保存</button><button class="gray" id="cCancel">关闭</button></div>
   <div class="msg" id="cm"></div>
+</div></div>
+<!-- ===== 2026-11-05：月度结算 ===== -->
+<div class="modal" id="lgModal" hidden><div class="mbox" style="width:900px">
+  <h3>月度结算</h3>
+  <p style="font-size:12px;color:#888;margin:4px 0 0">按<b>登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br>补号单单独列出：<b>不计营收、不计客服提成</b>。</p>
+  <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
+    <div><label style="margin-top:0">月份</label><input type="month" id="lgMonth" style="width:150px"></div>
+    <div><label style="margin-top:0">群</label><select id="lgPool" style="width:130px"><option value="">全部</option><option value="hz">主群</option><option value="dz">定制群</option></select></div>
+    <button class="mini" id="lgGo" style="margin-top:0;padding:9px 16px">查询</button>
+    <button class="mini gray" id="lgCsv" style="margin-top:0">导出明细CSV</button>
+  </div>
+  <div id="lgBody" style="margin-top:12px;font-size:13px"></div>
+  <div class="row2"><button class="gray" id="lgClose">关闭</button></div>
+  <div class="msg" id="lgm"></div>
 </div></div>
 <script>
 var TOKEN=null, DATA=null, POOLF='all';
@@ -4582,6 +4935,8 @@ var TOKEN=null, DATA=null, POOLF='all';
 // STATF（2026-11-05）：顶部统计卡点出来的筛选值。空串=不筛；'__xxx' 是特殊口径（总数/有数据/上涨/下跌/3天+未涨），
 // 其它值直接当行内标记文本用（和搜索框同一套匹配，所以「顶部有数、点开搜不到」的老问题不会再出现）。
 var ROLE='ro', AGENTF='', PLANF='', STATF='', AGENTS=[], PLANS=[];
+// 2026-11-05：编辑弹窗是否成功回填到该行数据。true 才提交备注（否则「留空」会被当成清空）。
+var NOTE_OK=false;
 function $(id){return document.getElementById(id);}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function todayBJ(){var d=new Date(Date.now()+8*3600*1000);return d.toISOString().slice(0,10);}
@@ -4593,6 +4948,15 @@ function dMinus(day,n){
   if(p.length!==3)return '';
   var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2]));
   d.setUTCDate(d.getUTCDate()-(n||1));
+  return d.toISOString().slice(0,10);
+}
+// 2026-11-05：日期 +n 天（补号继承到期日的前端预览用，必须与服务端 datePlusFrom 算得一样）
+function dAdd(day,n){
+  if(!day)return '';
+  var p=String(day).split('-');
+  if(p.length!==3)return '';
+  var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2]));
+  d.setUTCDate(d.getUTCDate()+(n||0));
   return d.toISOString().slice(0,10);
 }
 function api(ep,body){return fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});});}
@@ -4704,6 +5068,8 @@ function applyRole(role){
   ROLE=(role==='full')?'full':'ro';
   var full=(ROLE==='full');
   $('btnCfg').style.display=full?'':'none';
+  // 2026-11-05：结算涉及金额，只有满权限能看到入口（服务端也拦）
+  var bl=$('btnLedger');if(bl)bl.style.display=full?'':'none';
   var t=$('ptitle');
   if(t){
     var old=document.getElementById('roTag');
@@ -5104,6 +5470,12 @@ function render(){
     var opCell=(ROLE==='full')
       ? '<button class="mini" style="padding:4px 10px;font-size:12px" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'">编辑</button>'
       : '<span style="color:#c9ced6;font-size:12px">只读</span>';
+    // 2026-11-05：备注列 + 补号标签。
+    // 「补」的意义在结账时才体现：这行是客户掉线后免费补的号，钱不算、客服也不提成。
+    var noteCell='';
+    if(e.rb)noteCell+='<span class="badge b-blue" title="补号：客户掉线后免费补的新号 —— 不计营收、不计客服提成；到期日继承原单（不重新给满套餐时间）">补</span>';
+    if(e.note)noteCell+=(e.rb?' ':'')+'<span title="'+esc(e.note)+'">'+esc(String(e.note).slice(0,20))+(String(e.note).length>20?'…':'')+'</span>';
+    if(!noteCell)noteCell='<span style="color:#bbb">—</span>';
     h+='<tr><td class="num">'+(i+1)+'</td>'
       +'<td><span class="badge '+(r.pool==='hz'?'b-hz">主群':'b-dz">定制')+'</span></td>'
       +'<td>'+esc(e.name)+'</td>'
@@ -5121,10 +5493,11 @@ function render(){
       +'<td class="num" data-l="入池">'+fmtAdded(e.added)+'</td>'
       +'<td class="num" data-l="有效期">'+esc(e.exp||'永久')+'</td>'
       +'<td data-l="套餐">'+plCell+'</td>'
+      +'<td data-l="备注">'+noteCell+'</td>'
       +'<td>'+(marks||'<span style="color:#bbb">正常</span>')+'</td>'
       +'<td>'+opCell+'</td></tr>';
   });
-  $('tb').innerHTML=h||'<tr><td colspan="18" style="text-align:center;color:#999;padding:20px">没有匹配的账号</td></tr>';
+  $('tb').innerHTML=h||'<tr><td colspan="19" style="text-align:center;color:#999;padding:20px">没有匹配的账号</td></tr>';
 }
 // 点顶部的套餐卡片 = 直接按这个套餐筛选（再点一次取消）
 function pickPlan(label){
@@ -5265,11 +5638,68 @@ window.openEdit=function(pool,uid,name){
   applyCfg(DATA&&DATA.cfg);
   if($('eAgent'))$('eAgent').value='';
   if($('ePlan'))$('ePlan').value='';
+  // 2026-11-05：回填备注 / 补号状态。找不到行就不提交备注（避免把已有备注误清空）。
+  var ent=null,arr=(pool==='dz'?(DATA&&DATA.dz):(DATA&&DATA.hz))||[];
+  for(var i=0;i<arr.length;i++){var x=arr[i];
+    if((uid&&String(x.uid)===String(uid))||(name&&String(x.name)===String(name))){ent=x;break;}}
+  NOTE_OK=!!ent;
+  $('eNote').value=ent?(ent.note||''):'';
+  $('eRb').value='';$('rbStart').value='';$('rbFrom').value='';$('rbQ').value='';$('rbList').innerHTML='';
+  $('rbBox').hidden=true;
+  $('rbHint').textContent='到期日 = 原单登记日 + 本单套餐天数。这样客户不会因为补号白得剩下的月份；想手工指定到期日，就填上面的「有效期」，以你填的为准。';
+  $('rbNow').innerHTML=(ent&&ent.rb)
+    ? ('当前：<span class="badge b-blue">补</span> 已标记为补号'+(ent.rbStart?'（原单登记日 '+esc(ent.rbStart)+'）':'')+' —— 这单不算营收、不算客服提成')
+    : '当前：正常单（计入营收、算客服提成）';
   $('mTitle').textContent='编辑账号 · '+(pool==='hz'?'主群':'定制群');
   $('mSub').textContent=name+(uid?' / uid '+uid:'');
   $('modal').hidden=false;
   $('eSave').onclick=function(){doEdit(pool,{uid:uid,name:name},'update');};
   $('eDel').onclick=function(){if(confirm('确定从'+(pool==='hz'?'主群':'定制群')+'删除账号 '+(name||uid)+'？删除后不能恢复。12 小时内没有重新登记回来（含迁到另一群），系统会自动给号主发一封「账号信息过期」邮件。'))doEdit(pool,{uid:uid,name:name},'delete');};
+};
+// 补号：选「是补号」才展开原单查找区（不选就不动，避免误改已标记的号）
+$('eRb').onchange=function(){$('rbBox').hidden=(this.value!=='1');};
+// 按手机号 / 原 UID 查成交台账 —— 原号早就删了也能查到，这正是流水表存在的意义
+$('rbFind').onclick=function(){
+  var t=JSON.parse(TOKEN||'{}'),q=$('rbQ').value.replace(/[^0-9A-Za-z_:\\-]/g,'').trim();
+  if(q.length<4){$('rbList').innerHTML='<span style="color:#a32d2d">至少输入 4 位（手机号 / UID）</span>';return;}
+  $('rbList').innerHTML='<span style="color:#888">查询中…</span>';
+  api('/api/console/findorder',{user:t.user,pass:t.pass,q:q}).then(function(o){
+    if(!(o.ok&&o.d&&o.d.ok)){$('rbList').innerHTML='<span style="color:#a32d2d">'+esc((o.d&&o.d.message)||'查询失败')+'</span>';return;}
+    var rs=o.d.rows||[];
+    if(!rs.length){$('rbList').innerHTML='<span style="color:#888">没查到成交记录（可能是 11-02 之前就删掉的号，备份里也没捞到）。可以直接手填下面的原单登记日。</span>';return;}
+    var hh='';
+    for(var i=0;i<rs.length;i++){var r=rs[i];
+      hh+='<div class="rbit" data-i="'+i+'" style="padding:6px 8px;border:1px solid #e6ebf1;border-radius:8px;margin-bottom:5px;cursor:pointer;background:#fff">'
+        +'<b>'+esc(r.day)+'</b> · '+esc(r.name||'—')+' · '+esc(r.plan||'未标注')
+        +(r.price!=null?(' · '+r.price+' 元'):' · <span style="color:#b06a00">待补价</span>')
+        +(r.rb?' <span class="badge b-blue">补</span>':'')
+        +(r.alive?' <span class="badge b-green">还在池里</span>':' <span class="badge b-gray">已删除</span>')
+        +'<div style="color:#888;font-size:11.5px">uid '+esc(r.uid)+' · 到期 '+esc(r.exp||'永久')+' · '+(r.agent?esc(r.agent):'未标客服')+'</div></div>';
+    }
+    $('rbList').innerHTML=hh;
+    var nodes=$('rbList').querySelectorAll('.rbit');
+    for(var k=0;k<nodes.length;k++){
+      nodes[k].onclick=function(){
+        var r=rs[Number(this.getAttribute('data-i'))||0];
+        if(!r)return;
+        for(var z=0;z<nodes.length;z++)nodes[z].style.background='#fff';
+        this.style.background='#eef6e6';
+        $('rbStart').value=r.day||'';
+        $('rbFrom').value=r.id||'';
+        if(!$('eNote').value.trim())$('eNote').value='原单 '+r.day+' '+r.plan+(r.name?(' '+r.name):'')+' 掉线补登';
+        if(!$('ePlan').value&&r.plan)$('ePlan').value=r.plan;
+        var pl=null;
+        for(var j=0;j<PLANS.length;j++){if(PLANS[j].label===r.plan)pl=PLANS[j];}
+        if(pl&&pl.days){
+          $('rbHint').textContent='按原单「'+r.plan+'」'+pl.days+' 天算：继承后到期日 = '+dAdd(r.day,pl.days)+'（点保存才生效）';
+        }else if(pl){
+          $('rbHint').textContent='原单是永久档 → 本单也按永久算（点保存才生效）';
+        }else{
+          $('rbHint').textContent='原单套餐没标注，算不出到期日：请在上面「有效期」里手工填一个，或先把套餐选成原单那档。';
+        }
+      };
+    }
+  }).catch(function(){$('rbList').innerHTML='<span style="color:#a32d2d">网络错误</span>';});
 };
 // 事件委托：表格内点「编辑」按钮（data-pool 属性路由到 openEdit），不受行重绘影响
 $('tb').addEventListener('click',function(ev){
@@ -5287,6 +5717,17 @@ function doEdit(pool,e,action){
     // 2026-10-27：留空=不改（与其它栏一致）
     if($('eAgent').value)body.agent=$('eAgent').value;
     if($('ePlan').value)body.plan=$('ePlan').value;
+    // 2026-11-05：备注是「所见即所存」—— 回填到了就整值提交（清空输入框 = 清空备注）。
+    // 没回填到该行数据时干脆不提交，避免把别人的备注误清空。
+    if(NOTE_OK)body.note=$('eNote').value.trim();
+    // 补号：只有主动选了才提交，默认「不修改」不会被误触发（否则每次改邮箱都会重算到期日）
+    if($('eRb').value!==''){
+      body.rb=($('eRb').value==='1');
+      if(body.rb){
+        body.rbStart=$('rbStart').value.trim();
+        body.rbFrom=parseInt($('rbFrom').value||'0',10)||0;
+      }
+    }
   }
   $('eSave').disabled=true;$('eDel').disabled=true;
   api('/api/console/entry',body).then(function(o){
@@ -5296,12 +5737,133 @@ function doEdit(pool,e,action){
   }).catch(function(){$('eSave').disabled=false;$('eDel').disabled=false;$('em').textContent='网络错误';$('em').className='msg err';});
 }
 $('eCancel').onclick=function(){$('modal').hidden=true;};
+// ===== 2026-11-05：月度结算 =====
+// 口径：按 ledger 成交流水的 day（登记日）分月。补号单 rb=1 单列，不计营收/提成。
+// 只读口令看不到这个按钮（applyRole 会隐藏），服务端也会 403。
+var LGDATA=null;
+function lgMoney(v){return (Math.round((Number(v)||0)*100)/100).toFixed(2);}
+function lgStat(lbl,val,warn){
+  return '<div style="flex:1;min-width:118px;background:'+(warn?'#fdf3e3':'#f2f7ea')+';border-radius:10px;padding:8px 12px">'
+    +'<span style="font-size:12px;color:#666">'+lbl+'</span>'
+    +'<b style="display:block;font-size:19px;color:'+(warn?'#b06a00':'#3b6d11')+'">'+val+'</b></div>';
+}
+function lgTable(firstCol,arr,withPrice){
+  if(!arr||!arr.length)return '<p style="color:#999;margin:6px 0 12px">没有数据</p>';
+  var h='<table style="border-collapse:collapse;width:100%;font-size:13px;margin:0 0 12px"><thead><tr>'
+    +'<th style="text-align:left;padding:7px 9px;background:#f5f6f8;color:#444">'+firstCol+'</th>'
+    +(withPrice?'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">单价</th>':'')
+    +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">单数</th>'
+    +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">其中补号</th>'
+    +'<th style="text-align:right;padding:7px 9px;background:#f5f6f8;color:#444">金额</th></tr></thead><tbody>';
+  for(var i=0;i<arr.length;i++){
+    var r=arr[i];
+    h+='<tr><td style="padding:6px 9px;border-bottom:1px solid #f2f2f2">'+esc(r.k==null?'—':r.k)+'</td>'
+      +(withPrice?'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2">'+(r.price>=0?r.price+' 元':'<span style="color:#b06a00">未定价</span>')+'</td>':'')
+      +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2">'+r.cnt+'</td>'
+      +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2;color:#255ea6">'+r.rbCnt+'</td>'
+      +'<td style="text-align:right;padding:6px 9px;border-bottom:1px solid #f2f2f2;font-weight:600">'+lgMoney(r.money)+'</td></tr>';
+  }
+  return h+'</tbody></table>';
+}
+function lgRender(o){
+  LGDATA=o;
+  var t=o.total||{};
+  var h='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">'
+    +lgStat('营收合计（元）',lgMoney(t.money),false)
+    +lgStat('有效单（算提成）',(t.valid||0),false)
+    +lgStat('补号单（不算钱）',(t.rbCnt||0),false)
+    +lgStat('待补价',(t.unpriced||0),(t.unpriced||0)>0)
+    +'</div>';
+  if(t.unpriced>0){
+    h+='<p style="font-size:12px;color:#b06a00;margin:0 0 10px">有 '+t.unpriced+' 单没定价（历史回填时套餐空着，或档位配置里没填价格），这批<b>没有算进上面的合计</b>。'
+      +'<button class="mini" id="lgFix" style="margin-left:8px;padding:4px 10px;font-size:12px">按当前配置价补齐</button></p>';
+  }
+  h+='<h4 style="margin:10px 0 6px;font-size:13px">按套餐</h4>'+lgTable('套餐',o.byPlan,true);
+  h+='<h4 style="margin:10px 0 6px;font-size:13px">按客服（提成看「有效单」这一列）</h4>'+lgTable('客服',o.byAgent,false);
+  if(!o.pool)h+='<h4 style="margin:10px 0 6px;font-size:13px">按群</h4>'+lgTable('群',o.byPool,false);
+  // 明细
+  var rows=o.rows||[];
+  h+='<details'+(rows.length<=80?' open':'')+'><summary style="cursor:pointer;color:#3b6d11;font-size:13px">成交明细（'+rows.length+(rows.length>=600?' 条，只显示前 600':' 条')+'）</summary>';
+  h+='<div style="max-height:320px;overflow:auto;margin-top:8px"><table style="border-collapse:collapse;width:100%;font-size:12.5px"><thead><tr>'
+    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">登记日</th>'
+    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">群</th>'
+    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">账号</th>'
+    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">客服</th>'
+    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">套餐</th>'
+    +'<th style="text-align:right;padding:6px 8px;background:#f5f6f8">金额</th>'
+    +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">备注</th></tr></thead><tbody>';
+  for(var i=0;i<rows.length;i++){
+    var r=rows[i];
+    h+='<tr'+(r.rb?' style="background:#f7fafd"':'')+'>'
+      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.day)+'</td>'
+      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+(r.pool==='hz'?'主群':'定制')+'</td>'
+      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.name||r.uid)+'</td>'
+      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.agent||'—')+'</td>'
+      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.plan||'未标注')+'</td>'
+      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2;text-align:right">'+(r.rb?'<span class="badge b-blue">补</span> 0.00':(r.price==null?'<span style="color:#b06a00">待补价</span>':lgMoney(r.price)))+'</td>'
+      +'<td style="padding:5px 8px;border-bottom:1px solid #f2f2f2;color:#666">'+esc(r.remark||'')+'</td></tr>';
+  }
+  h+='</tbody></table></div></details>';
+  $('lgBody').innerHTML=h;
+  if($('lgFix'))$('lgFix').onclick=function(){lgReprice();};
+}
+function lgLoad(){
+  var t=JSON.parse(TOKEN||'{}');
+  var m=$('lgMonth').value||'';
+  if(!m){$('lgm').textContent='请先选月份';$('lgm').className='msg err';return;}
+  $('lgm').textContent='查询中…';$('lgm').className='msg';
+  $('lgGo').disabled=true;
+  api('/api/console/ledger',{user:t.user,pass:t.pass,month:m,pool:$('lgPool').value}).then(function(o){
+    $('lgGo').disabled=false;
+    if(!(o.ok&&o.d&&o.d.ok)){$('lgm').textContent=(o.d&&o.d.message)||'查询失败';$('lgm').className='msg err';$('lgBody').innerHTML='';return;}
+    $('lgm').textContent='';$('lgm').className='msg';
+    lgRender(o.d);
+  }).catch(function(){$('lgGo').disabled=false;$('lgm').textContent='网络错误';$('lgm').className='msg err';});
+}
+function lgReprice(){
+  var t=JSON.parse(TOKEN||'{}');
+  var m=$('lgMonth').value||'';
+  if(!confirm('把 '+m+' 里「没定价」的单子，按当前配置价补齐？只补空的，已经有价的一律不动。'))return;
+  api('/api/console/ledger_reprice',{user:t.user,pass:t.pass,month:m}).then(function(o){
+    $('lgm').textContent=(o.d&&o.d.message)||'';
+    $('lgm').className=(o.ok&&o.d&&o.d.ok)?'msg ok':'msg err';
+    if(o.ok&&o.d&&o.d.ok)lgLoad();
+  }).catch(function(){$('lgm').textContent='网络错误';$('lgm').className='msg err';});
+}
+$('lgClose').onclick=function(){$('lgModal').hidden=true;};
+$('lgGo').onclick=lgLoad;
+$('lgMonth').onchange=lgLoad;
+$('lgPool').onchange=lgLoad;
+$('lgCsv').onclick=function(){
+  if(!LGDATA||!LGDATA.rows||!LGDATA.rows.length){$('lgm').textContent='还没有数据，先点查询';$('lgm').className='msg err';return;}
+  var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','备注']];
+  for(var i=0;i<LGDATA.rows.length;i++){var r=LGDATA.rows[i];
+    out.push([r.day,r.pool==='hz'?'主群':'定制群',r.name,r.uid,r.agent,r.plan,
+      r.rb?'0':(r.price==null?'':r.price),r.rb?'补号':'',r.remark]);}
+  var csv='\\ufeff'+out.map(function(a){return a.map(function(v){return '"'+String(v==null?'':v).replace(/"/g,'""')+'"';}).join(',');}).join('\\r\\n');
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download='结算_'+(LGDATA.month||'')+'_'+(LGDATA.pool||'全部')+'.csv';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+};
+$('btnLedger').onclick=function(){
+  // 默认查「上个月」—— 结算是次月 15 号回头算上月，打开就是最常见的那一屏
+  if(!$('lgMonth').value){
+    var d=new Date(Date.now()+8*3600*1000);
+    var p=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()-1,1));
+    $('lgMonth').value=p.toISOString().slice(0,7);
+  }
+  $('lgm').textContent='';$('lgBody').innerHTML='';
+  $('lgModal').hidden=false;
+  lgLoad();
+};
+
 // ===== 2026-10-27：客服名单 / 套餐档位维护（只读口令看不到这个按钮，服务端也会拦）=====
 // 客服一行一个；套餐一行一个「显示名=天数」，天数 0 = 永久。改完保存，APK/EXE 下次登记自动拿到。
 $('btnCfg').onclick=function(){
   var c=(DATA&&DATA.cfg)||{agents:[],plans:[]};
   $('cAgents').value=(c.agents||[]).join('\\n');
-  $('cPlans').value=(c.plans||[]).map(function(p){return p.label+'='+p.days;}).join('\\n');
+  $('cPlans').value=(c.plans||[]).map(function(p){return p.label+'='+p.days+'='+(p.price>=0?p.price:'');}).join('\\n');
   $('cm').textContent='';$('cfgModal').hidden=false;
 };
 $('cCancel').onclick=function(){$('cfgModal').hidden=true;};
@@ -5313,7 +5875,13 @@ $('cSave').onclick=function(){
     var q=s.split('=');if(q.length<2)return null;
     var lb=q[0].trim(),dy=parseInt(q[1],10);
     if(!lb||isNaN(dy))return null;
-    return {key:lb,label:lb,days:dy};
+    var o2={key:lb,label:lb,days:dy};
+    // 2026-11-05：第三段 = 单价（元）。不写或留空 = 没定价，结算里进「待补价」而不是当 0 元。
+    if(q.length>=3){
+      var pv=q[2].trim();
+      if(pv!==''){var pf=parseFloat(pv);if(!isNaN(pf)&&pf>=0)o2.price=pf;}
+    }
+    return o2;
   }).filter(Boolean);
   if(!agents.length||!plans.length){$('cm').textContent='客服和套餐至少要各留一条';$('cm').className='msg err';return;}
   $('cSave').disabled=true;
@@ -5326,13 +5894,14 @@ $('cSave').onclick=function(){
 $('btnCsv').onclick=function(){
   var rows=[[ '池','账号','客服','套餐','UID','歌曲ID','时长(秒)',
     '昨进度','今进度','日环比',
-    '近30日播放','入池','有效期','邮箱','标记']];
+    '近30日播放','入池','有效期','邮箱','标记','补号','备注']];
   buildRows().forEach(function(r){
     var e=r.e;
     var dur=(DATA.durs||{})[r.pool+'|'+e.uid]||(DATA.durs||{})[e.uid]||((r.a&&r.a.dur)||'');
     rows.push([r.pool==='hz'?'主群':'定制群',e.name,e.agent||'',e.plan||'',e.uid||'',e.song||'',dur,
       r.p&&r.p.rate!=null?r.p.rate:'',r.a&&r.a.rate!=null?r.a.rate:'',r.delta==null?'':r.delta,
-      r.a&&r.a.rpc30!=null?r.a.rpc30:'',e.added||'',e.exp||'永久',e.email||'',e.pub?'公益号':(e.noListen?'只收':'')]);
+      r.a&&r.a.rpc30!=null?r.a.rpc30:'',e.added||'',e.exp||'永久',e.email||'',e.pub?'公益号':(e.noListen?'只收':''),
+      e.rb?'补号':'',e.note||'']);
   });
   var csv='\\ufeff'+rows.map(function(r){return r.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"';}).join(',');}).join('\\r\\n');
   var a=document.createElement('a');
