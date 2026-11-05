@@ -21,3 +21,9 @@ token*.txt
 
 # 分配结果缓存（含明文 CK，只在 runner 临时目录里存活，绝不入库）
 assign_cache.json
+
+# 本地备份产物（D1 加密备份、历史快照、改动前 .bak 目录）
+# 2026-11-05 补：backup_daily/ 里是 d1-YYYY-MM-DD.json.gz.enc，属产物不属代码，
+# 之前一直以「未跟踪」状态挂在审计里，补进忽略名单后本地与远端才能判成一致。
+backup/
+backup_daily/
