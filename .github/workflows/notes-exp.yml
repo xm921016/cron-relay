@@ -15,9 +15,9 @@ on:
         required: true
         default: ''
       delay:
-        description: '发布后等待多少秒再删（默认 3600 = 1 小时）'
+        description: '发布后等待多少秒再删（11-05 实测 60 秒即可，进度不受影响）'
         required: false
-        default: '3600'
+        default: '60'
 
 concurrency:
   group: notes-exp
