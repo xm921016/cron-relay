@@ -2438,6 +2438,28 @@ async function d1SnapWrite(day, pool, clean) {
   } catch (e) { console.error('D1 快照写入失败:', e && e.message); return false; }
 }
 
+// ====================================================================
+// 2026-11-05：快照只保留最近 90 天（每天由主 cron 顺手清一次）。
+// 为什么要有：snapshots 是「每号每天一行」的体检记录，只增不减 ——
+//   号池 700 个 × 每天 1 行 × 152 字节 ≈ 100KB/天 ≈ 36MB/年；
+//   现在虽只占几 MB，但它是唯一会随时间线性膨胀的表（accounts / ledger 都跟着号数走，不跟天数走）。
+// 为什么是 90 天：控制台真正读的只有「当天」和「最近 7 天」（今进度 / 连续不涨天数），
+//   90 天留足三个月的回溯余量，同时把库体积钉在一个常量上。
+// 为什么放在 cron 而不是备份脚本：备份是 GitHub Actions，worker 是 CF 原生 cron，
+//   后者不依赖 Actions 配额、也不会因为 relay 改时间段而漂移。
+// 一次删一天的量（~660 行），远低于 D1 单 SQL/batch 上限，不需要分批。
+const SNAP_KEEP_DAYS = 90;
+async function purgeOldSnapshots() {
+  if (!d1ok()) return { skip: 1 };
+  const cutoff = dateMinusN(beijingDate(), SNAP_KEEP_DAYS);
+  const rows = await d1All('SELECT COUNT(*) n, MIN(day) d0 FROM snapshots WHERE day<?', [cutoff]);
+  const n = rows && rows[0] ? (Number(rows[0].n) || 0) : 0;
+  if (!n) return { deleted: 0, cutoff: cutoff };
+  const ok = await d1Run('DELETE FROM snapshots WHERE day<?', [cutoff]);
+  if (!ok) return { deleted: 0, cutoff: cutoff, failed: 1 };
+  return { deleted: n, cutoff: cutoff, oldestWas: String((rows[0] && rows[0].d0) || '') };
+}
+
 // 时长沉淀（2026-10-22 新增 D1 主存储）：原来只有一个 KV 键 console:durs，
 // 250 个分片并发做「读→改→写」，必然互相覆盖（丢更新）。D1 按 (pool,uid) UPSERT 天然无竞态。
 async function d1DursWrite(pool, incoming) {
@@ -3864,7 +3886,7 @@ async function handle(request) {
         "SUM(CASE WHEN " + GIFT + " THEN 1 ELSE 0 END) giftCnt, " +
         "SUM(CASE WHEN rb=0 AND price IS NOT NULL THEN price ELSE 0 END) money, " +
         "SUM(CASE WHEN rb=0 AND price IS NULL AND NOT " + GIFT + " THEN 1 ELSE 0 END) unpriced";
-      const [byPlan, byAgent, byPool, rows, cfgNow, byAgentAll, accRows] = await Promise.all([
+      const [byPlan, byAgent, byPool, rows, cfgNow, byAgentAll, accRows, ghost] = await Promise.all([
         d1All('SELECT plan, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY plan ORDER BY cnt DESC', params),
         d1All('SELECT agent, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY agent ORDER BY cnt DESC', params),
         d1All('SELECT pool, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY pool', params),
@@ -3875,6 +3897,18 @@ async function handle(request) {
         d1All('SELECT agent, COUNT(*) cnt FROM ledger WHERE ' + WH + ' GROUP BY agent ORDER BY cnt DESC', paramsBase),
         // 号在不在：用来给明细打「号已删」，并统计对账差额（账本只增不改，删号不会抹掉成交）
         d1All('SELECT uid FROM accounts' + (poolF ? ' WHERE pool=?' : ''), poolF ? [poolF] : []),
+        // 2026-11-05：号在池 / 号已删 两个金额口径。
+        // 为什么用 SQL 子查询而不是拿下面 rows 在 JS 里累加：明细有 LIMIT 1200，
+        // 单月单量一旦超过就会被截断，金额会静默算少。这里的聚合直接对全表算，不受截断影响。
+        // 注意 accounts 里已过期的号仍然在表内（11-05 起到期不删、降公益），
+        // 所以「号已删」严格等于「accounts 里查不到这个 uid」，与池里的明细标记口径一致。
+        d1All('SELECT ' +
+          'SUM(CASE WHEN NOT EXISTS(SELECT 1 FROM accounts a WHERE a.uid=l.uid) THEN 1 ELSE 0 END) goneCnt, ' +
+          'SUM(CASE WHEN l.rb=0 AND l.price IS NOT NULL AND NOT EXISTS(SELECT 1 FROM accounts a WHERE a.uid=l.uid) ' +
+          'THEN l.price ELSE 0 END) goneMoney, ' +
+          'SUM(CASE WHEN l.rb=0 AND l.price IS NOT NULL AND EXISTS(SELECT 1 FROM accounts a WHERE a.uid=l.uid) ' +
+          'THEN l.price ELSE 0 END) aliveMoney ' +
+          'FROM ledger l WHERE ' + W, params),
       ]);
       const aliveSet = new Set();
       for (const r of (accRows || [])) aliveSet.add(String(r.uid == null ? '' : r.uid));
@@ -3894,6 +3928,10 @@ async function handle(request) {
       t.money = Math.round(t.money * 100) / 100;
       t.valid = t.cnt - t.rbCnt - t.giftCnt;   // 有效单 = 总单 - 补号单 - 赠号/手动号（提成按这个算）
       const isGift = (nm) => /^name:|^manual:/.test(String(nm || '')) || String(nm || '').indexOf('公益') >= 0;
+      // 2026-11-05：拆「实收」与「号在池」两个金额口径（金额由上面的 ghost 查询算出，不受明细截断影响）。
+      //   实收（t.money）= 全部已定价有效单，钱已经收到了，删号不等于没收到；
+      //   号在池（t.aliveMoney）= 只算号还在池里的单，这个数才跟控制台筛选出来的单量对得上；
+      //   t.goneMoney = 两者之差，即「号已删」那几单的钱，单独列出来不用再手工对。
       let gone = 0;
       const outRows = (rows || []).map(r => {
         const al = aliveSet.has(String(r.uid == null ? '' : r.uid));
@@ -3907,7 +3945,10 @@ async function handle(request) {
           gift: isGift(r.name) ? 1 : 0, alive: al ? 1 : 0,
         };
       });
-      t.gone = gone;   // 号已被删的单数：跟控制台筛选出的单量差多少，就是它
+      const g = (ghost && ghost[0]) || {};
+      t.gone = num(g.goneCnt);        // 号已被删的单数：跟控制台筛选出的单量差多少，就是它
+      t.goneMoney = Math.round(num(g.goneMoney) * 100) / 100;
+      t.aliveMoney = Math.round(num(g.aliveMoney) * 100) / 100;
       return json({
         ok: true, month: month, pool: poolF, agent: agentRaw, total: t,
         byPlan: fix(byPlan), byAgent: fix(byAgent), byPool: fix(byPool),
@@ -4964,7 +5005,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <div class="msg" id="cm"></div>
 </div></div>
 <!-- ===== 2026-11-05：月度结算 ===== -->
-<div class="modal" id="lgModal" hidden><div class="mbox" style="width:900px">
+<div class="modal" id="lgModal" hidden><div class="mbox" style="width:980px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
   <h3>月度结算</h3>
   <p style="font-size:12px;color:#888;margin:4px 0 0">按<b>登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br>补号单、公益赠号/手动号都不计营收、不计提成，单独列出；「号已删」只是对账提示，不影响金额。</p>
   <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
@@ -4974,7 +5015,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <button class="mini" id="lgGo" style="margin-top:0;padding:9px 16px">查询</button>
     <button class="mini gray" id="lgCsv" style="margin-top:0">导出明细CSV</button>
   </div>
-  <div id="lgBody" style="margin-top:12px;font-size:13px"></div>
+  <div id="lgBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto"></div>
   <div class="row2"><button class="gray" id="lgClose">关闭</button></div>
   <div class="msg" id="lgm"></div>
 </div></div>
@@ -5835,11 +5876,12 @@ function lgRender(o){
   }
   var who=o.agent?(o.agent==='__none__'?'（无客服）':o.agent):'';
   var h='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">'
-    +lgStat('营收合计（元）',lgMoney(t.money),false)
+    +lgStat('实收合计（元）',lgMoney(t.money),false)
+    +lgStat('号在池营收（对账）',lgMoney(t.aliveMoney),false)
     +lgStat((who?who+' · ':'')+'有效单（算提成）',(t.valid||0),false)
     +lgStat('补号单（不算钱）',(t.rbCnt||0),false)
     +lgStat('赠号/手动号（不算单）',(t.giftCnt||0),(t.giftCnt||0)>0)
-    +lgStat('号已删（对账差额）',(t.gone||0),(t.gone||0)>0)
+    +lgStat('号已删（单 / 元）',(t.gone||0)+' / '+lgMoney(t.goneMoney),(t.gone||0)>0)
     +lgStat('待补价',(t.unpriced||0),(t.unpriced||0)>0)
     +'</div>';
   if(who){
@@ -5851,16 +5893,21 @@ function lgRender(o){
       +'<button class="mini" id="lgFix" style="margin-left:8px;padding:4px 10px;font-size:12px">按当前配置价补齐</button></p>';
   }
   if((t.gone||0)>0){
-    h+='<p style="font-size:12px;color:#666;margin:0 0 10px">「号已删」= 这单成交后号被删了（掉线判死 / 手动删）。控制台按账号筛选是看不到它的，'
-      +'所以筛选出来的单量会比这里少 '+(t.gone||0)+' 单，属正常：账本只增不改，删号不抹营收。</p>';
+    h+='<p style="font-size:12px;color:#666;margin:0 0 10px">「号已删」= 这单成交后号被删了（掉线判死 / 手动删），共 '
+      +(t.gone||0)+' 单 '+lgMoney(t.goneMoney)+' 元。控制台按账号筛选看不到它们，'
+      +'所以网页筛出来的单量/金额对应的是<b>号在池营收 '+lgMoney(t.aliveMoney)+' 元</b>；实收合计 '+lgMoney(t.money)+' 元，差的正好是这几单。</p>';
   }
-  h+='<h4 style="margin:10px 0 6px;font-size:13px">按套餐</h4>'+lgTable('套餐',o.byPlan,true);
-  if(!who)h+='<h4 style="margin:10px 0 6px;font-size:13px">按客服（提成看「有效单」这一列）</h4>'+lgTable('客服',o.byAgent,false);
-  if(!o.pool)h+='<h4 style="margin:10px 0 6px;font-size:13px">按群</h4>'+lgTable('群',o.byPool,false);
+  // 2026-11-05：三张分组表改并排（原来一张一行，竖向占掉大半屏，害得整个弹窗要滚）。
+  // 并排后高度只取决于最高的那张，弹窗外层不再出滚动条，只有下面的成交明细自己滚。
+  h+='<div style="display:flex;gap:10px;align-items:flex-start;margin-top:10px">'
+    +'<div style="flex:1;min-width:0"><h4 style="margin:0 0 6px;font-size:13px">按套餐</h4>'+lgTable('套餐',o.byPlan,true)+'</div>';
+  if(!who)h+='<div style="flex:1;min-width:0"><h4 style="margin:0 0 6px;font-size:13px">按客服（提成看「有效单」）</h4>'+lgTable('客服',o.byAgent,false)+'</div>';
+  if(!o.pool)h+='<div style="flex:1;min-width:0"><h4 style="margin:0 0 6px;font-size:13px">按群</h4>'+lgTable('群',o.byPool,false)+'</div>';
+  h+='</div>';
   // 明细
   var rows=o.rows||[];
   h+='<details'+(rows.length<=80?' open':'')+'><summary style="cursor:pointer;color:#3b6d11;font-size:13px">成交明细（'+rows.length+(rows.length>=1200?' 条，只显示前 1200':' 条')+'）</summary>';
-  h+='<div style="max-height:320px;overflow:auto;margin-top:8px"><table style="border-collapse:collapse;width:100%;font-size:12.5px"><thead><tr>'
+  h+='<div style="max-height:calc(92vh - 560px);min-height:170px;overflow:auto;margin-top:8px"><table style="border-collapse:collapse;width:100%;font-size:12.5px"><thead><tr>'
     +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">登记日</th>'
     +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">群</th>'
     +'<th style="text-align:left;padding:6px 8px;background:#f5f6f8">账号</th>'
@@ -6076,5 +6123,13 @@ export default {
     // 2026-10-25：每天顺手补一批歌曲/账号元数据（控制台「共创歌曲 / 绑错歌」标签的数据源）。
     // 本地 IP 被网易限流，只能靠 Worker 出口；每天 30 个号 + 12 首歌，新号基本当天就能补上。
     ctx.waitUntil(backfillMeta().catch(() => {}));
+    // 2026-11-05：快照只保留最近 90 天（SNAP_KEEP_DAYS）。放在主 cron 而不是 BACKUP_CRONS 那条分支 ——
+    // 那三条是纯「备份发令」，跑了就 return，不该顺带做任何清理。
+    ctx.waitUntil((async () => {
+      try {
+        const r = await purgeOldSnapshots();
+        if (r && r.deleted) console.log('scheduled 已清理 ' + r.deleted + ' 条 90 天前快照（截止 ' + r.cutoff + '）');
+      } catch (e) { console.error('scheduled 快照清理失败:', (e && e.message) || e); }
+    })());
   }
 };
