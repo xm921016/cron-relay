@@ -33,6 +33,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -59,9 +60,20 @@ COLS = ["pool", "uid", "name", "song", "ck", "added", "exp", "no_listen",
         "pub", "relogin_at"]
 PAGE = 200          # 单次查询行数，避免 D1 HTTP 响应过大被截断
 SNAP_DAYS = 60      # 快照只备最近 60 天（控制台最多回看 90 天，够用）
+RETRY = 4           # 单条查询最多尝试次数（含首次）
+RETRY_WAIT = [3, 8, 20]   # 每次重试前等几秒
 
 
-def api(sql, params=None):
+def api(sql, params=None, label="query"):
+    """查一次 D1，带重试。
+
+    2026-11-05 教训：D1 的 `internal error / code 7500 / e_vBhBOP_*` 不是「数据坏了」也不是
+    「分页写错了」—— 它会**随机**打在某一次查询上（改游标后照样本月 05 号凌晨又挂一次），
+    同一条 SQL 隔几秒重发就成功。以前一次失败就直接 SystemExit，整条备份链当天归零。
+    所以这里的策略是：**只对 5xx / 7500 / 网络异常重试**，4xx 参数类错误立刻抛。
+    报错信息带上 label（schema / accounts 第N页 / snapshots 第N页…），
+    下次再挂日志里就能一眼看出是哪张表哪一页 —— 之前因为没 label，只能靠猜。
+    """
     url = f"https://api.cloudflare.com/client/v4/accounts/{ACC}/d1/database/{D1_UUID}/query"
     body = {"sql": sql}
     if params:
@@ -70,15 +82,28 @@ def api(sql, params=None):
         url, data=json.dumps(body).encode(), method="POST",
         headers={"Authorization": "Bearer " + TOK, "User-Agent": UA,
                  "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            d = json.loads(r.read().decode())
-    except urllib.error.HTTPError as e:
-        raise SystemExit(f"D1 查询失败 HTTP {e.code}: {e.read().decode()[:600]}")
-    if not d.get("success"):
-        raise SystemExit(f"D1 查询失败: {json.dumps(d.get('errors'), ensure_ascii=False)[:600]}")
-    res = d.get("result") or []
-    return (res[0].get("results") or []) if res else []
+    last_err, transient = "", True
+    for attempt in range(RETRY):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                d = json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            last_err, transient = f"HTTP {e.code}: {e.read().decode()[:500]}", e.code >= 500
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_err, transient = f"网络异常: {e}", True
+        else:
+            if d.get("success"):
+                res = d.get("result") or []
+                return (res[0].get("results") or []) if res else []
+            last_err = json.dumps(d.get("errors"), ensure_ascii=False)[:500]
+            transient = "7500" in last_err or "internal error" in last_err
+        if not transient or attempt == RETRY - 1:
+            break
+        wait = RETRY_WAIT[min(attempt, len(RETRY_WAIT) - 1)]
+        print(f"::warning::D1 查询失败（{label}，第 {attempt + 1} 次）：{last_err[:200]}"
+              f" —— {wait}s 后重试")
+        time.sleep(wait)
+    raise SystemExit(f"D1 查询失败（{label}）: {last_err}")
 
 
 def dump_schema():
@@ -92,7 +117,8 @@ def dump_schema():
         return api("SELECT type,name,tbl_name,sql FROM sqlite_master "
                    "WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%' "
                    "AND sql IS NOT NULL "
-                   "ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name")
+                   "ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name",
+                   label="schema")
     except SystemExit as e:
         # schema 拿不到不该阻断数据备份（数据更要紧），但要吼一声
         print(f"::warning::schema 导出失败，本次备份不含建表语句：{e}")
@@ -106,12 +132,14 @@ def dump_accounts():
     rows = []
     off = 0
     while True:
+        page = off // PAGE + 1
         part = api(f"SELECT {','.join(COLS)} FROM accounts ORDER BY pool, uid LIMIT ? OFFSET ?",
-                   [PAGE, off])
+                   [PAGE, off], label=f"accounts 第{page}页")
         rows.extend(part)
         if len(part) < PAGE:
             break
         off += PAGE
+    print(f"[backup] accounts 取完 {len(rows)} 行（{off // PAGE + 1} 次查询）")
     return rows
 
 
@@ -124,21 +152,31 @@ def dump_snapshots():
     当天 relay 跑完快照 6119 行，翻页到 OFFSET 5800 正好踩雷，导出连续
     两次全挂（先误判成 Cloudflare 故障，本地复现才定位）。
     游标翻页没有这个上限，且不用让数据库扫过前面所有行。
+
+    2026-11-05 补记：改成游标后 05 号凌晨 02:51 那次又挂了同样的 7500，
+    说明 7500 不只由 OFFSET 触发（同一条 SQL 隔几秒重发就成功）。
+    所以「页级重试」才是真正的兜底，本函数顺便逐页打点，
+    再挂时日志能直接指出是第几页。
     """
     since = (datetime.date.today() - datetime.timedelta(days=SNAP_DAYS)).isoformat()
     cols = "day,pool,uid,name,rate,rpc30,missions,dur,at,cnt"
     rows = []
     last = None
+    page = 0
     while True:
+        page += 1
         if last is None:
             part = api(f"SELECT {cols} FROM snapshots WHERE day >= ? "
-                       "ORDER BY day, pool, uid LIMIT ?", [since, PAGE])
+                       "ORDER BY day, pool, uid LIMIT ?", [since, PAGE],
+                       label=f"snapshots 第{page}页")
         else:
             part = api(f"SELECT {cols} FROM snapshots WHERE day >= ? "
                        "AND (day, pool, uid) > (?, ?, ?) "
                        "ORDER BY day, pool, uid LIMIT ?",
-                       [since, last[0], last[1], last[2], PAGE])
+                       [since, last[0], last[1], last[2], PAGE],
+                       label=f"snapshots 第{page}页(游标 {last})")
         rows.extend(part)
+        print(f"[backup] snapshots 第{page}页 {len(part)} 行，累计 {len(rows)}")
         if len(part) < PAGE:
             break
         nxt = (part[-1]["day"], part[-1]["pool"], part[-1]["uid"])
@@ -151,7 +189,7 @@ def dump_snapshots():
 
 def dump_misc():
     try:
-        return api("SELECT k,v,updated_at FROM kv_misc")
+        return api("SELECT k,v,updated_at FROM kv_misc", label="kv_misc")
     except SystemExit:
         return []
 
@@ -159,7 +197,8 @@ def dump_misc():
 def dump_dead():
     """失效账号流水（含清理原因/时间）——恢复时能看出哪些号是确认死号、不要往回捞。"""
     try:
-        return api("SELECT id,pool,uid,name,reason,at FROM dead_log ORDER BY id DESC LIMIT 2000")
+        return api("SELECT id,pool,uid,name,reason,at FROM dead_log ORDER BY id DESC LIMIT 2000",
+                   label="dead_log")
     except SystemExit:
         return []
 
