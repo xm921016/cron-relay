@@ -48,7 +48,11 @@ jobs:
       # 这一步是幂等的：每次部署后重设一次，避免上传脚本时把定时器弄丢却无人察觉。
       # 2026-10-29：10:00 → 10:10。snapshot.yml 主路径的「10:05 门闩」是实测结算完成时间，
       # 兜底排在主路径之前等于每次都赶在结算前采到半截数据（慢歌还在涨）。
-      - name: ensure cron trigger (10:10 Beijing)
+      # ⚠ 2026-11-05：这里原来只写 [{"cron":"10 2 * * *"}]，每次推 worker/ 都会把
+      #   worker.js 里的 BACKUP_CRONS（UTC 08:30/10:30/12:30 = 北京 16:30/18:30/20:30）
+      #   一并冲掉 —— 实测线上长期只有一条，「CF cron 发令」这条备份腿从来没生效过。
+      #   以后必须与 worker.js 的 BACKUP_CRONS 保持一致，改一处就要同步另一处。
+      - name: ensure cron trigger (snap650 10:10 + 备份发令 16:30/18:30/20:30 Beijing)
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: c60450bfb7f2c2becfd744ba2508a4f2
@@ -56,6 +60,6 @@ jobs:
           curl -sS -X PUT \
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '[{"cron":"10 2 * * *"}]' \
+            -d '[{"cron":"10 2 * * *"},{"cron":"30 8 * * *"},{"cron":"30 10 * * *"},{"cron":"30 12 * * *"}]' \
             "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/cron-relay/schedules" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); r=(d.get('result') or {}).get('schedules') or []; print('CRON_OK' if d.get('success') else ('CRON_FAIL '+json.dumps(d))); print('cron =', [x.get('cron') for x in r]); sys.exit(0 if d.get('success') else 1)"
+            | python3 -c "import sys,json; d=json.load(sys.stdin); r=(d.get('result') or {}).get('schedules') or []; print('CRON_OK' if d.get('success') else ('CRON_FAIL '+json.dumps(d))); print('cron =', sorted(x.get('cron') for x in r)); sys.exit(0 if d.get('success') else 1)"

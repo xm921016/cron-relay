@@ -1751,31 +1751,31 @@ function planOf(cfg, x) {
   return { key: p.key, label: p.label, exp: (p.days > 0 ? beijingDatePlus(p.days) : 'forever') };
 }
 // 到期账号清理：删独立键 + 记墓碑 + 刷 master + 回推 GitHub Secrets（只在有过期时才写）
+// 到期处理：2026-11-05 起不再删号，改成「降级为公益号」保留在池子里。
+// 为什么改：到期的号直接删掉会让池子突然缩水（原本它在帮别人听），而且号主的记录全没了、
+//   续费还得重新走一遍登记；降级成公益号后：自己的歌不再分给别人听（pub=1 天然如此），
+//   但仍然帮别人听，号主随时续费（重新登记同一个号）就恢复普通号。
+// 保留过期的 exp 原值（不改成 forever）—— 这样它仍然【不占】登记名额（见 activePoolSize），
+//   否则到期号会白占名额，把新登记的号挤掉。
 async function pruneExpired() {
   const master = await mergePool();
-  const dead = master.filter(isExpiredEntry);
+  // 已经是公益号的跳过，否则每天都会把同一批号重复写一遍
+  const dead = master.filter(e => isExpiredEntry(e) && !e.pub);
   if (!dead.length) return { master: master, count: 0 };
-  // 读走 D1 后必须两边一起删：只删 KV 的话，下一次 mergePool 会从 D1 把过期号读回来。
   await Promise.all(dead.map(async e => {
-    await POOL.delete(entryKeyOf(e));
-    if (!(await d1Delete(e))) console.error('D1 过期删除失败:', e && (e.name || e.uid));
+    e.pub = 1;
+    await POOL.put(entryKeyOf(e), JSON.stringify(e));
+    if (!(await d1Upsert(e))) console.error('D1 到期降级公益号失败:', e && (e.name || e.uid));
   }));
-  try {
-    const log = new Set(await getDeadLog());
-    for (const e of dead) log.add(entryKeyOf(e));
-    await POOL.put('dead_log', JSON.stringify([...log].slice(-500)));
-  } catch (e) {}
-  const kept = master.filter(e => !isExpiredEntry(e));
-  await d1LogDead(dead, 'expired');
-  // 2026-10-26：到期待清理同样是「静默删号」—— 而且更隐蔽：号池管理工具每打开一次列表
-  // 就会顺手清一批，号主在毫不知情的情况下发现自己歌没人听了。同样进通知队列：
-  // 12 小时内重新登记（= 续费）→ 判定回池，不发；没回来 → 发「账号信息过期，麻烦重新登记」。
-  // 量通常个位数，逐条写；失败只记日志，不影响清理主流程。
-  try { for (const e of dead) await d1QueueNotice(e); } catch (e) { console.error('通知队列写入失败:', e && e.message); }
-  // master 缓存不再回写（2026-10-22）：读者全走 D1，entry: 独立键才是权威
-  await pushPool(kept);
-  try { await refreshPoolSnap(); } catch (e) {}   // 号池变了 → 刷新单键应急快照
-  return { master: kept, count: dead.length };
+  // 审计留档：dead_log 里记一条 expired_pub（不是删除，控制台「删号记录」里能看出是到期降级）
+  await d1LogDead(dead, 'expired_pub');
+  // 号主仍然要收到「到期了、已降级为公益号」的提醒 ——
+  // 但 dead_notice 的常规判定是「号还在池里就算回池、不发」，所以这里写 kind='expired'，
+  // 由 /api/dead_pending 用「号还在且 pub=1（没续费）」来判定该不该发。
+  try { for (const e of dead) await d1QueueNotice(e, 'expired'); } catch (e) { console.error('通知队列写入失败:', e && e.message); }
+  // 池内容变了（pub 变了）→ 刷新应急快照。号没删，所以不推 Secrets。
+  try { await refreshPoolSnap(); } catch (e) {}
+  return { master: master, count: dead.length };
 }
 async function gzipU8(u8) {
   // 2026-10-22：分片 JSON 先 gzip 再 base64。此前直接 base64 JSON，分片 45000 字符
@@ -2168,10 +2168,11 @@ function bjStamp(ms) {
 // 口径：不无脑发，只对「真删」发（判定逻辑见 /api/dead_pending）。
 // 没留邮箱的号也入队（判定时标 skip_noemail）—— 这样控制台每条手动删号都有明确状态，
 // 不会出现「删了但不知道通没通知」的空白行。
-async function d1QueueNotice(e) {
+async function d1QueueNotice(e, kind) {
   if (!d1ok() || !e) return false;
-  return d1Run('INSERT OR IGNORE INTO dead_notice (pool,uid,name,email,removed_at,state) VALUES (?,?,?,?,?,?)',
-    [POOL_NAME, String(e.uid != null ? e.uid : ''), String(e.name || ''), String(e.email || '').trim(), bjStamp(), 'pending']);
+  return d1Run('INSERT OR IGNORE INTO dead_notice (pool,uid,name,email,removed_at,state,kind) VALUES (?,?,?,?,?,?,?)',
+    [POOL_NAME, String(e.uid != null ? e.uid : ''), String(e.name || ''), String(e.email || '').trim(),
+     bjStamp(), 'pending', String(kind || '')]);
 }
 
 async function d1Run(sql, params) {
@@ -2613,7 +2614,10 @@ function buildPlanFrom(rows, today) {
     const added = String(r.added || '');
     if (added && added >= today) return false;               // 当天新登记的次日才跑
     const exp = String(r.exp || '');
-    if (exp && exp !== 'forever' && exp < today) return false;
+    // 2026-11-05：到期号不再删除，改成降级为公益号（pub=1）。这类号虽然 exp 已过期，
+    // 但仍然要留在 listeners 里帮别人听 —— 否则「不删号」就只剩个空壳，播放量反而掉了。
+    // 它们的歌不会进歌环（下面 songs 按 !pub 过滤），所以不会反过来占别人的播放次数。
+    if (exp && exp !== 'forever' && exp < today && !r.pub) return false;
     return true;
   });
   // 2026-11-01：公益号登记的歌不进互听歌环 —— 它的号主明确说「自己的歌不需要别人听」，
@@ -3290,21 +3294,28 @@ async function handle(request) {
       await d1Run("UPDATE dead_notice SET state='pending',claimed_at=NULL WHERE state='claimed' AND claimed_at<=?",
         [bjStamp(nowMs - 2 * 3600000)]);
       const pend = await d1All(
-        'SELECT pool,uid,name,email,removed_at FROM dead_notice WHERE state=? AND removed_at<=? ORDER BY removed_at LIMIT 100',
+        'SELECT pool,uid,name,email,removed_at,kind FROM dead_notice WHERE state=? AND removed_at<=? ORDER BY removed_at LIMIT 100',
         ['pending', cutoff]) || [];
       const toSend = [], skipped = [];
       for (const r of pend) {
         const uid = String(r.uid || ''), nm = String(r.name || '');
         // 「回来了吗」：同 uid 或同账号名出现在任一池（hz/dz 都算）→ 迁移或重登，不该发
         let back = '';
+        let alivePub = -1;
         const conds = [], vals = [];
         if (uid) { conds.push('uid=?'); vals.push(uid); }
         if (nm) { conds.push('name=?'); vals.push(nm); }
         if (conds.length) {
-          const q = await d1All('SELECT pool FROM accounts WHERE ' + conds.join(' OR ') + ' LIMIT 1', vals);
-          if (q && q.length) back = String(q[0].pool || '');
+          const q = await d1All('SELECT pool,pub FROM accounts WHERE ' + conds.join(' OR ') + ' LIMIT 1', vals);
+          if (q && q.length) { back = String(q[0].pool || ''); alivePub = Number(q[0].pub) || 0; }
         }
-        if (back) { skipped.push({ pool: r.pool, uid: uid, name: nm, removed_at: r.removed_at, state: 'skip_returned', why: '已在 ' + back + ' 池' }); continue; }
+        // 2026-11-05：到期降级为公益号的通知，号本来就在池里 —— 不能再用「还在池里」判回池。
+        // 该发的条件：号还在 且 pub 仍是 1（说明号主没续费）；
+        // 已经续费（重新登记同一个号 → pub 回到 0）就不发，视为已回池。
+        const isExpiredNotice = (String(r.kind || '') === 'expired');
+        if (back && !(isExpiredNotice && alivePub === 1)) {
+          skipped.push({ pool: r.pool, uid: uid, name: nm, removed_at: r.removed_at, state: 'skip_returned', why: '已在 ' + back + ' 池' }); continue;
+        }
         const em = String(r.email || '').trim();
         if (!em) { skipped.push({ pool: r.pool, uid: uid, name: nm, removed_at: r.removed_at, state: 'skip_noemail', why: '未登记邮箱' }); continue; }
         toSend.push({ pool: r.pool, uid: uid, name: nm, email: em, removed_at: String(r.removed_at) });
@@ -5614,6 +5625,8 @@ function renderRunbar(){
       if(r==='manual')return '手动删除<span class="muted">·控制台</span>';
       if(r==='cookie_invalid')return 'Cookie失效<span class="muted">·自动判死</span>';
       if(r==='expired')return '到期清理<span class="muted">·自动</span>';
+      // 2026-11-05：到期不再删号，改成降级为公益号（自己歌不听、仍帮别人听），号主续费即恢复
+      if(r==='expired_pub')return '到期降公益<span class="muted">·未删号</span>';
       if(r==='unknown'||!r)return '<span class="muted">—</span>';
       return esc(r);
     }
@@ -5990,8 +6003,8 @@ export default {
     ctx.waitUntil((async () => {
       try {
         const r = await pruneExpired();
-        if (r && r.count) console.log('scheduled 已清理到期账号 ' + r.count + ' 个');
-      } catch (e) { console.error('scheduled 清理到期账号失败:', (e && e.message) || e); }
+        if (r && r.count) console.log('scheduled 已到期降级公益号 ' + r.count + ' 个（不再删除）');
+      } catch (e) { console.error('scheduled 到期降级失败:', (e && e.message) || e); }
     })());
     // 2026-10-25：每天顺手补一批歌曲/账号元数据（控制台「共创歌曲 / 绑错歌」标签的数据源）。
     // 本地 IP 被网易限流，只能靠 Worker 出口；每天 30 个号 + 12 首歌，新号基本当天就能补上。
