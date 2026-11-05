@@ -3499,8 +3499,16 @@ async function handle(request) {
       }
       // 2026-10-25：顺手在后台补几条歌曲/账号元数据（新号登记后自动补，不用再手动跑脚本）
       try { if (globalThis.CTX && typeof globalThis.CTX.waitUntil === 'function') globalThis.CTX.waitUntil(backfillMeta()); } catch (e) {}
+      // 2026-11-05：只读口令不给「日志」入口（运行状态横条里的 GitHub Actions 链接）。
+      // 运行日志页面里有失败分片的账号 uid、接口报错等内部排障信息，只读给的是客服/外部视角。
+      // 这里在服务端就把 url 抹成空串，不是只在前端隐藏 —— 只读拿同一把口令直接 POST
+      // /api/console/data（或改页面 DOM）也拿不到链接。满权限（role==='full'）原样返回。
+      const actionsOut = (actions || []).map(function (x) {
+        if (!x || role === 'full') return x;
+        return Object.assign({}, x, { url: '' });
+      });
       return json({ ok: true, date: date, prevDate: prevDate, hz: hz, dz: dz, durs: durs, snap: { cur: cur, prev: prev },
-                    coverage: cov, actions: actions || [], dead: dead, deadToday: deadToday, suspects: suspects, fresh: fresh,
+                    coverage: cov, actions: actionsOut, dead: dead, deadToday: deadToday, suspects: suspects, fresh: fresh,
                     streak: streak, songs: songs, artists: artists, periods: periods,
                     // 2026-10-27：role 决定页面要不要把写入口关掉；cfg 供筛选下拉与编辑弹窗用
                     role: role, cfg: regCfgNow }, 200, CORS);
@@ -4857,8 +4865,11 @@ function renderRunbar(){
       }else{
         head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(jobTxt)+'</span>';
       }
+      // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，
+      // 这里再按 ROLE 兜一层（缓存里的旧数据 / 将来字段改名时不至于漏出链接）。
+      var logLink=((ROLE==='full')&&a.url)?' · <a href="'+esc(a.url)+'" target="_blank">日志</a>':'';
       h+='<div class="rb"><b>'+label+'</b> '+head+'<br>'
-        +'<span class="muted">'+bjTime(a.created)+(a.url?' · <a href="'+esc(a.url)+'" target="_blank">日志</a>':'')+'</span></div>';
+        +'<span class="muted">'+bjTime(a.created)+logLink+'</span></div>';
     }else{
       h+='<div class="rb"><b>'+label+'</b> <span class="muted">'+(a.note?esc(a.note):'未配置')+'</span></div>';
     }
