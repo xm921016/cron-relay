@@ -25,6 +25,14 @@ name: snapshot
 #       就继续等 relay —— 门闩只是下限，不赌结算一定完成。
 #     等待总上限 5h50m（plan 作业 6h 默认超时内），超时 busy=1 整片跳过交给兜底：
 #     宁可不采，也不采「一半在播」的脏数据。
+#   2026-11-05 门闩 11:40 → 09:00（用户要求：网易 9 点左右更新数据，不再等 11:40）。
+#     规则不变，仍是「采集时刻 = max(relay 全部结束, 门闩)」—— relay 拖过 09:00 就等它跑完再采。
+#     ⚠️ 代价登记（历史实测，别忘）：播放量 rpc30 与 650 任务进度不是同一时刻结算 ——
+#       10-28 08:33 采 → 361 条全是 9 点前旧值；
+#       10-29 10:05 采 → 73% 的号 650 一格没动（平时 12~24%），但 rpc30 有 73% 在涨、中位 +21；
+#       10-29 11:46 采 → 650 零增长仅 2%。
+#     即 09:00 采到的 rpc30 大概率可用，650 进度 / 子任务进度大概率仍是前一天的值。
+#     若某天日报里 650 进度大面积「零增长」，先怀疑门闩太早，而不是播放没生效。
 #
 # 为什么主路径要从「定时」改成「relay 跑完触发」：
 #   控制台「今日650进度」要的是「全池同一时刻、同一结算状态」的数据。凌晨播放轮是边播边采，
@@ -140,7 +148,7 @@ jobs:
           # （原来 relay_busy 只查 workflow_run 主路径，CF cron 的 workflow_dispatch 兜底全绕过；
           #   门闩同理只挂在 EVENT_NAME == workflow_run 分支里。当天 10:10 的 CF cron 采集
           #   撞上 relay 尾巴（跑到 10:48），12 个号播到一半被采且当天无法再更新。）
-          # 采集时刻 = max(relay 全部结束, 北京 11:40 门闩)。总上限 5h50m，超时 busy=1 整片跳过、
+          # 采集时刻 = max(relay 全部结束, 北京 09:00 门闩)。总上限 5h50m，超时 busy=1 整片跳过、
           # 交给 12:00 兜底（兜底同样先等 relay）—— 宁可不采，也不采脏数据。
           now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
           spent = 0
@@ -161,13 +169,13 @@ jobs:
               spent += wait
               now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
-          # ② 门闩：等到北京 11:40（650 有效播放结算完成点之后；实测 11:46 采的零增长仅 2%）
+          # ② 门闩：等到北京 09:00（2026-11-05 由 11:40 下调，理由与代价见文件头变更记录）
           if not busy:
-              gate = now.replace(hour=11, minute=40, second=0, microsecond=0)
+              gate = now.replace(hour=9, minute=0, second=0, microsecond=0)
               if now >= gate:
-                  print("已过 11:40 门闩（北京 %s），立即采集。" % now.strftime("%H:%M"))
+                  print("已过 09:00 门闩（北京 %s），立即采集。" % now.strftime("%H:%M"))
               else:
-                  print("relay 虽已结束（北京 %s），但早于 11:40 门闩（650 结算未完成），等门闩到点再采。"
+                  print("relay 已结束（北京 %s），等 09:00 门闩到点再采。"
                         % now.strftime("%H:%M"))
               while now < gate and spent < 21000:
                   wait = max(1, min(int((gate - now).total_seconds()), 900, 21000 - spent))
@@ -177,7 +185,7 @@ jobs:
               if now >= gate:
                   print("门闩到点（北京 %s），开始分片采集。" % now.strftime("%H:%M"))
               else:
-                  print("::warning::等待总时长已达上限仍未到 11:40，本轮不采，交给兜底。")
+                  print("::warning::等待总时长已达上限仍未到 09:00，本轮不采，交给兜底。")
                   busy = 1
 
           per = max(1, int(os.environ.get("ACCOUNTS_PER_SLICE", "12") or 12))
@@ -194,7 +202,7 @@ jobs:
   snap:
     needs: plan
     # 仅在等待超时（relay 一直不结束/门闩没等到）时整片跳过，交给 12:00 的兜底。
-    # 正常情况下 plan 已等到「relay 全部结束 + 过 11:40 门闩」才放行。
+    # 正常情况下 plan 已等到「relay 全部结束 + 过 09:00 门闩」才放行。
     if: needs.plan.outputs.busy != '1'
     runs-on: ubuntu-latest
     timeout-minutes: 60
