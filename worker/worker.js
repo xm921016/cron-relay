@@ -3819,6 +3819,121 @@ async function dispatchSnap650(onlyPool) {
   } catch (e) { /* 记录失败不影响触发本身 */ }
   return { ok: out.every(x => x.ok), jobs: out };
 }
+// ---- 2026-11-05：CF cron 兜底发令「每日 D1 备份」----
+// 常规入口是 hz relay 结束后的 workflow_run（天然取删号后的终态）。但那条边偶尔不触发，
+// 而 GitHub 自己的 schedule 兜底实测会拖 3~7 小时（名义北京 19:40 → 次日 02:51 才跑）。
+// 这里用 CF cron 在下午定点补一枪，只负责发令（导出 600KB / 6000 行 D1 + openssl 加密
+// 远超声明的 CPU 预算，Worker 干不了）。
+// 三个前提缺一不可，任一不满足就只是「本轮跳过」，等下一个时刻再试：
+//   1) hz relay 最近一轮必须是「今天（北京）」且已 completed —— 否则导的是半程态（部分号
+//      没播、删号没做完），而且它会占住仓库侧的幂等闸门，把 relay 结束后那次真正的终态
+//      备份挡掉，比不备份更糟。
+//   2) 没有 d1-daily 正在跑/排队 —— 那情况让它自己跑完，重复发令只是多一次空转。
+//   3) 私库 vault 里没有「北京今天」的 d1-YYYY-MM-DD.json.gz.enc —— 有就当天到此为止。
+// 三个 cron 时刻天然是重试：16:30 relay 还没收工 → 18:30 / 20:30 再试。
+const BACKUP_CRONS = ['30 8 * * *', '30 10 * * *', '30 12 * * *'];   // 北京 16:30 / 18:30 / 20:30
+const BACKUP_REPOS = [
+  { pool: 'hz', owner: 'xm921016', repo: 'cron-relay', tokenKey: 'GH_TOKEN' },
+  { pool: 'dz', owner: 'xm921017', repo: 'dingzhi', tokenKey: 'GH_TOKEN_DZ' },
+];
+// 北京日期：备份文件名由 d1_backup.py 用 utcnow()+8h 生成，这里必须同一口径
+function bjDate(offsetDays) {
+  const t = Date.now() + 8 * 3600 * 1000 + (offsetDays || 0) * 86400000;
+  return new Date(t).toISOString().slice(0, 10);
+}
+function bjDayOf(iso) {
+  const ms = Date.parse(iso);
+  if (!ms) return '';
+  return new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+async function ghJson(tok, url) {
+  const H = { Authorization: 'Bearer ' + tok, Accept: 'application/vnd.github+json',
+              'User-Agent': 'cron-relay-worker' };
+  const r = await Promise.race([
+    fetch(url, { headers: H }),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000)),
+  ]);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return await r.json();
+}
+async function dispatchDailyBackup(slot) {
+  const c = await cfg();
+  const rec = { at: new Date().toISOString(), slot: slot, day: bjDate(0), action: '', reason: '', out: [] };
+  const save = async () => {
+    // 只留最后一次记录（1 周过期），控制台/排障时能看出它到底是被谁挡住 / 有没有发出去
+    try { await POOL.put('cron:backup:last', JSON.stringify(rec), { expirationTtl: 604800 }); } catch (e) { }
+  };
+  const tokOf = async (r) => {
+    if (r.tokenKey === 'GH_TOKEN') return c.ghToken || '';
+    return cleanKV(await POOL.get(r.tokenKey).catch(() => null)) || '';
+  };
+  if (!c.ghToken) { rec.action = 'error'; rec.reason = 'KV 缺 GH_TOKEN'; await save(); return rec; }
+  try {
+    const hz = BACKUP_REPOS[0];
+    const hzBase = 'https://api.github.com/repos/' + hz.owner + '/' + hz.repo;
+    // 1) relay 今天跑过、且已经结束
+    const rel = await ghJson(c.ghToken, hzBase + '/actions/workflows/run.yml/runs?per_page=5');
+    const latest = ((rel && rel.workflow_runs) || [])[0];
+    if (!latest) { rec.action = 'skip'; rec.reason = 'relay 无运行记录'; await save(); return rec; }
+    const relDay = bjDayOf(latest.created_at);
+    if (relDay !== rec.day) {
+      rec.action = 'skip'; rec.reason = 'relay 今天还没起跑（最近一轮 ' + relDay + '）';
+      await save(); return rec;
+    }
+    if (latest.status !== 'completed') {
+      rec.action = 'skip'; rec.reason = 'relay 仍在跑（' + latest.status + '）';
+      await save(); return rec;
+    }
+    // 2) 备份本身没有在跑/排队
+    const dbk = await ghJson(c.ghToken, hzBase + '/actions/workflows/d1-daily.yml/runs?per_page=5');
+    const live = ((dbk && dbk.workflow_runs) || []).filter(x => x.status !== 'completed')[0];
+    if (live) {
+      rec.action = 'skip'; rec.reason = 'd1-daily 已在' + (live.status === 'queued' ? '排队' : '运行') + '中';
+      await save(); return rec;
+    }
+    // 3) 今天已有备份？（任一私库有今天文件即算 —— 缺的库重跑也补不上，只说明那个账号 token 挂了）
+    const target = 'd1-' + rec.day + '.json.gz.enc';
+    const found = [];
+    for (const r of BACKUP_REPOS) {
+      const tk = await tokOf(r);
+      if (!tk) continue;
+      try {
+        const d = await ghJson(tk, 'https://api.github.com/repos/' + r.owner + '/vault/contents/backup?ref=main');
+        const names = (Array.isArray(d) ? d : []).map(x => x && x.name || '');
+        if (names.indexOf(target) >= 0) found.push(r.pool);
+      } catch (e) { /* 查不到按「没有」处理：宁可多备一份，不能因为判不了就跳过 */ }
+    }
+    if (found.length) {
+      rec.action = 'skip'; rec.reason = '今天已备份（' + found.join('/') + '）';
+      await save(); return rec;
+    }
+    // 4) 发令：两个仓都发 —— 谁先跑完谁写库，后来的被仓库侧幂等闸门挡在几秒内退出
+    for (const r of BACKUP_REPOS) {
+      const tk = await tokOf(r);
+      if (!tk) { rec.out.push({ pool: r.pool, ok: false, note: 'KV 缺 ' + r.tokenKey }); continue; }
+      try {
+        const resp = await fetch('https://api.github.com/repos/' + r.owner + '/' + r.repo +
+          '/actions/workflows/d1-daily.yml/dispatches', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + tk, Accept: 'application/vnd.github+json',
+                     'User-Agent': 'cron-relay-worker', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ref: 'main', inputs: { force: false, test_alert: false } }),
+        });
+        // workflow_dispatch 成功返回 204 且 body 为空
+        rec.out.push({ pool: r.pool, status: resp.status, ok: resp.status === 204,
+                       note: resp.ok ? '' : (await resp.text()).slice(0, 100) });
+      } catch (e) {
+        rec.out.push({ pool: r.pool, status: 0, ok: false, note: String((e && e.message) || e).slice(0, 100) });
+      }
+    }
+    rec.action = rec.out.some(x => x.ok) ? 'dispatched' : 'failed';
+  } catch (e) {
+    rec.action = 'error';
+    rec.reason = String((e && e.message) || e).slice(0, 140);
+  }
+  await save();
+  return rec;
+}
 // ---- 读一天的快照：聚合 snap:<date>:<pool>:<分片> 所有键 → { hz: {uid: acc}, dz: {uid: acc} } ----
 async function readSnapDay(date) {
   const out = { hz: {}, dz: {} };
@@ -5226,6 +5341,14 @@ export default {
     globalThis.GH_OWNER = env.GH_OWNER;
     globalThis.GH_REPO = env.GH_REPO;
     if (env.DB) globalThis.DB = env.DB;
+    // 2026-11-05：按 event.cron 分流。新加的 3 个时刻只负责「备份发令」，
+    // 不能顺带把 snap650 / 到期清理 / 元数据补全都再跑一遍（那会变成一天 4 次快照采集）。
+    // 老时刻（10 2 * * *）以及取不到 cron 的情况一律走原来的全量路径，行为不变。
+    const _cron = String((event && event.cron) || '');
+    if (BACKUP_CRONS.indexOf(_cron) >= 0) {
+      ctx.waitUntil(dispatchDailyBackup(_cron).catch(() => {}));
+      return;
+    }
     ctx.waitUntil(dispatchSnap650('all').catch(() => {}));
     // 2026-10-29：到期号清理挪进每日 cron。
     // 以前 pruneExpired 全项目只有 /api/pool（旧「号池管理后台」页面）一个调用点 ——
