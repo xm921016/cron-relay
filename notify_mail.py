@@ -64,9 +64,14 @@ def main():
                   + (f"，作废旧提醒 {d.get('dropped_stale')} 条" if d.get("dropped_stale") is not None else ""))
 
     # ② 领取待发（循环清队列：CF 发令腿只有每小时一班，一班内尽量多发；
-    #    每轮领 ≤50、每封间隔 8 秒，100 封 ≈ 13 分钟，卡在 workflow 15 分钟超时内）
+    #    每轮领 ≤50、每封间隔 8 秒，80 封 ≈ 13 分钟，卡在 workflow 15 分钟超时内）
     all_sent, all_failed = [], []
     while True:
+        # 上限检查必须在 claim 之前 —— 否则领完 50 条才发现到量，直接 break 会把
+        # 这批挂在 claimed 等 2 小时超时（2026-11-06 实测连留三班 150 条的教训）
+        if len(all_sent) + len(all_failed) >= 80:
+            print("[notify-mail] 已发满 80 封/班（≈13 分钟，留足 workflow 超时余量），剩余下一班继续")
+            break
         code, data = call("/api/mail_pending", {"pass": PASS, "limit": LIMIT, "dry": DRY})
         if code != 200 or not data.get("ok"):
             print(f"[notify-mail] 领取失败 HTTP {code}: {data.get('message')}")
@@ -83,9 +88,6 @@ def main():
             for t in todo:
                 print(f"   [dry] {t.get('kind')} → {t.get('email')}（{t.get('name') or t.get('uid')}，群 {t.get('group') or '无'}）")
             return 0
-        if len(all_sent) + len(all_failed) >= 80:
-            print("[notify-mail] 已发满 80 封/班（≈13 分钟，留足 workflow 15 分钟超时余量），剩余下一班继续")
-            break
 
         import notify
         if not notify.mail_ready():
