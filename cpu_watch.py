@@ -91,7 +91,7 @@ def summarize(rows):
         o["p50w"] += float(p50) * n
         o["p50max"] = max(o["p50max"], int(p50))
         o["p99max"] = max(o["p99max"], int(p99 or 0))
-        o["hours"].append(("2026", (x.get("dimensions") or {}).get("datetimeHour"), n, int(p50)))
+        o["hours"].append(((x.get("dimensions") or {}).get("datetimeHour"), n, int(p50)))
     for o in out.values():
         o["p50"] = int(o["p50w"] / o["req"]) if o["req"] else 0
         o["hours"].sort(key=lambda t: t[3], reverse=True)
@@ -180,7 +180,7 @@ def main():
         hrs = (o.get("hours") or [])[:5]
         if hrs:
             body.append(f"{name} CPU 最高的 5 个小时：")
-            for _, h, n, p50 in hrs:
+            for h, n, p50 in hrs:
                 body.append(f"  {h}  p50 {us(p50)}，请求 {n}")
             body.append("")
 
