@@ -4625,6 +4625,8 @@ async function ghJson(tok, url) {
 // 防重叠：上一班（GitHub schedule 或上一条 CF 腿）还在跑/排队就不叠加 —— 领取本身幂等，
 // 这里只是省 Actions 空转。发令结果存 KV cron:mail:last（1 周过期）供排障。
 async function dispatchMailQueue() {
+  // 进门心跳：先落一条 boot 记录再干活 —— 排障用（区分「cron 没触发」和「触发后中途挂」）
+  try { await POOL.put('cron:mail:last', JSON.stringify({ at: new Date().toISOString(), boot: true }), { expirationTtl: 604800 }); } catch (e) { }
   const c = await cfg();
   const rec = { at: new Date().toISOString(), day: bjDate(0), action: '', reason: '', pend: 0 };
   const save = async () => {
