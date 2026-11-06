@@ -1283,6 +1283,7 @@ async function live650Batch(list) {
   try {
     const rs = await d1All('SELECT pool,uid,ck FROM accounts WHERE uid IN (' + todo.map(() => '?').join(',') + ')',
                            todo.map(c => String(c.uid)));
+    if (!rs) console.error('[console] 650 复核的 CK 补查失败，这批号本次按快照显示');
     for (const r of (rs || [])) {
       cks[(r.pool === 'dz' ? 'dz' : 'hz') + '|' + String(r.uid)] = r.ck || '';
     }
@@ -2907,6 +2908,11 @@ async function handle(request) {
       const plan = await buildPlan(url.searchParams.get('day'));
       if (!plan.ok) return json({ ok: false, message: plan.msg }, 503);
       const ownPool = plan.plans.filter(x => x.pool === POOL_NAME);
+      // 2026-11-06：本群 0 个号、全池却有号 —— 要么本群池真空了，要么 pool 字段对不上。
+      // 以前这里静默返回 0 个号，run.py 分不清「本群真没号」和「接口这次出错」。
+      if (!ownPool.length && plan.m > 0) {
+        console.error('[assign] 本群 0 个号，但全池有 ' + plan.m + ' 个（pool=' + POOL_NAME + ', src=' + (plan.src || 'd1') + '）');
+      }
       // 2026-10-29：按 uid 哈希桶分片（sliceBucket），不再用数组下标，池变动不漂移。
       const mine = ownPool.filter(x => sliceBucket(x.uid, jobs, plan.day) === job);
       // 只收不听的号（no_listen）以前完全不进 assign → 不签到、不查工作台、不验活、死了也不报。
@@ -2926,7 +2932,12 @@ async function handle(request) {
         const ph = uids.map(() => '?').join(',');
         const rs = await d1All('SELECT uid,name,ck,email FROM accounts WHERE pool=? AND uid IN (' + ph + ')',
                                [POOL_NAME].concat(uids));
-        for (const r of (rs || [])) meta[String(r.uid)] = r;
+        // 2026-11-06 关键修复：这次补查失败（D1 额度耗尽 / 网络中断）时 d1All 返回 null，
+        // 原来的 `(rs || [])` 把它当成「这些号没有 CK」→ 下面 filter(x => x.ck) 会把整片号
+        // 全部滤掉 → 接口返回 0 个号 → run.py 判定「没分到名单」→ 回退仓库里的 10 月老名单
+        // ⇒ 11-06 那次「主群 127 号双播 / 137 号零播、定制群 16 号双播 / 23 号零播」的真实起点。
+        if (!rs) return json({ ok: false, message: 'D1 查询失败（本片 CK 补查），请稍后重试' }, 503);
+        for (const r of rs) meta[String(r.uid)] = r;
       }
       const pack = x => {
         const m = x.ck ? x : (meta[x.uid] || {});
@@ -4173,6 +4184,9 @@ async function handle(request) {
       const rows = await d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,remark ' +
         'FROM ledger WHERE name LIKE ? OR uid LIKE ? OR remark LIKE ? ORDER BY day DESC, id DESC LIMIT 20',
         [like, like, like]);
+      // 2026-11-06：读失败（rows=null）以前会被下面 `(rows || [])` 变成空列表，
+      // 界面显示「没找到原单」—— 假阴性会让补号时误判「这个号没有历史单」，直接算错时长。
+      if (!rows) return json({ message: '账本查询失败：' + d1ErrHint() + '（不是没有原单，是这次没读出来）' }, 503, CORS);
       // 顺手标出「这个号现在还在不在池里」，避免把在用的号误当原单
       const uids = [...new Set((rows || []).map(r => String(r.uid || '')).filter(Boolean))];
       const alive = {};
