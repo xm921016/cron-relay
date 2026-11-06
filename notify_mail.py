@@ -83,8 +83,8 @@ def main():
             for t in todo:
                 print(f"   [dry] {t.get('kind')} → {t.get('email')}（{t.get('name') or t.get('uid')}，群 {t.get('group') or '无'}）")
             return 0
-        if len(all_sent) + len(all_failed) >= 100:
-            print("[notify-mail] 已发满 100 封/班（QQ 节流 + workflow 超时保护），剩余下一班继续")
+        if len(all_sent) + len(all_failed) >= 80:
+            print("[notify-mail] 已发满 80 封/班（≈13 分钟，留足 workflow 15 分钟超时余量），剩余下一班继续")
             break
 
         import notify
