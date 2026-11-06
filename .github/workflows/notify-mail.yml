@@ -44,6 +44,9 @@ jobs:
       # 2026-11-06 晚：第三发信通道（三通道轮发 ≈ 1500 封/日余量）
       EMAIL_FROM3: ${{ secrets.EMAIL_FROM3 }}
       EMAIL_AUTH_CODE3: ${{ secrets.EMAIL_AUTH_CODE3 }}
+      # 2026-11-06 晚：第四发信通道（四通道轮发 ≈ 2000 封/日余量）
+      EMAIL_FROM4: ${{ secrets.EMAIL_FROM4 }}
+      EMAIL_AUTH_CODE4: ${{ secrets.EMAIL_AUTH_CODE4 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

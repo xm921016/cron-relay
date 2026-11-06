@@ -55,6 +55,8 @@ def _accts():
              (os.environ.get("EMAIL_AUTH_CODE2", "") or "").strip()),
             ((os.environ.get("EMAIL_FROM3", "") or "").strip(),
              (os.environ.get("EMAIL_AUTH_CODE3", "") or "").strip()),
+            ((os.environ.get("EMAIL_FROM4", "") or "").strip(),
+             (os.environ.get("EMAIL_AUTH_CODE4", "") or "").strip()),
         ]
         for f, a in pairs:
             if f and a:
