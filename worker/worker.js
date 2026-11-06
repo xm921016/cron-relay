@@ -3043,7 +3043,10 @@ async function handle(request) {
       if (!c.adminPass) return json({ message: '尚未设置管理密码' }, 503, CORS);
       if (!body.pass || body.pass !== c.adminPass) return json({ message: '管理密码错误' }, 403, CORS);
       // 2026-10-22：编辑逻辑抽成 applyEntryEdit，供本路由与控制台编辑接口 /api/console/entry 共用（行为不变）
-      return applyEntryEdit(body);
+      const _rAe = await applyEntryEdit(body);
+      // 2026-11-06：编辑/删号成功 → 作废控制台首屏缓存
+      try { if (_rAe.status === 200) await ccBust(); } catch (e) {}
+      return _rAe;
     }
     if (url.pathname === '/api/join_manual' && request.method === 'POST') {
       let body;
@@ -3118,6 +3121,8 @@ async function handle(request) {
         await mailEnqueue(POOL_NAME, String(v.uid), 'reg', String(ent.added || '').slice(0, 10),
           email, ent.name, ent.agent, ent.exp || '');
       } catch (me) { console.error('登记邮件入队失败:', me && me.message); }
+      // 2026-11-06：登记成功 → 立即作废控制台首屏缓存（号池马上要在控制台看到这个号）
+      try { await ccBust(); } catch (e) {}
       let msg = '登记成功，次日生效。';
       if (v.provisional) msg += '（注：网易校验接口暂时不可达[' + (v.diag || '') + ']，已跳过在线校验；明天任务会自动复验）';
       return json({ ok: true, uid: String(v.uid), name: phone || ('manual:' + v.uid), pool: POOL_NAME, d1: d1Confirmed === true, message: msg });
@@ -3173,6 +3178,7 @@ async function handle(request) {
       // master 缓存不再回写（2026-10-22）：读者全走 D1，entry: 独立键才是权威
       await pushPool(updated);
       try { await refreshPoolSnap(); } catch (e) {}
+      try { await ccBust(); } catch (e) {}
       return json({ message: '已保存：' + email + '。之后账号有变化，会发邮件到这个邮箱。' });
     }
     // ---- 二维码登录通道（实测网易是否放行 CF 机房 IP）----
@@ -3636,6 +3642,17 @@ async function handle(request) {
       }
       return json({ ok: true, dry: dry, to_send: toSend, skipped: skipped });
     }
+    // /api/mail_cron_test  排障用：手动执行一次 dispatchMailQueue（CF cron 发令腿的同一函数），
+    // 用来区分「发令函数本身坏了」还是「CF cron 没触发」。口令同 mail_pending。跑完看 KV cron:mail:last。
+    if (url.pathname === '/api/mail_cron_test' && request.method === 'POST') {
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
+      const c = await cfg();
+      if (!c.assignPass) return json({ ok: false, message: '未配置 ASSIGN_PASS' }, 503);
+      if (body.pass !== c.assignPass && !(c.adminPass && body.pass === c.adminPass)) return json({ message: '口令错误' }, 403);
+      const r = await dispatchMailQueue();
+      return json({ ok: true, result: r });
+    }
     if (url.pathname === '/api/mail_sent' && request.method === 'POST') {
       let body;
       try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
@@ -3863,6 +3880,21 @@ async function handle(request) {
       return json({ ok: true, wrote: wrote }, 200, CORS);
     }
     // 控制台数据聚合：两群账号列表（绝不下发 ck）+ 当日与前日快照（供日环比）
+    // ================= 2026-11-06 新增：控制台首屏 KV 缓存 =================
+    // 动机：/api/console/data 是首屏只读大查询（索引优化后实测一次 ≈8,200 行 D1 读），
+    //   短时间反复刷新只是重复烧额度。缓存 TTL 5 分钟 + 版本号即时失效：
+    //   - 没改任何东西时随便刷 = 命中 KV（0 行 D1 读）；
+    //   - 登记/编辑/删号/改客服（ccBust）= 版本号更新，下一次刷新立即回源，看不到旧数据；
+    //   - 兜底：TTL 300 秒，写钩子没覆盖的变更（播放轮 runs/快照等系统写入）最多延迟 5 分钟可见。
+    // 键结构：cc:<版本号>:<权限full/ro>:<结束日>:<起始日> —— 权限与日期区间各自独立缓存。
+    // KV 消耗：命中 = 2 读；未命中 = 2 读 + 1 写（免费写额度 1000/天，绰绰有余）。
+    // 代价说明：D1 抖动瞬间构建的降级数据也可能被缓存，最多 5 分钟后自愈 ——
+    //   用最多 5 分钟的有限陈旧换掉每次刷新 8,200 行读，值得。
+    // ⚠ ccBust 绝不要挂进 /api/assign、/api/run_done、/api/snap 等播放轮高频接口：
+    //   那会把缓存打成永远未命中，白费这套机制（播放轮的数据更新走 TTL 兜底就够）。
+    async function ccBust() {
+      try { await POOL.put('cc:ver', String(Date.now())); } catch (e) {}
+    }
     if (url.pathname === '/api/console/data' && request.method === 'POST') {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let body;
@@ -3877,6 +3909,18 @@ async function handle(request) {
       const prevDate = /^\d{4}-\d{2}-\d{2}$/.test(body.prevDate || '')
         ? (body.prevDate < date ? body.prevDate : dateMinus1(date))
         : dateMinus1(date);
+      // 2026-11-06：先查 KV 缓存（命中 = 0 行 D1 读，直接回）。body.nocache=1 可强制回源。
+      let _ccSkip = false;
+      try { _ccSkip = body.nocache === 1; } catch (e) {}
+      let _ccKey = '';
+      if (!_ccSkip) {
+        const _ccVer = (await POOL.get('cc:ver').catch(function () { return null; })) || '0';
+        _ccKey = 'cc:' + _ccVer + ':' + role + ':' + date + ':' + (prevDate || '');
+        try {
+          const _ccHit = await POOL.get(_ccKey);
+          if (_ccHit) return new Response(_ccHit, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, { 'X-Cache': 'hit' }) });
+        } catch (e) {}
+      }
       // 2026-10-22：控制台是高频只读接口，原来每刷新一次就跑 pruneExpired()（全量重建 +
       // 可能删键 + 写 204KB master + 推 12 个 Secret）。改为直接读 D1 全表（一条 SELECT）。
       // 过期号在页面上仍会按 exp 字段标红，真正的清理交给管理后台/resync。
@@ -4083,11 +4127,17 @@ async function handle(request) {
         if (!x || role === 'full') return x;
         return Object.assign({}, x, { url: '' });
       });
-      return json({ ok: true, date: date, prevDate: prevDate, hz: hz, dz: dz, durs: durs, snap: { cur: cur, prev: prev },
+      const _out = { ok: true, date: date, prevDate: prevDate, hz: hz, dz: dz, durs: durs, snap: { cur: cur, prev: prev },
                     coverage: cov, actions: actionsOut, dead: dead, deadToday: deadToday, suspects: suspects, fresh: fresh,
                     streak: streak, songs: songs, artists: artists, periods: periods,
                     // 2026-10-27：role 决定页面要不要把写入口关掉；cfg 供筛选下拉与编辑弹窗用
-                    role: role, cfg: regCfgNow }, 200, CORS);
+                    role: role, cfg: regCfgNow };
+      const _body = JSON.stringify(_out);
+      // 2026-11-06：首屏结果写入 KV 缓存（TTL 5 分钟）。命中时上面整段大查询都不会再跑。
+      if (!_ccSkip && _ccKey) {
+        try { await POOL.put(_ccKey, _body, { expirationTtl: 300 }); } catch (e) {}
+      }
+      return new Response(_body, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, { 'X-Cache': _ccSkip ? 'bypass' : 'miss' }) });
     }
     // 控制台编辑：hz 本地执行（与管理后台同一套逻辑）；dz 转发到对端 worker 的对等接口
     if (url.pathname === '/api/console/entry' && request.method === 'POST') {
@@ -4114,6 +4164,8 @@ async function handle(request) {
           const r = await fetch(peerUrl + '/api/peer/entry', { method: 'POST',
             headers: { 'Content-Type': 'application/json', 'User-Agent': 'cron-relay-worker' },
             body: JSON.stringify(fwd) });
+          // 2026-11-06：定制群的号同样显示在控制台首屏 —— 编辑成功也要作废首屏缓存
+          try { if (r.status === 200) await ccBust(); } catch (e) {}
           return new Response(r.body, { status: r.status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
         } catch (e) {
           return json({ message: '转发到定制群失败：' + ((e && e.message) || e) }, 502, CORS);
@@ -4150,6 +4202,7 @@ async function handle(request) {
       const hint = (goneA.length && goneA.length === addA.length)
         ? '；⚠ 检测到「' + goneA.join('、') + '」被「' + addA.join('、') + '」替换 —— 如果是改名，请用「客服改名」，否则已登记的号和结算账本仍是旧名字'
         : '';
+      try { await ccBust(); } catch (e) {}
       return json({ ok: true, d1: saved.ok, cfg: saved.cfg,
         message: '已保存：客服 ' + saved.cfg.agents.length + ' 人（' + withGrp + ' 人配了售后群）、套餐 ' + saved.cfg.plans.length + ' 档'
           + (saved.ok ? '' : '（⚠️ D1 写入失败，已写 KV 兜底，请稍后重试）') + hint }, 200, CORS);
@@ -4213,6 +4266,7 @@ async function handle(request) {
       }
       // 号池快照是 D1 的重建缓存，顺手刷一份，免得 D1 抖动走 KV 兜底时又看到旧名
       try { await refreshPoolSnap(); } catch (e) {}
+      try { await ccBust(); } catch (e) {}
       return json({ ok: true, d1: saved.ok, cfg: saved.cfg,
         renamed: { accounts: nAcc, ledger: nLed },
         message: '已改名「' + oldN + '」→「' + newN + '」：账号 ' + nAcc + ' 个、结算订单 ' + nLed + ' 笔'
