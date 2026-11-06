@@ -92,6 +92,8 @@ def main():
             print("[notify-mail] EMAIL_FROM/EMAIL_AUTH_CODE 未配置，跳过（状态保持 claimed，2 小时后自动回退）")
             return 1
 
+        sent, failed = [], []   # 每轮单独一份（跑完随轮回写清空）
+
         for idx, t in enumerate(todo):
             # 2026-11-06：QQ SMTP 对高频连发直接断连（实测连续 19 封后全部 Connection unexpectedly
             # closed），每封之间强制间隔 8 秒。失败的照旧退回 pending，下一班自动重试，不丢件。
