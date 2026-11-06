@@ -29,7 +29,9 @@ on:
 jobs:
   dispatch:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 2026-11-06：80 封 × 8 秒节流 ≈ 13 分钟，实测 15 分钟超时会掐掉第二批次（run#6/#7 连续被 cancel），
+    # 提到 25 分钟留足余量。
+    timeout-minutes: 25
     env:
       WORKER_URL: 'https://xx1031.xyz'
       ASSIGN_PASS: ${{ secrets.ASSIGN_PASS }}
