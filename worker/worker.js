@@ -3589,7 +3589,9 @@ async function handle(request) {
       await d1Run("UPDATE mail_queue SET state='pending',claimed_at=NULL WHERE state='claimed' AND claimed_at<=?",
         [bjStamp(Date.now() - 2 * 3600000)]);
       const pend = await d1All('SELECT pool,uid,kind,ref,email,name,agent,exp,created_at FROM mail_queue ' +
-        "WHERE state='pending' ORDER BY created_at LIMIT " + limit, []);
+        // 2026-11-06：登记邮件优先 —— 补发积压时新用户登记也只需等下一班（30 分钟内），
+        //   到期提醒是天级节奏，排后面没影响。
+        "WHERE state='pending' ORDER BY CASE WHEN kind='reg' THEN 0 ELSE 1 END, created_at LIMIT " + limit, []);
       if (pend === null) return json({ ok: false, message: '读 mail_queue 失败（' + (_d1LastErr || 'D1 异常') + '）' }, 503);
       if (!pend.length) return json({ ok: true, dry: dry, to_send: [], skipped: [] });
       // 批量校验账号现况（一次 IN 查询，参数 ≤ 2+50）
@@ -4587,6 +4589,11 @@ async function dispatchSnap650(onlyPool) {
 //   3) 私库 vault 里没有「北京今天」的 d1-YYYY-MM-DD.json.gz.enc —— 有就当天到此为止。
 // 三个 cron 时刻天然是重试：16:30 relay 还没收工 → 18:30 / 20:30 再试。
 const BACKUP_CRONS = ['30 8 * * *', '30 10 * * *', '30 12 * * *'];   // 北京 16:30 / 18:30 / 20:30
+// 2026-11-06：邮件队列的 CF 发令腿。GitHub Actions 的 schedule 实测会整班漏触发（12:00/12:30 两班没跑），
+// 所以照 d1-daily 的老套路让 Cloudflare cron 兜底叫班：每小时第 5/35 分（UTC）= 北京 :05/:35，
+// 与 GitHub schedule 的 :00/:30 错开，避免两班并发领取（领取虽幂等，但错开更稳）。
+const MAIL_CRON = '5,35 * * * *';
+const MAIL_REPO = { owner: 'xm921016', repo: 'cron-relay', workflow: 'notify-mail.yml' };
 const BACKUP_REPOS = [
   { pool: 'hz', owner: 'xm921016', repo: 'cron-relay', tokenKey: 'GH_TOKEN' },
   { pool: 'dz', owner: 'xm921017', repo: 'dingzhi', tokenKey: 'GH_TOKEN_DZ' },
@@ -4611,6 +4618,51 @@ async function ghJson(tok, url) {
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return await r.json();
 }
+// 2026-11-06：邮件队列发令（CF cron 兜底腿，见 MAIL_CRON 注释）。
+// 叫班条件（满足其一）：① 队列里有待发邮件 ② 今天还没做到期扫描（MAIL_SCAN_DAY ≠ 北京今天）。
+// 防重叠：上一班（GitHub schedule 或上一条 CF 腿）还在跑/排队就不叠加 —— 领取本身幂等，
+// 这里只是省 Actions 空转。发令结果存 KV cron:mail:last（1 周过期）供排障。
+async function dispatchMailQueue() {
+  const c = await cfg();
+  const rec = { at: new Date().toISOString(), day: bjDate(0), action: '', reason: '', pend: 0 };
+  const save = async () => {
+    try { await POOL.put('cron:mail:last', JSON.stringify(rec), { expirationTtl: 604800 }); } catch (e) { }
+  };
+  if (!c.ghToken) { rec.action = 'error'; rec.reason = 'KV 缺 GH_TOKEN'; await save(); return rec; }
+  try {
+    const pendRows = await d1All("SELECT COUNT(*) n FROM mail_queue WHERE state='pending'", []);
+    rec.pend = (pendRows && pendRows[0] && Number(pendRows[0].n)) || 0;
+    if (pendRows === null) { rec.action = 'error'; rec.reason = '读队列失败（' + (_d1LastErr || 'D1 异常') + '）'; await save(); return rec; }
+    let scanDay = null;
+    try { scanDay = await POOL.get('MAIL_SCAN_DAY'); } catch (e) { }
+    if (rec.pend <= 0 && scanDay === rec.day) {
+      rec.action = 'skip'; rec.reason = '队列空且今天已扫到期'; await save(); return rec;
+    }
+    try {
+      const st = await ghJson(c.ghToken, 'https://api.github.com/repos/' + MAIL_REPO.owner + '/' + MAIL_REPO.repo +
+        '/actions/workflows/' + MAIL_REPO.workflow + '/runs?per_page=1');
+      const latest = ((st && st.workflow_runs) || [])[0];
+      if (latest && latest.status !== 'completed') {
+        rec.action = 'skip'; rec.reason = '上一班还在' + (latest.status === 'queued' ? '排队' : '运行');
+        await save(); return rec;
+      }
+    } catch (e) { /* 查不了运行状态就照发：领取幂等，不发重 */ }
+    const resp = await fetch('https://api.github.com/repos/' + MAIL_REPO.owner + '/' + MAIL_REPO.repo +
+      '/actions/workflows/' + MAIL_REPO.workflow + '/dispatches', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + c.ghToken, Accept: 'application/vnd.github+json',
+                 'User-Agent': 'cron-relay-worker', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref: 'main' }),
+    });
+    rec.action = resp.status === 204 ? 'dispatched' : 'failed';
+    rec.reason = resp.status === 204 ? '' : 'HTTP ' + resp.status + ' ' + (await resp.text()).slice(0, 100);
+  } catch (e) {
+    rec.action = 'error'; rec.reason = String((e && e.message) || e).slice(0, 140);
+  }
+  await save();
+  return rec;
+}
+
 async function dispatchDailyBackup(slot) {
   const c = await cfg();
   const rec = { at: new Date().toISOString(), slot: slot, day: bjDate(0), action: '', reason: '', out: [] };
@@ -6665,6 +6717,11 @@ export default {
     const _cron = String((event && event.cron) || '');
     if (BACKUP_CRONS.indexOf(_cron) >= 0) {
       ctx.waitUntil(dispatchDailyBackup(_cron).catch(() => {}));
+      return;
+    }
+    // 2026-11-06：邮件队列发令腿（北京每小时 :05/:35），只发令不干别的，跑完即 return。
+    if (_cron === MAIL_CRON) {
+      ctx.waitUntil(dispatchMailQueue().catch(() => {}));
       return;
     }
     ctx.waitUntil(dispatchSnap650('all').catch(() => {}));
