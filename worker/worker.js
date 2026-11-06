@@ -2350,7 +2350,13 @@ async function ledgerMarkRebind(pool, uid, name, on, rbFrom, rbStart, remark, ne
   const idQ = uid
     ? await d1All('SELECT id,day,price FROM ledger WHERE pool=? AND uid=? ORDER BY day DESC, id DESC LIMIT 1', [p, String(uid)])
     : await d1All('SELECT id,day,price FROM ledger WHERE pool=? AND name=? ORDER BY day DESC, id DESC LIMIT 1', [p, String(name || '')]);
-  if (!idQ || !idQ.length) {
+  // 2026-11-06：读失败（null）与「账本里确实没有这笔」必须分开 —— 原来两者都进下面这个分支，
+  // 读失败时 on=true 会凭空补写一笔流水 ⇒ 账本重复计单，金额直接算错，而且事后极难发现。
+  if (idQ === null) {
+    console.error('[ledger] 查「最近一笔流水」失败，本次不改账本');
+    return false;
+  }
+  if (!idQ.length) {
     // 账本里还没有这个号（例如历史回填没覆盖到的老号）→ 直接补写一笔，别让「补号」标记凭空丢掉。
     if (on && fallbackEntry) {
       return ledgerAdd(fallbackEntry, { rb: 1, rbFrom: rbFrom, start: rbStart || '', remark: remark || '' });
@@ -4193,7 +4199,10 @@ async function handle(request) {
       if (uids.length) {
         const ph = uids.map(() => '?').join(',');
         const a = await d1All('SELECT pool,uid FROM accounts WHERE uid IN (' + ph + ')', uids);
-        for (const x of (a || [])) alive[String(x.pool) + '|' + String(x.uid)] = 1;
+        // 2026-11-06：读失败时 a=null，若继续执行会把所有单都标成「号已删」，
+        // 补号时据此判断就会误判（以为原号没了）。直接报错。
+        if (!a) return json({ message: '查询号池失败：' + d1ErrHint() + '（不是号已删，是这次没读出来）' }, 503, CORS);
+        for (const x of a) alive[String(x.pool) + '|' + String(x.uid)] = 1;
       }
       return json({ ok: true, rows: (rows || []).map(r => ({
         id: r.id, pool: r.pool, uid: String(r.uid || ''), name: String(r.name || ''),
