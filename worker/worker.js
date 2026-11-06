@@ -1659,6 +1659,11 @@ const REG_CFG_KV = 'REG_CFG';
 // 0 元或缺省 = 该档位没定价，结算页会把它单独列成「待补价」，绝不按 0 元混进合计。
 const REG_CFG_DEFAULT = {
   agents: ['徐'],
+  // 2026-11-06：每个客服的售后 QQ 群号（登记成功邮件 / 到期提醒邮件里用）。
+  // groups[客服名] = 群号（纯数字字符串）；default_group = 老号没带客服名时的兜底群。
+  // 都可以在控制台「客服名单」里改：名单框一行「客服名|群号」，不带竖线=没群号。
+  groups: {},
+  default_group: '',
   // 档位顺序 = 客户端下拉顺序，从短到长排。
   plans: [
     { key: '1m', label: '1月', days: 30, price: 3 },
@@ -1676,12 +1681,23 @@ function normAgent(x) {
 }
 
 function normRegCfg(o) {
-  const out = { agents: [], plans: [] };
+  const out = { agents: [], groups: {}, default_group: '', plans: [] };
   const src = (o && typeof o === 'object') ? o : {};
   for (const a of (Array.isArray(src.agents) ? src.agents : [])) {
     const v = normAgent(a);
     if (v && !out.agents.includes(v)) out.agents.push(v);
   }
+  // 2026-11-06：售后群号。只保留还挂在名单里的客服（名单里删了人，群号跟着清）；
+  // 群号只留数字，5~20 位（QQ 群号现状 9~10 位，留点余量），非法就丢弃。
+  if (src.groups && typeof src.groups === 'object' && !Array.isArray(src.groups)) {
+    for (const k of Object.keys(src.groups)) {
+      const nm = normAgent(k);
+      const gp = String(src.groups[k] == null ? '' : src.groups[k]).replace(/[^0-9]/g, '');
+      if (nm && gp.length >= 5 && gp.length <= 20 && out.agents.includes(nm)) out.groups[nm] = gp;
+    }
+  }
+  const dg = String(src.default_group == null ? '' : src.default_group).replace(/[^0-9]/g, '');
+  if (dg.length >= 5 && dg.length <= 20) out.default_group = dg;
   for (const p of (Array.isArray(src.plans) ? src.plans : [])) {
     if (!p || typeof p !== 'object') continue;
     const label = String(p.label || '').trim().slice(0, 8);
@@ -1705,6 +1721,14 @@ function normRegCfg(o) {
   if (!out.agents.length) out.agents = REG_CFG_DEFAULT.agents.slice();
   if (!out.plans.length) out.plans = REG_CFG_DEFAULT.plans.map(p => ({ key: p.key, label: p.label, days: p.days, price: p.price }));
   return out;
+}
+
+// 客服 → 售后群号（2026-11-06）。优先该客服自己配的群；没配就用 default_group；都没有回 ''。
+function agentGroupOf(cfg, agent) {
+  const c = cfg || {};
+  const nm = normAgent(agent);
+  if (nm && c.groups && c.groups[nm]) return String(c.groups[nm]);
+  return String(c.default_group || '');
 }
 
 // 套餐显示名 → 单价（元）。返回 -1 表示没定价（结算页单列，不计入合计）。
@@ -2212,6 +2236,26 @@ async function d1QueueNotice(e, kind) {
   return d1Run('INSERT OR IGNORE INTO dead_notice (pool,uid,name,email,removed_at,state,kind) VALUES (?,?,?,?,?,?,?)',
     [POOL_NAME, String(e.uid != null ? e.uid : ''), String(e.name || ''), String(e.email || '').trim(),
      bjStamp(), 'pending', String(kind || '')]);
+}
+
+// ====================================================================
+// 号主邮件队列 mail_queue（2026-11-06 新增）：登记成功通知 + 到期提醒。
+// 为什么还是一套「worker 排队 → Actions 派发」：SMTP 只能从 GitHub Actions 侧连（见 dead_notice）。
+// 表结构（tmp/ddl_mail_queue.py 建）：唯一键 (pool,uid,kind,ref)。
+//   kind  reg=登记成功 / exp30|exp15|exp7|exp3|exp1=到期提醒（剩余天数档位）
+//   ref   去重基准：reg=登记日(added 日期) / exp=到期日(exp)
+//         → 续费改了 exp / 重新登记换了 added，键就变了，老提醒自然作废、新一轮重新计时。
+// 群号不入队：发送时（/api/mail_pending）按当时的 reg_cfg 现查，客服改群号立即生效。
+// 任何写入失败都只记日志，绝不影响登记/播放主流程。
+// ====================================================================
+const MAIL_STAGES = [30, 15, 7, 3, 1];   // 剩余天数 ≤ 档位 触发；同档同到期日只发一次
+async function mailEnqueue(pool, uid, kind, ref, email, name, agent, exp) {
+  if (!d1ok()) return false;
+  return d1Run('INSERT OR IGNORE INTO mail_queue (pool,uid,kind,ref,email,name,agent,exp,state,created_at) ' +
+    'VALUES (?,?,?,?,?,?,?,?,?,?)',
+    [String(pool || ''), String(uid != null ? uid : ''), String(kind || ''), String(ref || ''),
+     String(email || '').trim(), String(name || ''), String(agent || ''), String(exp || ''),
+     'pending', bjStamp()]);
 }
 
 async function d1Run(sql, params) {
@@ -3067,6 +3111,13 @@ async function handle(request) {
           return json({ ok: false, message: '登记没写进数据库（' + d1ErrHint() + '），请稍后重试；这次不会占名额。' }, 503);
         }
       }
+      // 2026-11-06：登记成功 → 排一封「登记成功 + 加售后群」邮件（Actions 每半小时派发）。
+      // 写失败只记日志：邮件少了可以补，登记绝不能因为邮件失败而回错。
+      // ref = 登记日：同号同天重复提交被唯一键挡掉；续费（added 变了）会再发一封，属预期。
+      try {
+        await mailEnqueue(POOL_NAME, String(v.uid), 'reg', String(ent.added || '').slice(0, 10),
+          email, ent.name, ent.agent, ent.exp || '');
+      } catch (me) { console.error('登记邮件入队失败:', me && me.message); }
       let msg = '登记成功，次日生效。';
       if (v.provisional) msg += '（注：网易校验接口暂时不可达[' + (v.diag || '') + ']，已跳过在线校验；明天任务会自动复验）';
       return json({ ok: true, uid: String(v.uid), name: phone || ('manual:' + v.uid), pool: POOL_NAME, d1: d1Confirmed === true, message: msg });
@@ -3454,6 +3505,150 @@ async function handle(request) {
             [String(it.pool || ''), String(it.uid || ''), String(it.removed_at || '')])
           : await d1Run("UPDATE dead_notice SET state='sent',sent_at=? WHERE pool=? AND uid=? AND removed_at=?",
             [stamp, String(it.pool || ''), String(it.uid || ''), String(it.removed_at || '')]);
+        if (ok) n++;
+      }
+      return json({ ok: true, updated: n, result: retry ? 'retry' : 'sent' });
+    }
+    // ====================================================================
+    // 号主邮件队列三接口（2026-11-06 新增）：登记成功通知 + 到期提醒。
+    // 与 dead_notice 同一套路：worker 只排队/判定，SMTP 发送在 GitHub Actions（notify_mail.py）。
+    // /api/mail_scan   到期提醒扫描：每天北京时间只扫一次（KV 闸门 MAIL_SCAN_DAY），
+    //                  对全池（两群共用一个 D1）pub=0 且有 exp 有邮箱的号算剩余天数，
+    //                  命中 MAIL_STAGES 档位就入队；ref 对不上当前 exp 的 pending 一律作废（续费了）。
+    //                  rows_read ≈ accounts 全表一遍（~1200 行/天），额度无压力。
+    // /api/mail_pending  领取待发：state=pending → claimed（2 小时超时自动回退），
+    //                  发送前再验一遍账号现况（在池/有邮箱/公益号/exp 没变），群号此时按最新 reg_cfg 现查。
+    // /api/mail_sent   回写：sent / retry（失败退回 pending 下轮再试）。
+    // ⚠ 读失败一律 503 绝不当空表（11-06 铁律）。
+    // ====================================================================
+    if (url.pathname === '/api/mail_scan' && request.method === 'POST') {
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
+      const c = await cfg();
+      if (!c.assignPass) return json({ ok: false, message: '未配置 ASSIGN_PASS' }, 503);
+      if (body.pass !== c.assignPass && !(c.adminPass && body.pass === c.adminPass)) return json({ message: '口令错误' }, 403);
+      if (!d1ok()) return json({ ok: false, message: 'D1 未绑定' }, 503);
+      const dry = body.dry === true, force = body.force === true;
+      const today = beijingDate();
+      if (!force) {
+        let lastDay = null;
+        try { lastDay = await POOL.get('MAIL_SCAN_DAY'); } catch (e) {}
+        if (lastDay === today) {
+          return json({ ok: true, skipped: true, day: today, dry: dry, message: '今天已扫过（KV 闸门），要重扫带 force=true' });
+        }
+      }
+      // 主扫描：pub=0 且有 exp（非 forever）且有邮箱 —— 公益号/永久号/无邮箱一律不提醒
+      const rows = await d1All("SELECT pool,uid,name,email,agent,exp FROM accounts " +
+        "WHERE pub=0 AND exp IS NOT NULL AND exp<>'' AND exp<>'forever' AND email<>''", []);
+      if (rows === null) return json({ ok: false, message: '读 accounts 失败（' + (_d1LastErr || 'D1 异常') + '），本次不扫描不落闸门' }, 503);
+      const curExp = new Map();          // pool|uid → 当前 exp（含没命中档位的号，用于作废旧 pending）
+      const will = [];
+      for (const r of rows) {
+        const exp = String(r.exp || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(exp)) continue;
+        curExp.set(String(r.pool || '') + '|' + String(r.uid != null ? r.uid : ''), exp);
+        const left = Math.round((Date.parse(exp + 'T00:00:00Z') - Date.parse(today + 'T00:00:00Z')) / 86400000);
+        if (!(left >= 0)) continue;      // 已过期（等 prune 降级成公益号），不再提醒
+        const stage = MAIL_STAGES.find(s => left <= s);
+        if (!stage) continue;
+        will.push({ pool: String(r.pool || ''), uid: String(r.uid != null ? r.uid : ''), kind: 'exp' + stage,
+          ref: exp, email: String(r.email || '').trim(), name: String(r.name || ''), agent: String(r.agent || ''), exp: exp, left: left });
+      }
+      // 作废对不上号的旧 pending：续费（exp 变了）/ 降级（pub=1，上面查不到）都算
+      const pend = await d1All("SELECT pool,uid,kind,ref FROM mail_queue WHERE kind LIKE 'exp%' AND state='pending'", []);
+      if (pend === null) return json({ ok: false, message: '读 mail_queue 失败（' + (_d1LastErr || 'D1 异常') + '），本次不扫描不落闸门' }, 503);
+      let dropped = 0;
+      if (dry) {
+        return json({ ok: true, dry: true, day: today, scanned: rows.length, will_enqueue: will.length,
+          will: will.slice(0, 50) });
+      }
+      for (const p of pend) {
+        if (curExp.get(String(p.pool || '') + '|' + String(p.uid || '')) === String(p.ref || '')) continue;
+        const okD = await d1Run("UPDATE mail_queue SET state='dropped',skip_reason=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='pending'",
+          ['exp 已变更（续费/降级），旧提醒作废', String(p.pool || ''), String(p.uid || ''), String(p.kind || ''), String(p.ref || '')]);
+        if (okD) dropped++;
+      }
+      for (const w of will) {
+        try { await mailEnqueue(w.pool, w.uid, w.kind, w.ref, w.email, w.name, w.agent, w.exp); } catch (e) {}
+      }
+      try { await POOL.put('MAIL_SCAN_DAY', today); } catch (e) {}
+      return json({ ok: true, dry: false, day: today, scanned: rows.length, will_enqueue: will.length, dropped_stale: dropped });
+    }
+    if (url.pathname === '/api/mail_pending' && request.method === 'POST') {
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
+      const c = await cfg();
+      if (!c.assignPass) return json({ ok: false, message: '未配置 ASSIGN_PASS' }, 503);
+      if (body.pass !== c.assignPass && !(c.adminPass && body.pass === c.adminPass)) return json({ message: '口令错误' }, 403);
+      if (!d1ok()) return json({ ok: false, message: 'D1 未绑定' }, 503);
+      const dry = body.dry === true;
+      const limit = Math.min(50, Math.max(1, parseInt(body.limit, 10) || 50));   // ≤50：校验查询参数 ≤100（铁律）
+      const stamp = bjStamp();
+      await d1Run("UPDATE mail_queue SET state='pending',claimed_at=NULL WHERE state='claimed' AND claimed_at<=?",
+        [bjStamp(Date.now() - 2 * 3600000)]);
+      const pend = await d1All('SELECT pool,uid,kind,ref,email,name,agent,exp,created_at FROM mail_queue ' +
+        "WHERE state='pending' ORDER BY created_at LIMIT " + limit, []);
+      if (pend === null) return json({ ok: false, message: '读 mail_queue 失败（' + (_d1LastErr || 'D1 异常') + '）' }, 503);
+      if (!pend.length) return json({ ok: true, dry: dry, to_send: [], skipped: [] });
+      // 批量校验账号现况（一次 IN 查询，参数 ≤ 2+50）
+      const uids = [];
+      for (const p of pend) { const u = String(p.uid != null ? p.uid : ''); if (u && !uids.includes(u)) uids.push(u); }
+      const pools = [];
+      for (const p of pend) { const pl = String(p.pool || ''); if (pl && !pools.includes(pl)) pools.push(pl); }
+      const ph = uids.map(() => '?').join(',');
+      const plh = pools.map(() => '?').join(',');
+      const accs = await d1All('SELECT pool,uid,pub,exp,email,agent,name FROM accounts WHERE pool IN (' + plh + ') AND uid IN (' + ph + ')',
+        pools.concat(uids));
+      if (accs === null) return json({ ok: false, message: '读 accounts 校验失败（' + (_d1LastErr || 'D1 异常') + '），本轮不发放' }, 503);
+      const accMap = new Map();
+      for (const a of accs) accMap.set(String(a.pool || '') + '|' + String(a.uid != null ? a.uid : ''), a);
+      const rc = await regCfg();
+      const toSend = [], skipped = [];
+      for (const p of pend) {
+        const key = String(p.pool || '') + '|' + String(p.uid != null ? p.uid : '');
+        const a = accMap.get(key);
+        let why = '';
+        if (!a) why = '账号已不在池里（被删/迁移）';
+        else if (!String(a.email || '').trim()) why = '未登记邮箱';
+        else if (String(p.kind || '').indexOf('exp') === 0) {
+          if (Number(a.pub) === 1) why = '已降级公益号（永久有效，不提醒）';
+          else if (String(a.exp || '').slice(0, 10) !== String(p.ref || '')) why = 'exp 已变更（续费了），本轮作废';
+        }
+        if (why) {
+          skipped.push({ pool: p.pool, uid: p.uid, kind: p.kind, ref: p.ref, why: why });
+          if (!dry) await d1Run("UPDATE mail_queue SET state='skipped',skip_reason=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='pending'",
+            [why, String(p.pool || ''), String(p.uid || ''), String(p.kind || ''), String(p.ref || '')]);
+          continue;
+        }
+        // 群号发送时现查：客服改群号立即生效，不用重发
+        const agent = normAgent(a.agent || p.agent);
+        const grp = agentGroupOf(rc, agent);
+        const item = { pool: String(p.pool || ''), uid: String(p.uid != null ? p.uid : ''), kind: String(p.kind || ''),
+          ref: String(p.ref || ''), email: String(a.email || '').trim(), name: String(a.name || ''), agent: agent,
+          group: grp, exp: String(a.exp || '').slice(0, 10), created_at: String(p.created_at || '') };
+        toSend.push(item);
+        if (!dry) await d1Run("UPDATE mail_queue SET state='claimed',claimed_at=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='pending'",
+          [stamp, item.pool, item.uid, item.kind, item.ref]);
+      }
+      return json({ ok: true, dry: dry, to_send: toSend, skipped: skipped });
+    }
+    if (url.pathname === '/api/mail_sent' && request.method === 'POST') {
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
+      const c = await cfg();
+      if (!c.assignPass) return json({ ok: false, message: '未配置 ASSIGN_PASS' }, 503);
+      if (body.pass !== c.assignPass && !(c.adminPass && body.pass === c.adminPass)) return json({ message: '口令错误' }, 403);
+      if (!d1ok()) return json({ ok: false, message: 'D1 未绑定' }, 503);
+      const items = (body.items || []).slice(0, 100);
+      const retry = body.result === 'retry';
+      const stamp = bjStamp();
+      let n = 0;
+      for (const it of items) {
+        const ok = retry
+          ? await d1Run("UPDATE mail_queue SET state='pending',claimed_at=NULL,sent_at=NULL WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
+            [String(it.pool || ''), String(it.uid || ''), String(it.kind || ''), String(it.ref || '')])
+          : await d1Run("UPDATE mail_queue SET state='sent',sent_at=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
+            [stamp, String(it.pool || ''), String(it.uid || ''), String(it.kind || ''), String(it.ref || '')]);
         if (ok) n++;
       }
       return json({ ok: true, updated: n, result: retry ? 'retry' : 'sent' });
@@ -3936,6 +4131,10 @@ async function handle(request) {
       const next = {
         agents: body.agents !== undefined ? body.agents : cur.agents,
         plans: body.plans !== undefined ? body.plans : cur.plans,
+        // 2026-11-06：售后群号。前端把「客服名|群号」解析后分开传；没传就保持原样，
+        //   避免「只改套餐把群号冲掉」。
+        groups: body.groups !== undefined ? body.groups : cur.groups,
+        default_group: body.default_group !== undefined ? body.default_group : cur.default_group,
       };
       const saved = await saveRegCfg(next);
       // 2026-11-06：改名提示。在名单框里把一个字改掉，系统分不清这是「改名」还是
@@ -3943,11 +4142,12 @@ async function handle(request) {
       //   删加只换登记下拉。这里只做提示、绝不擅自改数据，真正的改名走 /api/console/agent_rename。
       const goneA = (cur.agents || []).filter(a => !(next.agents || []).includes(a));
       const addA = (next.agents || []).filter(a => !(cur.agents || []).includes(a));
+      const withGrp = Object.keys(saved.cfg.groups || {}).length;
       const hint = (goneA.length && goneA.length === addA.length)
         ? '；⚠ 检测到「' + goneA.join('、') + '」被「' + addA.join('、') + '」替换 —— 如果是改名，请用「客服改名」，否则已登记的号和结算账本仍是旧名字'
         : '';
       return json({ ok: true, d1: saved.ok, cfg: saved.cfg,
-        message: '已保存：客服 ' + saved.cfg.agents.length + ' 人、套餐 ' + saved.cfg.plans.length + ' 档'
+        message: '已保存：客服 ' + saved.cfg.agents.length + ' 人（' + withGrp + ' 人配了售后群）、套餐 ' + saved.cfg.plans.length + ' 档'
           + (saved.ok ? '' : '（⚠️ D1 写入失败，已写 KV 兜底，请稍后重试）') + hint }, 200, CORS);
     }
     // ================= 客服改名（2026-11-06 新增）=================
@@ -4000,7 +4200,12 @@ async function handle(request) {
           else if (!ag.includes(a)) ag.push(a);
         }
         if (!ag.includes(newN)) ag.push(newN);
-        saved = await saveRegCfg({ agents: ag, plans: cur.plans });
+        // 2026-11-06：群号跟着名字走（改名不改群号，只换键）。
+        const gp = {};
+        for (const k of Object.keys(cur.groups || {})) {
+          gp[k === oldN ? newN : k] = cur.groups[k];
+        }
+        saved = await saveRegCfg({ agents: ag, plans: cur.plans, groups: gp, default_group: cur.default_group });
       }
       // 号池快照是 D1 的重建缓存，顺手刷一份，免得 D1 抖动走 KV 兜底时又看到旧名
       try { await refreshPoolSnap(); } catch (e) {}
@@ -5264,8 +5469,11 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     </div>
     <p style="font-size:11.5px;color:#96714a;margin:8px 0 0;line-height:1.7">⚠ 不要在下面的名单框里直接改字 —— 那只换了登记的<b>下拉选项</b>，<b>已登记的号和已经结算过的订单仍是旧名字</b>，而且系统分不清你是「改名」还是「删掉一个 + 新增一个」。要改名就用这里。</p>
   </div>
-  <label>客服（一行一个，顺序即下拉顺序）</label>
+  <label>客服（一行一个，格式 <code>客服名</code> 或 <code>客服名|售后群号</code>；顺序即下拉顺序）</label>
   <textarea id="cAgents" rows="5" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:ui-monospace,Consolas,monospace"></textarea>
+  <p style="font-size:11.5px;color:#999;margin:6px 0 0">群号给登记成功邮件和到期提醒用（例：<code>徐|1129937451</code>）。不写竖线 = 该客服没配群号，邮件里会引导客户自己找客服。<br>下面的默认群号：老账号没记客服名时兜底用，留空 = 不兜底。</p>
+  <label style="margin-top:8px">默认售后群号（老号没记客服名时兜底，可留空）</label>
+  <input id="cDefGrp" inputmode="numeric" placeholder="如 1129937451" style="width:220px">
   <label>套餐（一行一个，格式 <code>显示名=天数=单价</code>；天数填 0 表示永久，单价单位元）</label>
   <textarea id="cPlans" rows="6" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:ui-monospace,Consolas,monospace"></textarea>
   <p style="font-size:11.5px;color:#999;margin:6px 0 0">例：<code>1月=30=3</code> / <code>半年=180=10</code> / <code>1年=365=15</code> / <code>2年=730=20</code> / <code>永久=0=80</code>。<br>单价的第三段不写就等于「没定价」，月度结算里会把它单列成「待补价」，<b>不会当 0 元算进合计</b>。删掉某个套餐不影响已登记的号（它们的套餐名照旧显示）。</p>
@@ -6295,7 +6503,12 @@ function suspectRename(oldList,newList){
 }
 $('btnCfg').onclick=function(){
   var c=(DATA&&DATA.cfg)||{agents:[],plans:[]};
-  $('cAgents').value=(c.agents||[]).join('\\n');
+  // 2026-11-06：名单框支持「客服名|群号」；有群号的客服带竖线展示
+  $('cAgents').value=(c.agents||[]).map(function(a){
+    var g=(c.groups||{})[a];
+    return g?(a+'|'+g):a;
+  }).join('\\n');
+  $('cDefGrp').value=(c.default_group||'');
   $('cPlans').value=(c.plans||[]).map(function(p){return p.label+'='+p.days+'='+(p.price>=0?p.price:'');}).join('\\n');
   $('rnNew').value='';buildRenameSel();
   $('cm').textContent='';$('cfgModal').hidden=false;
@@ -6313,7 +6526,8 @@ $('rnGo').onclick=function(){
     if(r.ok&&r.d&&r.d.ok){
       $('cm').textContent=r.d.message||'已改名';$('cm').className='msg ok';
       var c=r.d.cfg||{};
-      $('cAgents').value=(c.agents||[]).join('\\n');
+      $('cAgents').value=(c.agents||[]).map(function(a){var g=(c.groups||{})[a];return g?(a+'|'+g):a;}).join('\\n');
+      $('cDefGrp').value=(c.default_group||'');
       $('rnNew').value='';buildRenameSel();loadData();
     }else{
       $('cm').textContent=(r.d&&r.d.message)||'改名失败';$('cm').className='msg err';
@@ -6323,7 +6537,17 @@ $('rnGo').onclick=function(){
 $('cCancel').onclick=function(){$('cfgModal').hidden=true;};
 $('cSave').onclick=function(){
   var t=JSON.parse(TOKEN||'{}');
-  var agents=$('cAgents').value.split('\\n').map(function(s){return s.trim();}).filter(Boolean);
+  // 2026-11-06：名单行支持「客服名|群号」。解析后：agents 只留名字（登记下拉口径不变），
+  //   groups 单独传给后端。群号只留数字；竖线后为空 = 该客服不配群号。
+  var agents=[],groups={};
+  $('cAgents').value.split('\\n').map(function(s){return s.trim();}).filter(Boolean).forEach(function(s){
+    var i=s.indexOf('|'),nm=s,g='';
+    if(i>=0){nm=s.slice(0,i).trim();g=s.slice(i+1).trim().replace(/[^0-9]/g,'');}
+    if(!nm)return;
+    if(agents.indexOf(nm)<0)agents.push(nm);
+    if(g)groups[nm]=g;
+  });
+  var dgrp=$('cDefGrp').value.trim().replace(/[^0-9]/g,'');
   var plans=$('cPlans').value.split('\\n').map(function(s){
     s=s.trim();if(!s)return null;
     var q=s.split('=');if(q.length<2)return null;
@@ -6345,7 +6569,7 @@ $('cSave').onclick=function(){
     +'· 如果这是「改名」→ 点「取消」，改用上面的「客服改名」（否则已登记的号、结算账本还是旧名字）\\n'
     +'· 如果确实是「删掉一个客服、另外新增一个」→ 点「确定」继续保存'))return;
   $('cSave').disabled=true;
-  api('/api/console/cfg',{user:t.user,pass:t.pass,agents:agents,plans:plans}).then(function(o){
+  api('/api/console/cfg',{user:t.user,pass:t.pass,agents:agents,plans:plans,groups:groups,default_group:dgrp}).then(function(o){
     $('cSave').disabled=false;
     if(o.ok&&o.d.ok){$('cm').textContent=o.d.message||'已保存';$('cm').className='msg ok';setTimeout(function(){$('cfgModal').hidden=true;loadData();},900);}
     else{$('cm').textContent=(o.d&&o.d.message)||'保存失败';$('cm').className='msg err';}

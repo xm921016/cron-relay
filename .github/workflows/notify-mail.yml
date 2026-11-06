@@ -1,0 +1,50 @@
+name: notify-mail
+
+# 2026-11-06 新增：号主邮件队列派发（登记成功通知 + 到期提醒）。
+#
+# 与 notify-dead 同一套路：worker 排队（mail_queue 表，两群共用 D1），
+# SMTP 只能从 Actions 侧发。本 workflow 每 30 分钟领一次队列：
+#   ① /api/mail_scan   到期提醒扫描（worker 内置 KV 每日闸门，一天最多全表扫一次）
+#   ② /api/mail_pending 领取待发（claimed 状态 + 2 小时超时回退，天然幂等不发重）
+#   ③ notify.notify_reg_ok / notify.notify_expire 发信
+#   ④ /api/mail_sent    回写 sent / retry
+#
+# 去重与作废都在 worker 侧做：唯一键 (pool,uid,kind,ref)，续费（exp 变了）自动作废旧提醒；
+# 群号在发放时按最新 reg_cfg 现查，控制台改完立即生效。
+# 仓库是 public，30 分钟一次不占 Actions 时长额度；D1 增量 ≈ 每天 1 次 accounts 全表 + 少量队列行。
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: "填 1 只查询不发送（核对名单/模板用）"
+        required: false
+        default: ""
+      noscan:
+        description: "填 1 跳过到期扫描（只清队列积压）"
+        required: false
+        default: ""
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WORKER_URL: 'https://xx1031.xyz'
+      ASSIGN_PASS: ${{ secrets.ASSIGN_PASS }}
+      NB_PASS: ${{ secrets.NB_PASS }}
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+      EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -q requests
+      - name: dispatch mail queue
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.dry }}" = "1" ]; then ARGS="$ARGS --dry"; fi
+          if [ "${{ github.event.inputs.noscan }}" = "1" ]; then ARGS="$ARGS --noscan"; fi
+          python notify_mail.py $ARGS

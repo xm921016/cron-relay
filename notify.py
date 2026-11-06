@@ -121,9 +121,87 @@ def notify_relogin(email, nickname, name):
     return send_user_email(email, subject, body)
 
 
+# ---------------------------------------------------------------------------
+# 2026-11-06 新增：登记成功通知 + 到期提醒（邮件队列 mail_queue → notify_mail.py 派发）。
+# 群号在 worker 侧按 reg_cfg 现查后随队列下发（row["group"]）；这里拿到的 group 为空时
+# 说明该客服没配群号（default_group 也没配），降级成「联系客服获取」，绝不写死群号。
+# 文案为用户 2026-11-06 逐字确认版：登记温和、到期急迫（A 套：数字直给）。
+# ---------------------------------------------------------------------------
+
+def _group_line(group):
+    g = (group or "").strip()
+    return f"售后群：{g}" if g else "售后群：请联系你的客服获取"
+
+
+def notify_reg_ok(email, nickname, name, group=""):
+    """登记成功：报喜 + 温和地把售后群推出去（用户 2026-11-06 定稿文案，逐字使用）。"""
+    if not (email or "").strip():
+        return False
+    subject = "【网易音乐人650任务】登记成功，麻烦加一下售后群"
+    body = (
+        f"你好，{_who(nickname, name)}：\n"
+        "你的账号已经登记成功，明天起会开始听歌任务，你可按照以前习惯一切正常使用APP。\n"
+        f"{_group_line(group)}\n"
+        "以后账号要是需要重新登录、或者有什么变化，我们会在群里通知。\n"
+        "比等邮件快得多，邮件偶尔会掉进垃圾箱，容易耽误事。\n"
+        "（备注一下登记用的手机号）\n\n"
+        "——" + SIGN
+    )
+    return send_user_email(email, subject, body)
+
+
+# 到期提醒 A 套（数字直给型）：标题直接给天数，语气逐档加急；
+# 用户 2026-11-06 要求：不说「在群里说一声」，统一「售后群联系客服」。
+_EXPIRE_TPL = {
+    30: ("你的账号还剩 30 天",
+         "提醒一下，你的账号（{who}）在 {exp} 到期，还剩 30 天。\n\n"
+         "到期后会自动停止听歌，播放进度原地停住，不会清空。\n"
+         "要继续用的话，这段时间续上就行，续完不影响已有数据。\n\n"
+         "续费或者有疑问，请到售后群联系客服。"),
+    15: ("你的账号还剩 15 天",
+         "你的账号（{who}）{exp} 到期，还剩 15 天，半个月过去了。\n\n"
+         "到期后停止听歌，进度原地停住。现在续还来得及，不用等到最后几天。\n"
+         "续费或者有疑问，请到售后群联系客服。"),
+    7: ("只剩 7 天，你的账号快到期了",
+        "你的账号（{who}）{exp} 到期，只剩 7 天了。\n\n"
+        "一周之后就会停止听歌，进度原地停住。\n"
+        "这几天是续费的正常时间，别拖到最后一天才想起来。\n\n"
+        "续费请尽快到售后群联系客服。"),
+    3: ("只剩 3 天，请尽快安排续费",
+        "你的账号（{who}）{exp} 到期，只剩 3 天。\n\n"
+        "三天后自动停止听歌。到时候再补，中间停的这几天是不会补回来的。\n"
+        "现在续，一分进度都不耽误。\n\n"
+        "请尽快到售后群联系客服办理续费。"),
+    1: ("明天就到期，最后 1 天",
+        "最后提醒：你的账号（{who}）{exp} 到期，就剩 1 天了。\n\n"
+        "到期后立刻停止自动听歌，进度原地停住。\n"
+        "现在续还来得及，再晚就是停了之后补。\n\n"
+        "请今天之内到售后群联系客服，说一句「我要续」就行。\n"
+        "或者直接回这封邮件，客服会联系你。"),
+}
+
+
+def notify_expire(email, nickname, name, group="", exp="", days=30):
+    """到期提醒（剩余 ≤30/15/7/3/1 天各一封，同一档同一到期日只发一次，去重在队列侧做）。"""
+    if not (email or "").strip():
+        return False
+    days = int(days) if days in _EXPIRE_TPL else (30 if int(days or 0) > 30 else min(
+        (s for s in (30, 15, 7, 3, 1) if int(days or 0) <= s), default=1))
+    subj_tail, mid = _EXPIRE_TPL[days]
+    subject = f"【网易音乐人650任务】{subj_tail}"
+    who = _who(nickname, name)
+    body = (
+        f"你好，{who}：\n\n"
+        mid.format(who=who, exp=(exp or "").strip() or "近期") + "\n"
+        f"{_group_line(group)}\n\n"
+        "——" + SIGN
+    )
+    return send_user_email(email, subject, body)
+
+
 if __name__ == "__main__":
-    # 本地/CI 自测：python notify.py 收件邮箱 [relogin 账号名]
-    # 模板：缺省=发件通道测试；relogin=账号过期重新登记提醒（test-email.yml 的 tpl=relogin 用）
+    # 本地/CI 自测：python notify.py 收件邮箱 [模板] [参数...]
+    # 模板：缺省=发件通道测试；relogin=账号过期重新登记；regok=登记成功；expire=到期提醒
     import sys
     if len(sys.argv) >= 2:
         to = sys.argv[1]
@@ -131,6 +209,16 @@ if __name__ == "__main__":
         if tpl == "relogin":
             aname = sys.argv[3] if len(sys.argv) >= 4 else "你的账号"
             ok = notify_relogin(to, "", aname)
+        elif tpl == "regok":
+            aname = sys.argv[3] if len(sys.argv) >= 4 else "你的账号"
+            grp = sys.argv[4] if len(sys.argv) >= 5 else ""
+            ok = notify_reg_ok(to, "", aname, grp)
+        elif tpl == "expire":
+            aname = sys.argv[3] if len(sys.argv) >= 4 else "你的账号"
+            grp = sys.argv[4] if len(sys.argv) >= 5 else ""
+            exp = sys.argv[5] if len(sys.argv) >= 6 else "2026-12-06"
+            dys = int(sys.argv[6]) if len(sys.argv) >= 7 else 30
+            ok = notify_expire(to, "", aname, grp, exp, dys)
         else:
             ok = send_user_email(
                 to,
@@ -138,5 +226,5 @@ if __name__ == "__main__":
                 "如果你收到这封邮件，说明直邮通道工作正常。\n\n——" + SIGN,
             )
         sys.exit(0 if ok else 1)
-    print("usage: python notify.py <to_email> [relogin <account_name>]")
+    print("usage: python notify.py <to_email> [relogin|regok|expire <name> <group> [exp] [days]]")
     sys.exit(2)
