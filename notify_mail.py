@@ -27,6 +27,7 @@
 import json
 import os
 import sys
+import time
 
 import requests
 
@@ -87,7 +88,12 @@ def main():
         return 1
 
     sent, failed = [], []
-    for t in todo:
+    for idx, t in enumerate(todo):
+        # 2026-11-06：QQ SMTP 对高频连发直接断连（实测连续 19 封后全部 Connection unexpectedly
+        # closed），每封之间强制间隔 8 秒 —— 50 封 ≈ 7 分钟，仍在 workflow 15 分钟超时内。
+        # 失败的照旧退回 pending，下一班自动重试，不丢件。
+        if idx:
+            time.sleep(8)
         who = str(t.get("name") or t.get("uid") or "")
         if who.startswith("manual:"):
             who = who[7:] or str(t.get("uid") or "")
