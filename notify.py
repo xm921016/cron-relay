@@ -191,9 +191,9 @@ def notify_expire(email, nickname, name, group="", exp="", days=30):
     subject = f"【网易音乐人650任务】{subj_tail}"
     who = _who(nickname, name)
     body = (
-        f"你好，{who}：\n\n"
-        mid.format(who=who, exp=(exp or "").strip() or "近期") + "\n"
-        f"{_group_line(group)}\n\n"
+        "你好，" + who + "：\n\n"
+        + mid.format(who=who, exp=(exp or "").strip() or "近期") + "\n"
+        + _group_line(group) + "\n\n"
         "——" + SIGN
     )
     return send_user_email(email, subject, body)
