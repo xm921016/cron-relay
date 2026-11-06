@@ -2082,6 +2082,18 @@ const PEER_DEFAULT = 'https://dingzhi.xx1031.xyz';
 function d1ok() {
   try { return typeof DB !== 'undefined' && DB && typeof DB.prepare === 'function'; } catch (e) { return false; }
 }
+// 2026-11-05 晚：D1 最后一次报错的原因（只在单次 invocation 内有意义）。
+// 起因：D1 免费额度（500 万行读/天）被月度结算的子查询打光后，所有带 WHERE 的写入都被
+// 7500 拒绝，而接口仍然回「已修改」只附一句小字警告 —— 用户看到的就是「编辑功能坏了」。
+// 现在把真实原因带到前端，并让写接口直接失败，不再假成功。
+let _d1LastErr = '';
+function d1ErrHint() {
+  const m = String(_d1LastErr || '');
+  if (/exceeded D1'?s? free tier/i.test(m)) return 'D1 今日免费额度已用尽（每天 500 万行读），北京时间次日 08:00 恢复';
+  if (/readonly|read-only/i.test(m)) return 'D1 处于只读状态';
+  if (m) return String(m).slice(0, 160);
+  return '原因未知（D1 未返回错误信息）';
+}
 // ====================================================================
 // 2026-10-25：歌曲/账号元数据自动补齐（控制台打开时后台补几条，慢慢补完）
 // 用途：song_meta / acc_meta 是控制台「共创歌曲 / 绑错歌」标签的数据源，
@@ -2089,6 +2101,20 @@ function d1ok() {
 // 策略：每次控制台加载顺手补 6 首歌 + 4 个号，全部 try/catch 静默失败，绝不阻塞、绝不影响页面。
 async function backfillMeta(){
   if(!d1ok())return {skip:1};
+  // 2026-11-06：15 分钟节流 —— 这是控制台首屏最大的一笔 D1 额度浪费。
+  // 现状：本函数在「打开 /console 页面」和「/api/console/data」两处都被 waitUntil 调起，
+  //   所以用户刷一次页面它跑两遍；开头两条查询都要扫全池
+  //   （① accounts LEFT JOIN song_meta ≈ 704 行  ② accounts LEFT JOIN acc_meta ≈ 704+795 行），
+  //   合计约 2,200 行/次 × 2 次 ≈ 4,400 行，而没有待补项时纯属空跑。
+  // 影响：只影响「共创歌曲 / 绑错歌」两个标签的补齐时机，最多晚 15 分钟；
+  //   那两列本来就是事后排查用的，晚一点不影响任何操作、不影响播放与快照。
+  // 为什么是 15 分钟而不是更短：每次通过闸门要写一次 KV（免费额度 1,000 写/天），
+  //   15 分钟 ≈ 96 次/天，给其它 KV 写留足余量。失败一律退化成「每次都跑」，不影响正确性。
+  try{
+    const tick=Number(await POOL.get('meta:tick'))||0;
+    if(tick&&Date.now()-tick<900000)return {skip:'throttle'};
+    await POOL.put('meta:tick',String(Date.now()),{expirationTtl:3600});
+  }catch(e){}
   const now=new Date(Date.now()+8*3600*1000).toISOString().replace('T',' ').slice(0,19);
   // 这两个接口用桌面 Chrome UA 更稳（全局 UA 是 iPhone 版，登录接口在用，别动它）
   const MUA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -2147,7 +2173,10 @@ async function d1All(sql, params) {
     const st = DB.prepare(sql);
     const r = params && params.length ? await st.bind(...params).all() : await st.all();
     return (r && r.results) || [];
-  } catch (e) { console.error('D1 all 失败:', e && e.message); return null; }
+  } catch (e) {
+    _d1LastErr = String((e && e.message) || e);
+    console.error('D1 all 失败:', e && e.message); return null;
+  }
 }
 
 // 死号流水写 D1（2026-10-22 新增）：KV 里的 dead_log 只是「墓碑名单」，最多 500 条、只存键名，
@@ -2185,12 +2214,15 @@ async function d1QueueNotice(e, kind) {
 }
 
 async function d1Run(sql, params) {
-  if (!d1ok()) return false;
+  if (!d1ok()) { if (!_d1LastErr) _d1LastErr = 'D1 未绑定（DB 为空）'; return false; }
   try {
     const st = DB.prepare(sql);
     if (params && params.length) await st.bind(...params).run(); else await st.run();
     return true;
-  } catch (e) { console.error('D1 run 失败:', e && e.message); return false; }
+  } catch (e) {
+    _d1LastErr = String((e && e.message) || e);
+    console.error('D1 run 失败:', e && e.message); return false;
+  }
 }
 // 单条镜像（新增/修改后调用）。
 // 2026-10-26 修复：无 uid 的历史条目以前直接 return false，导致这些号在控制台上的
@@ -2910,7 +2942,9 @@ async function handle(request) {
         if (await d1Upsert(e)) ok++; else fail++;
       }
       const live = new Set(master.filter(e => e.uid != null).map(e => String(e.uid)));
-      const rows = await d1All('SELECT uid FROM accounts WHERE pool=?', [POOL_NAME]) || [];
+      const rows = await d1All('SELECT uid FROM accounts WHERE pool=?', [POOL_NAME]);
+      // 2026-11-06：读失败时 rows 为 null，绝不能当成「D1 是空的」继续算差集。
+      if (!rows) return json({ message: 'D1 查询失败（accounts 读不到），已中止对齐' }, 503);
       // 'name:xxx' 是「没有 uid 的老条目」的占位主键，不在 live 里但绝不能删。
       const gone = rows.filter(r => !String(r.uid).startsWith('name:') && !live.has(String(r.uid)));
       await Promise.all(gone.map(r => d1Run('DELETE FROM accounts WHERE pool=? AND uid=?', [POOL_NAME, String(r.uid)])));
@@ -2994,6 +3028,12 @@ async function handle(request) {
         if (chk) d1Confirmed = chk.length > 0;
         if (d1Confirmed === false) {
           return json({ ok: false, message: '这次没能写进数据库（号池刚好抖了一下）。请再点一次「一键登记」，不会重复占名额。' }, 503);
+        }
+        // 2026-11-05 晚：回查本身失败（chk === null）原来被当成「没法确认」照样回成功 ——
+        // D1 配额用尽时就是这个分支，成员看到「登记成功」、控制台却查不到这个号。
+        // 现在明确告诉对方失败，不再假成功。
+        if (chk === null) {
+          return json({ ok: false, message: '登记没写进数据库（' + d1ErrHint() + '），请稍后重试；这次不会占名额。' }, 503);
         }
       }
       let msg = '登记成功，次日生效。';
@@ -3534,7 +3574,10 @@ async function handle(request) {
       const plan = await buildPlan(day);
       if (!plan.ok) return json({ ok: false, message: plan.msg }, 503);
       const expected = plan.plans.filter(x => x.pool === poolQ).map(x => String(x.uid));
-      const rows = await d1All('SELECT uid FROM runs WHERE day=? AND pool=?', [day, poolQ]) || [];
+      const rows = await d1All('SELECT uid FROM runs WHERE day=? AND pool=?', [day, poolQ]);
+      // 2026-11-06：读失败不能当成「一个都没跑」——那会发出「覆盖率 0%」的假告警，
+      // 且缺口名单是全部号，等于把故障指向错误的方向。直接报错。
+      if (!rows) return json({ ok: false, message: 'D1 查询失败（runs 表读不到）' }, 503);
       const ranSet = new Set(rows.map(r => String(r.uid)));
       const expSet = new Set(expected);
       const missing = expected.filter(u => !ranSet.has(u));
@@ -3562,7 +3605,11 @@ async function handle(request) {
       const day = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(url.searchParams.get('day') || '')
         ? url.searchParams.get('day') : beijingDate();
       const poolQ = url.searchParams.get('pool') || POOL_NAME;
-      const rows = await d1All('SELECT uid FROM runs WHERE day=? AND pool=?', [day, poolQ]) || [];
+      const rows = await d1All('SELECT uid FROM runs WHERE day=? AND pool=?', [day, poolQ]);
+      // 2026-11-06：以前 `|| []` 把「D1 读失败」当成「今天没人播过」→ run.py 会把当天已播的号
+      // 再播一遍（11-06 实测同类事故造成 127 个号双播）。读不到就必须显式报错，让客户端重试/
+      // 拒绝开跑，绝不能伪装成空名单。
+      if (!rows) return json({ ok: false, message: 'D1 查询失败（runs 表读不到，不敢当成空名单）' }, 503, CORS);
       return json({ ok: true, day: day, pool: poolQ, n: rows.length,
                     uids: rows.map(r => String(r.uid)) }, 200, CORS);
     }
@@ -3616,6 +3663,10 @@ async function handle(request) {
       //   suspectRows → accounts.suspect_at!='' 的待复核号（注意空串不是 NULL，不能写 IS NOT NULL）
       //   freshRows → 各池当天快照最后写入时间（数据新鲜度）
       //   actions   → 两仓库最近一次 run.yml 作业状态（fetchActionsStatus 内部带 KV 5 分钟缓存）
+      // 2026-11-06：song_meta / acc_meta 两张字典表改成一次 KV 缓存读（TTL 15 分钟）。
+      // 原来每次首屏各全表扫一遍（815 + 795 = 1,610 行），而这两张表一天才变一两次。
+      // 必须在 Promise.all 之前建好这个 promise，否则下面两个位置会各查一次 D1（缓存也救不了）。
+      const _metaP = d1ok() ? metaDicts() : Promise.resolve(null);
       const [master, c2, cur, prev, dr, peerUrlRaw, plan, ranRows, deadRows, suspectRows, freshRows, actions, streakRows, songRows, accRows, noticeRows, deadTodayRows, regCfgNow] = await Promise.all([
         mergePool(),
         cfg(),
@@ -3631,12 +3682,16 @@ async function handle(request) {
         fetchActionsStatus(),
         // 2026-10-23：最近 7 天快照，用于「连续不涨天数」。date-6 起（含当天）；
         // 改造前数据断层天的行不存在，calcStreaks 天然跳过。
-        d1ok() ? d1All('SELECT day,pool,uid,rate FROM snapshots WHERE day>=? AND day<=?', [dateMinusN(date, 6), date]).catch(() => null) : Promise.resolve(null),
+        // 2026-11-06：改成在 SQL 里算，不再把 7 天快照整批拉回 JS。
+        //   原来每次首屏拉 4,071 行回来只为了算出一个 {uid: 天数} 的小字典，现在最多回 704 行。
+        //   口径与原 calcStreaks 逐条比对过（6 个日期 hz+dz 全量 + 8 组边界用例，100% 一致）。
+        d1ok() ? d1All(snapStreakSQL(), [dateMinusN(date, 6), date]).catch(() => null) : Promise.resolve(null),
         // 2026-10-25：歌曲/账号元数据（song_meta / acc_meta，由 tmp/sync_song_meta.py 回填）。
         // 用来判断「共创歌曲（合唱）」「绑错歌（歌曲作者里没有本人音乐人）」这两类售后问题。
         // 纯只读、失败降级为 null，缺数据时页面只是不打这两个标签，不影响其它列。
-        d1ok() ? d1All('SELECT song,n_artists,artists,first_artist,gone FROM song_meta').catch(() => null) : Promise.resolve(null),
-        d1ok() ? d1All('SELECT uid,artist_id,artist_name FROM acc_meta').catch(() => null) : Promise.resolve(null),
+        // 2026-11-06：走同一个 _metaP（KV 缓存 15 分钟），两个位置共用一次读。
+        _metaP.then(m => (m && m.songs) || null),
+        _metaP.then(m => (m && m.acc) || null),
         // 2026-10-26：手动删号的「通知号主」判定状态（dead_notice），只用于在删号记录里
         // 标一行「已通知 / 已回池不发 / 待判」。纯只读，失败降级为 null。
         d1ok() ? d1All('SELECT pool,uid,removed_at,state,sent_at,skip_reason FROM dead_notice ORDER BY removed_at DESC LIMIT 60').catch(() => null) : Promise.resolve(null),
@@ -3739,7 +3794,15 @@ async function handle(request) {
       const fresh = {};
       for (const r of (freshRows || [])) { fresh[r.pool === 'dz' ? 'dz' : 'hz'] = r.last || ''; }
       // 2026-10-23：连续不涨天数（>=2 天才有条目；查询失败时降级为空字典，页面无标记）
-      const streak = calcStreaks(streakRows || []);
+      // 2026-11-06：SQL 已经把天数算好（[{pool,uid,streak}]），这里只做形状转换。
+      //   输出结构不变：{ hz:{ uid: 天数 }, dz:{ ... } }，前端 DATA.streak[pool][uid] 照旧。
+      const streak = { hz: {}, dz: {} };
+      for (const r of (streakRows || [])) {
+        if (!r || r.uid == null) continue;
+        const _sp = (r.pool === 'dz') ? 'dz' : 'hz';
+        const _sn = Number(r.streak) || 0;
+        if (_sn >= 2) streak[_sp][String(r.uid)] = _sn;
+      }
       // 2026-11-05 新增：对「快照里 650 是 0% 但近30日播放 ≥650」的号实时复核一次（KV 缓存 30 分钟）。
       // 只写 snap.cur[pool][uid].lr / .lp 两个新键，不动 rate —— 其它列、顶部统计、周报口径全部不变。
       // 候选上限 40：正常情况下这批号只有十几个（11-05 实测 12 个），超了说明口径异常，宁可不查也不打爆网易。
@@ -3877,6 +3940,13 @@ async function handle(request) {
       if (agentRaw === '__none__') where.push("(agent IS NULL OR agent='')");
       else if (agentRaw) { where.push('agent=?'); params.push(agentRaw); }
       const W = where.join(' AND ');
+      // 2026-11-05 晚：下面的 ghost 聚合改成 LEFT JOIN accounts，两张表都有 pool / agent 列，
+      // 那份 WHERE 必须带表别名（l.），所以单独拼一套；参数顺序与上面完全一致，直接复用 params。
+      const whereL = ['l.day>=?', 'l.day<=?'];
+      if (poolF) whereL.push('l.pool=?');
+      if (agentRaw === '__none__') whereL.push("(l.agent IS NULL OR l.agent='')");
+      else if (agentRaw) whereL.push('l.agent=?');
+      const WL = whereL.join(' AND ');
       // 统计口径：money 只累加「非补号 + 已定价」，unpriced 单独计数（不当 0 元混进合计）
       // 2026-11-05：增 giftCnt —— 名字带 name: / manual: / 公益 的是公益赠号或手动加的号，
       //   客户没为它付钱，必须从「有效单」里剔出去单列，否则提成被免费号抬高。
@@ -3898,24 +3968,36 @@ async function handle(request) {
         // 号在不在：用来给明细打「号已删」，并统计对账差额（账本只增不改，删号不会抹掉成交）
         d1All('SELECT uid FROM accounts' + (poolF ? ' WHERE pool=?' : ''), poolF ? [poolF] : []),
         // 2026-11-05：号在池 / 号已删 两个金额口径。
-        // 为什么用 SQL 子查询而不是拿下面 rows 在 JS 里累加：明细有 LIMIT 1200，
+        // 为什么用 SQL 聚合而不是拿下面 rows 在 JS 里累加：明细有 LIMIT 1200，
         // 单月单量一旦超过就会被截断，金额会静默算少。这里的聚合直接对全表算，不受截断影响。
         // 注意 accounts 里已过期的号仍然在表内（11-05 起到期不删、降公益），
         // 所以「号已删」严格等于「accounts 里查不到这个 uid」，与池里的明细标记口径一致。
+        // ⚠ 2026-11-05 晚改成 LEFT JOIN（原来是 4 个 NOT EXISTS 相关子查询）：
+        //   accounts 的主键是 (pool,uid)、没有单独的 uid 索引，`WHERE a.uid=l.uid` 用不上索引，
+        //   每个子查询都要全表扫 accounts（690 行）×（账本 800 单）× 4 个 SUM ≈ 220 万行/次。
+        //   月度结算点四五次就把 D1 免费额度（500 万行/天）打光，之后所有带 WHERE 的写入都被
+        //   7500 拒绝 → 控制台改了什么都不生效（11-05 晚用户报障的根因）。
+        //   ON a.pool=l.pool AND a.uid=l.uid 正好走主键，行数 ≈ 账本行数（实测 1 行/单）。
         d1All('SELECT ' +
-          'SUM(CASE WHEN NOT EXISTS(SELECT 1 FROM accounts a WHERE a.uid=l.uid) THEN 1 ELSE 0 END) goneCnt, ' +
-          'SUM(CASE WHEN l.rb=0 AND l.price IS NOT NULL AND NOT EXISTS(SELECT 1 FROM accounts a WHERE a.uid=l.uid) ' +
+          'SUM(CASE WHEN a.uid IS NULL THEN 1 ELSE 0 END) goneCnt, ' +
+          'SUM(CASE WHEN l.rb=0 AND l.price IS NOT NULL AND a.uid IS NULL ' +
           'THEN l.price ELSE 0 END) goneMoney, ' +
-          'SUM(CASE WHEN l.rb=0 AND l.price IS NOT NULL AND EXISTS(SELECT 1 FROM accounts a WHERE a.uid=l.uid) ' +
+          'SUM(CASE WHEN l.rb=0 AND l.price IS NOT NULL AND a.uid IS NOT NULL ' +
           'THEN l.price ELSE 0 END) aliveMoney, ' +
           // 2026-11-05：goneValid =「号已删、且本来就是有效单（非补号、非赠号）」的单数。
           // 退单/删号的单不提成 —— 客户的钱退了、服务也没了，再算提成就是给客服发空单的钱。
           // 它同时从 valid 里扣掉，见下面 t.valid。
           'SUM(CASE WHEN l.rb=0 ' +
           "AND NOT (l.name LIKE 'name:%' OR l.name LIKE 'manual:%' OR l.name LIKE '%公益%') " +
-          'AND NOT EXISTS(SELECT 1 FROM accounts a WHERE a.uid=l.uid) THEN 1 ELSE 0 END) goneValid ' +
-          'FROM ledger l WHERE ' + W, params),
+          'AND a.uid IS NULL THEN 1 ELSE 0 END) goneValid ' +
+          'FROM ledger l LEFT JOIN accounts a ON a.pool=l.pool AND a.uid=l.uid WHERE ' + WL, params),
       ]);
+      // 2026-11-05 晚：账本读失败（D1 配额用尽 / 抖动）时不能一声不响地回一张残缺的结算表 ——
+      // D1 在额度用尽时是**随机打单个查询**的（这次实测：byPlan 出来了 333 单，byPool 却失败，
+      // 于是「成交单数」显示 0，看着像本月没成交）。只要有一路聚合没拿到就直接回 503。
+      if (!byPlan || !byAgent || !byPool || !rows || !ghost) {
+        return json({ message: '账本读取失败：' + d1ErrHint() + '（不是本月没有成交，是数据库这次没读出来，请稍后重试）' }, 503, CORS);
+      }
       const aliveSet = new Set();
       for (const r of (accRows || [])) aliveSet.add(String(r.uid == null ? '' : r.uid));
       const num = (x) => Number(x) || 0;
@@ -4356,11 +4438,62 @@ function dateMinusN(dateStr, n) {
   return d;
 }
 // ---- 连续不涨天数（2026-10-23 控制台新增，纯计算无副作用）----
+// 2026-11-06：计算整体下推到 D1（原 calcStreaks 保留在下面备查，逻辑与新 SQL 等价）。
+// 为什么改：原来每次首屏把 7 天快照（约 4,071 行）整批拉回 JS 再算，
+//   回传的只是一张 {uid: 天数} 的小字典；改成 SQL 后最多回 704 行（每号一条），省 3,300+ 行/次。
+// 口径与原实现逐条对齐（6 个日期 hz+dz 全量比对 + 8 组边界用例，全部一致）：
+//   ① 同池同号同天多行取 MAX(rate)；pool 归一化为 hz/dz；
+//   ② rate、pool 的归一化与原 calcStreaks 一致（rate<0 之类不特殊处理，与原逻辑相同）；
+//   ③ LAG 按 day 升序取前一天，缺天直接跳过（不补 0），与原「days 列表」逻辑等价；
+//   ④ rn 是倒序序号（1=最新），rn<ndays 排除最早那天（最早一天没有「前一天」可比）；
+//   ⑤ ≥2 天才输出，与原 streak>=2 一致。
+function snapStreakSQL(){
+  return 'WITH s AS ('
+    + "SELECT (CASE WHEN pool='dz' THEN 'dz' ELSE 'hz' END) AS pool, uid, day, MAX(rate) AS rate "
+    + 'FROM snapshots WHERE day>=? AND day<=? AND rate IS NOT NULL GROUP BY 1,2,3), '
+    + 'd AS (SELECT pool, uid, rate, '
+    + 'LAG(rate) OVER (PARTITION BY pool,uid ORDER BY day) AS prev, '
+    + 'ROW_NUMBER() OVER (PARTITION BY pool,uid ORDER BY day DESC) AS rn, '
+    + 'COUNT(*) OVER (PARTITION BY pool,uid) AS ndays FROM s), '
+    + 'g AS (SELECT pool, uid, '
+    + 'MIN(CASE WHEN rn<ndays AND rate>prev THEN rn END) AS first_up, '
+    + 'MAX(ndays) AS ndays FROM d GROUP BY 1,2) '
+    + 'SELECT pool, uid, '
+    + 'CASE WHEN first_up IS NULL THEN ndays-1 ELSE first_up-1 END AS streak '
+    + 'FROM g WHERE ndays>=2';
+}
+
+// ---- 歌曲/账号元数据字典（2026-11-06 新增）：KV 缓存 15 分钟 ----
+// 这两张表只在 backfillMeta 补数据时才变（一天一两次），但原来每次首屏都要全表扫一遍
+// （song_meta 815 行 + acc_meta 795 行）。缓存进 KV 后每 15 分钟才真查一次 D1。
+// 失败一律降级为 null（页面只是不打「共创/绑错歌」两个标签），绝不影响其它列。
+// 大小实测：815+795 行整包 JSON ≈ 163 KB，远低于 KV 单值 25 MB 上限。
+// KV 写次数 ≈ 96 次/天（比 D1 省下的行读值这个价）。
+async function metaDicts(){
+  try{
+    const hit = await POOL.get('meta:dicts');
+    if (hit) {
+      const o = JSON.parse(hit);
+      if (o && Array.isArray(o.songs) && Array.isArray(o.acc)) return o;
+    }
+  }catch(e){}
+  const [songs, acc] = await Promise.all([
+    d1All('SELECT song,n_artists,artists,first_artist,gone FROM song_meta'),
+    d1All('SELECT uid,artist_id,artist_name FROM acc_meta'),
+  ]);
+  if (!songs || !acc) return null;   // 任一失败都降级，不写半份缓存
+  const payload = { songs: songs, acc: acc, at: Date.now() };
+  try{ await POOL.put('meta:dicts', JSON.stringify(payload), { expirationTtl: 900 }); }catch(e){}
+  return payload;
+}
+
 // 输入：最近 N 天 snapshots 行（day,pool,uid,rate）。
 // 口径：按 (池,号,天) 取最大 rate（650 进度单调增，同一天多份写入取最新进度）；
 //       跳过无快照的天（数据断层不冤枉号）；从最新一天往前数连续 rate<=前一天 的天数；
 //       只有 >=2 的才收录（1 天不涨日环比列本身可见，避免满屏标记）。
 // 输出：{ hz:{uid:n}, dz:{uid:n} }
+// ⚠️ 2026-11-06 起控制台已改用 snapStreakSQL()，这个函数保留只为对照/回滚，不要再新增调用点。
+
 function calcStreaks(rows) {
   const byKey = {};
   for (const r of (rows || [])) {
@@ -4545,9 +4678,19 @@ async function applyEntryEdit(body) {
     // master 缓存不再回写（2026-10-22）：读者全走 D1，entry: 独立键才是权威
     await pushPool(master);
     try { await refreshPoolSnap(); } catch (e) {}
+    // 2026-11-05 晚：D1 写了失败就直接报错，不再回「已修改 + 小字警告」。
+    // 原因：控制台整张表读的都是 D1，写 D1 失败时页面只会显示旧值，用户的理解就是
+    // 「编辑功能坏了」；而且原来的警告是绿色提示、900ms 后自动关窗，基本没人看见。
+    // KV 那一份仍然留着（不丢），等 D1 恢复后重新保存一次即可覆盖。
+    if (d1ok() && !d1okEdit) {
+      return json({ ok: false, d1: false,
+        message: '保存失败：改动没能写进数据库（' + d1ErrHint() + '）。'
+          + '控制台读的是数据库，所以这次改的「' + changes.join('、') + '」刷新后会变回旧值；'
+          + '数据库恢复后请再保存一次。' }, 500, CORS);
+    }
     return json({ ok: true, d1: !!d1okEdit,
       message: '已修改 ' + (target.name || target.uid) + '：' + changes.join('、')
-        + (d1okEdit ? '' : '（⚠️ D1 镜像写入失败：KV 已保存，请稍后调 /api/resync 补齐）') }, 200, CORS);
+        + (d1okEdit ? '' : '（⚠️ D1 未绑定，只写进了 KV）') }, 200, CORS);
   }
   return json({ message: '未知操作' }, 400, CORS);
 }
