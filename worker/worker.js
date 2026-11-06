@@ -3524,7 +3524,7 @@ async function handle(request) {
     //                  rows_read ≈ accounts 全表一遍（~1200 行/天），额度无压力。
     // /api/mail_pending  领取待发：state=pending → claimed（2 小时超时自动回退），
     //                  发送前再验一遍账号现况（在池/有邮箱/公益号/exp 没变），群号此时按最新 reg_cfg 现查。
-    // /api/mail_sent   回写：sent / retry（失败退回 pending 下轮再试）。
+    // /api/mail_sent   回写：sent / retry（失败退回 pending 重试，累计 3 次失败标 dropped 放弃）。
     // ⚠ 读失败一律 503 绝不当空表（11-06 铁律）。
     // ====================================================================
     if (url.pathname === '/api/mail_scan' && request.method === 'POST') {
@@ -3663,16 +3663,32 @@ async function handle(request) {
       const items = (body.items || []).slice(0, 100);
       const retry = body.result === 'retry';
       const stamp = bjStamp();
-      let n = 0;
+      let n = 0, dropped = 0;
+      // 2026-11-06 重试上限：用户要求「尝试几次不行就放弃，别浪费额度」。
+      // attempts 每次发信失败 +1，满 3 次标 dropped（skip_reason 注明）。
+      // claimed 2 小时超时回退不算次数（那是崩溃恢复，不是真发过）。
       for (const it of items) {
-        const ok = retry
-          ? await d1Run("UPDATE mail_queue SET state='pending',claimed_at=NULL,sent_at=NULL WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
-            [String(it.pool || ''), String(it.uid || ''), String(it.kind || ''), String(it.ref || '')])
-          : await d1Run("UPDATE mail_queue SET state='sent',sent_at=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
+        if (retry) {
+          const rs = await d1All("SELECT attempts FROM mail_queue WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
+            [String(it.pool || ''), String(it.uid || ''), String(it.kind || ''), String(it.ref || '')]);
+          if (rs === null) continue;   // 读失败不动状态（铁律 3c：读失败≠读到空，下轮 claimed 超时自然回退）
+          const att = Number((rs[0] && rs[0].attempts) || 0);
+          if (att + 1 >= 3) {
+            const ok = await d1Run("UPDATE mail_queue SET state='dropped',attempts=attempts+1,claimed_at=NULL,sent_at=NULL,skip_reason='连续3次发送失败，放弃' WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
+              [String(it.pool || ''), String(it.uid || ''), String(it.kind || ''), String(it.ref || '')]);
+            if (ok) { n++; dropped++; }
+          } else {
+            const ok = await d1Run("UPDATE mail_queue SET state='pending',attempts=attempts+1,claimed_at=NULL,sent_at=NULL WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
+              [String(it.pool || ''), String(it.uid || ''), String(it.kind || ''), String(it.ref || '')]);
+            if (ok) n++;
+          }
+        } else {
+          const ok = await d1Run("UPDATE mail_queue SET state='sent',sent_at=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
             [stamp, String(it.pool || ''), String(it.uid || ''), String(it.kind || ''), String(it.ref || '')]);
-        if (ok) n++;
+          if (ok) n++;
+        }
       }
-      return json({ ok: true, updated: n, result: retry ? 'retry' : 'sent' });
+      return json({ ok: true, updated: n, dropped: dropped, result: retry ? 'retry' : 'sent' });
     }
     // ====================================================================
     // 进阶控制台（2026-10-22 新增，全部为纯新增路由，不改动任何既有路由）

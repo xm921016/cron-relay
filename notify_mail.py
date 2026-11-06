@@ -135,7 +135,11 @@ def main():
         if failed:
             code, d = call("/api/mail_sent", {"pass": PASS, "result": "retry", "items": [
                 {"pool": x["pool"], "uid": x["uid"], "kind": x["kind"], "ref": x["ref"]} for x in failed]})
-            print(f"[notify-mail] 已退回 pending {len(failed)} 条（HTTP {code} {d.get('updated')}）")
+            dp = d.get("dropped") or 0
+            msg = f"[notify-mail] 失败 {len(failed)} 条已回写（HTTP {code}）：退回 {len(failed) - dp} 条重试"
+            if dp:
+                msg += f"，放弃 {dp} 条（已连续失败 3 次，标 dropped 不再试）"
+            print(msg)
         sent, failed = [], []
 
     print(f"[notify-mail] 完成：成功 {len(all_sent)} / 失败 {len(all_failed)}")
