@@ -3537,9 +3537,11 @@ async function handle(request) {
           return json({ ok: true, skipped: true, day: today, dry: dry, message: '今天已扫过（KV 闸门），要重扫带 force=true' });
         }
       }
-      // 主扫描：pub=0 且有 exp（非 forever）且有邮箱 —— 公益号/永久号/无邮箱一律不提醒
+      // 主扫描：pub=0 且有 exp（非 forever）且有邮箱 —— 公益号/永久号/无邮箱一律不提醒。
+      // 2026-11-06：加 pool=主群过滤 —— 定制群（dz）不参与任何邮件通知（用户指定），
+      //   不加过滤会把 dz 的号也扫进到期提醒。
       const rows = await d1All("SELECT pool,uid,name,email,agent,exp FROM accounts " +
-        "WHERE pub=0 AND exp IS NOT NULL AND exp<>'' AND exp<>'forever' AND email<>''", []);
+        "WHERE pool=? AND pub=0 AND exp IS NOT NULL AND exp<>'' AND exp<>'forever' AND email<>''", [POOL_NAME]);
       if (rows === null) return json({ ok: false, message: '读 accounts 失败（' + (_d1LastErr || 'D1 异常') + '），本次不扫描不落闸门' }, 503);
       const curExp = new Map();          // pool|uid → 当前 exp（含没命中档位的号，用于作废旧 pending）
       const will = [];
