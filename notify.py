@@ -19,6 +19,8 @@
 """
 import os
 import smtplib
+import html as _html
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
@@ -68,6 +70,45 @@ def mail_ready():
     return bool(_accts())
 
 
+# 2026-11-06 排版改版：用户反馈纯文本邮件太紧凑，改发 multipart/alternative——
+# 纯文本部分原样保留（老客户端降级用），HTML 部分只动排版不动措辞（正文一字不改）：
+# 段落间留白 + 2 倍行距 + 品牌红顶栏 + 售后群高亮块 + 灰色落款 + 卡片式容器。
+_BRAND_RED = "#DD001B"
+
+
+def _html_wrap(body):
+    """纯文本正文 → 卡片式 HTML。约定：
+    · 空行（\\n\\n）分段；段内换行（\\n）转 <br>
+    · 「售后群：」开头 → 浅红高亮块
+    · 「——」开头 → 落款，小号灰字
+    其余一律正常段落。"""
+    blocks = []
+    for para in body.split("\n\n"):
+        esc = _html.escape(para).replace("\n", "<br>")
+        st = para.strip()
+        if st.startswith("——"):
+            blocks.append('<p style="margin:28px 0 2px;font-size:13px;color:#9aa0a6;">' + esc + "</p>")
+        elif st.startswith("售后群："):
+            blocks.append('<div style="margin:4px 0 18px;padding:12px 16px;background:#fff5f5;'
+                          'border-radius:8px;color:' + _BRAND_RED + ';font-weight:bold;">' + esc + "</div>")
+        else:
+            blocks.append('<p style="margin:0 0 18px;line-height:2;">' + esc + "</p>")
+    inner = "".join(blocks)
+    return (
+        '<div style="background:#f4f6f8;padding:28px 16px;">'
+        '<div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:12px;'
+        'overflow:hidden;border:1px solid #eceff3;">'
+        '<div style="height:4px;background:' + _BRAND_RED + ';"></div>'
+        '<div style="padding:30px 34px 26px;font-family:-apple-system,BlinkMacSystemFont,'
+        "'PingFang SC','Microsoft YaHei','Helvetica Neue',Arial,sans-serif;"
+        'font-size:15px;color:#333333;">'
+        + inner +
+        "</div></div>"
+        '<p style="max-width:560px;margin:12px auto 0;text-align:center;font-size:12px;color:#b6bcc4;">'
+        "网易音乐人650任务 · 系统自动发送</p></div>"
+    )
+
+
 def send_user_email(to_email, subject, body):
     """给成员本人发一封纯文本邮件。任何异常只记日志，不抛出、不影响主流程。"""
     to_email = (to_email or "").strip()
@@ -81,10 +122,12 @@ def send_user_email(to_email, subject, body):
     for i in range(len(accts)):
         f, a = accts[(_ACCT_AT[0] + i) % len(accts)]
         try:
-            msg = MIMEText(body, "plain", "utf-8")
+            msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
             msg["From"] = formataddr((DISPLAY_NAME, f))
             msg["To"] = to_email
+            msg.attach(MIMEText(body, "plain", "utf-8"))          # 降级：老客户端/纯文本视图
+            msg.attach(MIMEText(_html_wrap(body), "html", "utf-8"))  # 主视图：排版版
             with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
                 server.login(f, a)
                 server.sendmail(f, [to_email], msg.as_string())
