@@ -63,73 +63,79 @@ def main():
             print(f"[notify-mail] 到期扫描：扫 {d.get('scanned')} 号，入队 {d.get('will_enqueue')} 条"
                   + (f"，作废旧提醒 {d.get('dropped_stale')} 条" if d.get("dropped_stale") is not None else ""))
 
-    # ② 领取待发
-    code, data = call("/api/mail_pending", {"pass": PASS, "limit": LIMIT, "dry": DRY})
-    if code != 200 or not data.get("ok"):
-        print(f"[notify-mail] 领取失败 HTTP {code}: {data.get('message')}")
-        return 1
-    todo = data.get("to_send") or []
-    skipped = data.get("skipped") or []
-    print(f"[notify-mail] 待发 {len(todo)} 条，判定不发 {len(skipped)} 条")
-    for s in skipped:
-        print(f"   - 不发 {s.get('name') or s.get('uid')} [{s.get('kind')}]: {s.get('why')}")
+    # ② 领取待发（循环清队列：CF 发令腿只有每小时一班，一班内尽量多发；
+    #    每轮领 ≤50、每封间隔 8 秒，100 封 ≈ 13 分钟，卡在 workflow 15 分钟超时内）
+    all_sent, all_failed = [], []
+    while True:
+        code, data = call("/api/mail_pending", {"pass": PASS, "limit": LIMIT, "dry": DRY})
+        if code != 200 or not data.get("ok"):
+            print(f"[notify-mail] 领取失败 HTTP {code}: {data.get('message')}")
+            return 1
+        todo = data.get("to_send") or []
+        skipped = data.get("skipped") or []
+        print(f"[notify-mail] 本轮待发 {len(todo)} 条，判定不发 {len(skipped)} 条")
+        for s in skipped:
+            print(f"   - 不发 {s.get('name') or s.get('uid')} [{s.get('kind')}]: {s.get('why')}")
 
-    if not todo:
-        print("[notify-mail] 没有待发邮件，结束")
-        return 0
-    if DRY:
-        for t in todo:
-            print(f"   [dry] {t.get('kind')} → {t.get('email')}（{t.get('name') or t.get('uid')}，群 {t.get('group') or '无'}）")
-        return 0
+        if not todo:
+            break
+        if DRY:
+            for t in todo:
+                print(f"   [dry] {t.get('kind')} → {t.get('email')}（{t.get('name') or t.get('uid')}，群 {t.get('group') or '无'}）")
+            return 0
+        if len(all_sent) + len(all_failed) >= 100:
+            print("[notify-mail] 已发满 100 封/班（QQ 节流 + workflow 超时保护），剩余下一班继续")
+            break
 
-    import notify
-    if not notify.mail_ready():
-        print("[notify-mail] EMAIL_FROM/EMAIL_AUTH_CODE 未配置，跳过（状态保持 claimed，2 小时后自动回退）")
-        return 1
+        import notify
+        if not notify.mail_ready():
+            print("[notify-mail] EMAIL_FROM/EMAIL_AUTH_CODE 未配置，跳过（状态保持 claimed，2 小时后自动回退）")
+            return 1
 
-    sent, failed = [], []
-    for idx, t in enumerate(todo):
-        # 2026-11-06：QQ SMTP 对高频连发直接断连（实测连续 19 封后全部 Connection unexpectedly
-        # closed），每封之间强制间隔 8 秒 —— 50 封 ≈ 7 分钟，仍在 workflow 15 分钟超时内。
-        # 失败的照旧退回 pending，下一班自动重试，不丢件。
-        if idx:
-            time.sleep(8)
-        who = str(t.get("name") or t.get("uid") or "")
-        if who.startswith("manual:"):
-            who = who[7:] or str(t.get("uid") or "")
-        kind = str(t.get("kind") or "")
-        try:
-            if kind == "reg":
-                ok = notify.notify_reg_ok(t.get("email"), "", who, t.get("group") or "")
-            elif kind.startswith("exp"):
-                days = int(kind[3:]) if kind[3:].isdigit() else 30
-                ok = notify.notify_expire(t.get("email"), "", who, t.get("group") or "",
-                                          t.get("exp") or t.get("ref") or "", days)
-            else:
-                print(f"   [{who}] 未知类型 {kind}，跳过")
+        for idx, t in enumerate(todo):
+            # 2026-11-06：QQ SMTP 对高频连发直接断连（实测连续 19 封后全部 Connection unexpectedly
+            # closed），每封之间强制间隔 8 秒。失败的照旧退回 pending，下一班自动重试，不丢件。
+            if idx or all_sent or all_failed:
+                time.sleep(8)
+            who = str(t.get("name") or t.get("uid") or "")
+            if who.startswith("manual:"):
+                who = who[7:] or str(t.get("uid") or "")
+            kind = str(t.get("kind") or "")
+            try:
+                if kind == "reg":
+                    ok = notify.notify_reg_ok(t.get("email"), "", who, t.get("group") or "")
+                elif kind.startswith("exp"):
+                    days = int(kind[3:]) if kind[3:].isdigit() else 30
+                    ok = notify.notify_expire(t.get("email"), "", who, t.get("group") or "",
+                                              t.get("exp") or t.get("ref") or "", days)
+                else:
+                    print(f"   [{who}] 未知类型 {kind}，跳过")
+                    ok = False
+            except Exception as e:
+                print(f"   [{who}] 发信异常：{e}")
                 ok = False
-        except Exception as e:
-            print(f"   [{who}] 发信异常：{e}")
-            ok = False
-        if ok:
-            sent.append(t)
-            print(f"   [{who}] 已直邮 {t.get('email')}（{kind}，群 {t.get('group') or '无'}）")
-        else:
-            failed.append(t)
-            print(f"   [{who}] 发信失败（{kind}）")
+            if ok:
+                sent.append(t)
+                all_sent.append(t)
+                print(f"   [{who}] 已直邮 {t.get('email')}（{kind}，群 {t.get('group') or '无'}）")
+            else:
+                failed.append(t)
+                all_failed.append(t)
+                print(f"   [{who}] 发信失败（{kind}）")
 
-    # ③ 回写：成功标 sent；失败退回 pending 下轮再试
-    if sent:
-        code, d = call("/api/mail_sent", {"pass": PASS, "result": "sent", "items": [
-            {"pool": x["pool"], "uid": x["uid"], "kind": x["kind"], "ref": x["ref"]} for x in sent]})
-        print(f"[notify-mail] 已标记 sent {len(sent)} 条（HTTP {code} {d.get('updated')}）")
-    if failed:
-        code, d = call("/api/mail_sent", {"pass": PASS, "result": "retry", "items": [
-            {"pool": x["pool"], "uid": x["uid"], "kind": x["kind"], "ref": x["ref"]} for x in failed]})
-        print(f"[notify-mail] 已退回 pending {len(failed)} 条（HTTP {code} {d.get('updated')}）")
+        # 回写：成功标 sent；失败退回 pending 下轮再试
+        if sent:
+            code, d = call("/api/mail_sent", {"pass": PASS, "result": "sent", "items": [
+                {"pool": x["pool"], "uid": x["uid"], "kind": x["kind"], "ref": x["ref"]} for x in sent]})
+            print(f"[notify-mail] 已标记 sent {len(sent)} 条（HTTP {code} {d.get('updated')}）")
+        if failed:
+            code, d = call("/api/mail_sent", {"pass": PASS, "result": "retry", "items": [
+                {"pool": x["pool"], "uid": x["uid"], "kind": x["kind"], "ref": x["ref"]} for x in failed]})
+            print(f"[notify-mail] 已退回 pending {len(failed)} 条（HTTP {code} {d.get('updated')}）")
+        sent, failed = [], []
 
-    print(f"[notify-mail] 完成：成功 {len(sent)} / 失败 {len(failed)}")
-    return 0 if not failed else 1
+    print(f"[notify-mail] 完成：成功 {len(all_sent)} / 失败 {len(all_failed)}")
+    return 0 if not all_failed else 1
 
 
 if __name__ == "__main__":

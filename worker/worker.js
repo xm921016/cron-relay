@@ -4592,7 +4592,9 @@ const BACKUP_CRONS = ['30 8 * * *', '30 10 * * *', '30 12 * * *'];   // 北京 1
 // 2026-11-06：邮件队列的 CF 发令腿。GitHub Actions 的 schedule 实测会整班漏触发（12:00/12:30 两班没跑），
 // 所以照 d1-daily 的老套路让 Cloudflare cron 兜底叫班：每小时第 5/35 分（UTC）= 北京 :05/:35，
 // 与 GitHub schedule 的 :00/:30 错开，避免两班并发领取（领取虽幂等，但错开更稳）。
-const MAIL_CRON = '5,35 * * * *';
+// 注意：CF schedules Free 版全账号上限 5 条（实测 10072 报错）且不支持逗号列表，
+// 现在只剩每小时第 5 分一条发令腿（另外 4 条是主 cron + 备份发令），派发脚本一班内循环清队列。
+const MAIL_CRONS = ['5 * * * *'];
 const MAIL_REPO = { owner: 'xm921016', repo: 'cron-relay', workflow: 'notify-mail.yml' };
 const BACKUP_REPOS = [
   { pool: 'hz', owner: 'xm921016', repo: 'cron-relay', tokenKey: 'GH_TOKEN' },
@@ -6720,7 +6722,7 @@ export default {
       return;
     }
     // 2026-11-06：邮件队列发令腿（北京每小时 :05/:35），只发令不干别的，跑完即 return。
-    if (_cron === MAIL_CRON) {
+    if (MAIL_CRONS.indexOf(_cron) >= 0) {
       ctx.waitUntil(dispatchMailQueue().catch(() => {}));
       return;
     }
