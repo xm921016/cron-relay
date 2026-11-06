@@ -14,7 +14,8 @@ name: notify-mail
 # 仓库是 public，30 分钟一次不占 Actions 时长额度；D1 增量 ≈ 每天 1 次 accounts 全表 + 少量队列行。
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    # 2026-11-06：*/30（整点/半点）实测 8 班全丢 → 改非边界分钟（GitHub 高峰在整点边界）
+    - cron: '17,47 * * * *'
   workflow_dispatch:
     inputs:
       dry:
