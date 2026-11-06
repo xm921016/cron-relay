@@ -2224,6 +2224,20 @@ async function d1Run(sql, params) {
     console.error('D1 run 失败:', e && e.message); return false;
   }
 }
+// 2026-11-06：同 d1Run，但返回「实际改动行数」。d1Run 只回布尔，而客服改名要把
+// 「改了多少个号、多少笔订单」如实报给控制台，否则用户无法确认到底改没改到。
+// 返回 -1 = D1 不可用 / 执行失败（调用方必须当成失败处理，绝不能当 0 行）。
+async function d1Changes(sql, params) {
+  if (!d1ok()) { if (!_d1LastErr) _d1LastErr = 'D1 未绑定（DB 为空）'; return -1; }
+  try {
+    const st = DB.prepare(sql);
+    const r = (params && params.length) ? await st.bind(...params).run() : await st.run();
+    return (r && r.meta && typeof r.meta.changes === 'number') ? r.meta.changes : 0;
+  } catch (e) {
+    _d1LastErr = String((e && e.message) || e);
+    console.error('D1 changes 失败:', e && e.message); return -1;
+  }
+}
 // 单条镜像（新增/修改后调用）。
 // 2026-10-26 修复：无 uid 的历史条目以前直接 return false，导致这些号在控制台上的
 // 「改歌 / 改邮箱 / 改有效期」只写进 KV，而读路径走 D1 → 刷新一次就变回旧值（假成功）。
@@ -3907,9 +3921,77 @@ async function handle(request) {
         plans: body.plans !== undefined ? body.plans : cur.plans,
       };
       const saved = await saveRegCfg(next);
+      // 2026-11-06：改名提示。在名单框里把一个字改掉，系统分不清这是「改名」还是
+      //   「删掉一个客服 + 新增一个客服」—— 但两者后果完全不同：改名要连历史号和结算账本一起换，
+      //   删加只换登记下拉。这里只做提示、绝不擅自改数据，真正的改名走 /api/console/agent_rename。
+      const goneA = (cur.agents || []).filter(a => !(next.agents || []).includes(a));
+      const addA = (next.agents || []).filter(a => !(cur.agents || []).includes(a));
+      const hint = (goneA.length && goneA.length === addA.length)
+        ? '；⚠ 检测到「' + goneA.join('、') + '」被「' + addA.join('、') + '」替换 —— 如果是改名，请用「客服改名」，否则已登记的号和结算账本仍是旧名字'
+        : '';
       return json({ ok: true, d1: saved.ok, cfg: saved.cfg,
         message: '已保存：客服 ' + saved.cfg.agents.length + ' 人、套餐 ' + saved.cfg.plans.length + ' 档'
-          + (saved.ok ? '' : '（⚠️ D1 写入失败，已写 KV 兜底，请稍后重试）') }, 200, CORS);
+          + (saved.ok ? '' : '（⚠️ D1 写入失败，已写 KV 兜底，请稍后重试）') + hint }, 200, CORS);
+    }
+    // ================= 客服改名（2026-11-06 新增）=================
+    // 需求：客服名在库里其实存了三份 —— reg_cfg.agents（登记下拉）、accounts.agent（每个号的归属）、
+    //   ledger.agent（每一笔成交）。只在名单框里改字，后两份照旧是旧名，于是控制台表格和月度结算
+    //   全都还是旧名字；而且从操作上根本看不出这是「改名」还是「删掉一个 + 新增一个」。
+    //   这里给一个显式入口：一次把三份全部换掉，并回报改了多少个号、多少笔订单。
+    // 消耗（重要提醒）：两条 UPDATE 各是一次全表扫描 —— accounts ~700 行 + ledger ~820 行，
+    //   合计约 1,500 行读 + 200 行写，是「改一次」的一次性成本，改完不会有任何持续开销。
+    //   免费额度 500 万行读 / 10 万行写 每天，一次改名约占 0.03%，可以放心用；
+    //   但**绝不要**把它挂进任何定时任务 —— 那才是唯一会天天吃额度的做法。
+    if (url.pathname === '/api/console/agent_rename' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) {
+        const who = await consoleRole(body);
+        return json({ message: who === 'ro' ? '当前是只读口令，不能改客服名' : '账号或密码错误' }, 403, CORS);
+      }
+      const oldN = normAgent(body.old);
+      const newN = normAgent(body.new);
+      const newRaw = String(body.new == null ? '' : body.new).trim();
+      if (!oldN || !newN) return json({ message: '旧名字和新名字都不能为空' }, 400, CORS);
+      if (oldN === newN) return json({ message: '新旧名字一样，不用改' }, 400, CORS);
+      // normAgent 会把超长/带非法字符的名字悄悄截断，那会让用户以为改成功了其实名字变了样
+      if (newRaw && newN !== newRaw) {
+        return json({ message: '新名字不合法：最长 16 个字，且不能含引号、尖括号和换行' }, 400, CORS);
+      }
+      if (!d1ok()) return json({ message: 'D1 没绑定，现在改不了（等 D1 恢复再试）' }, 503, CORS);
+      // ② 已登记的号 + ③ 成交账本。不带 pool 条件：主群、定制群一起改（同一个 D1 库）。
+      //    先动数据再动名单：万一 D1 写失败，名单还是旧名，用户重试即可，不会出现「下拉变了数据没变」。
+      const nAcc = await d1Changes('UPDATE accounts SET agent=? WHERE agent=?', [newN, oldN]);
+      const nLed = await d1Changes('UPDATE ledger SET agent=? WHERE agent=?', [newN, oldN]);
+      if (nAcc < 0 || nLed < 0) {
+        return json({ ok: false, message: '写 D1 失败（' + (_d1LastErr || 'D1 异常') + '），这次没有改动，请稍后重试。' }, 500, CORS);
+      }
+      // ① 名单：只有旧名确实还在名单里时才替换（位置不变、不重排），
+      //    旧名不在名单（比如之前被删掉、只剩历史数据）就只改数据、不碰名单 ——
+      //    绝不把新名字硬塞进名单，那等于顺手替用户新加了一个客服（2026-11-06 自测踩到过）。
+      const cur = await regCfg();
+      const inList = cur.agents.includes(oldN);
+      if (!inList && nAcc === 0 && nLed === 0) {
+        return json({ message: '没找到叫「' + oldN + '」的客服：名单里没有，也没有挂在它名下的号或订单。刷新页面确认一下现在的名字。' }, 400, CORS);
+      }
+      let saved = { ok: true, cfg: cur };
+      if (inList) {
+        const ag = [];
+        for (const a of cur.agents) {
+          if (a === oldN) { if (!ag.includes(newN)) ag.push(newN); }
+          else if (!ag.includes(a)) ag.push(a);
+        }
+        if (!ag.includes(newN)) ag.push(newN);
+        saved = await saveRegCfg({ agents: ag, plans: cur.plans });
+      }
+      // 号池快照是 D1 的重建缓存，顺手刷一份，免得 D1 抖动走 KV 兜底时又看到旧名
+      try { await refreshPoolSnap(); } catch (e) {}
+      return json({ ok: true, d1: saved.ok, cfg: saved.cfg,
+        renamed: { accounts: nAcc, ledger: nLed },
+        message: '已改名「' + oldN + '」→「' + newN + '」：账号 ' + nAcc + ' 个、结算订单 ' + nLed + ' 笔'
+          + (inList ? '' : '（名单里本来就没有它，只改了历史数据）')
+          + (saved.ok ? '' : '（⚠️ 名单写 D1 失败，已写 KV 兜底，请稍后重试）') }, 200, CORS);
     }
     // ================= 记账（2026-11-05 新增）=================
     // 需求：客服按登记单数拿提成，掉线补的号不给提成；每月结清、次月 15 号结算，
@@ -5150,6 +5232,15 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
 <div class="modal" id="cfgModal" hidden><div class="mbox">
   <h3>客服名单 / 套餐档位</h3>
   <p style="font-size:12px;color:#888;margin:4px 0 0">改完保存立即生效：APK / EXE 下次登记前会自动拉到新名单，<b>不用重新打包</b>。只读口令进不来这一页。</p>
+  <div style="border:1px solid #f3e2c8;background:#fffaf1;border-radius:9px;padding:10px 12px;margin:10px 0 12px">
+    <div style="font-size:12.5px;font-weight:600;color:#8a6a3a;margin-bottom:7px">客服改名（名单 + 已登记的号 + 结算账本，一次全换）</div>
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <div><label style="margin-top:0">原名字</label><select id="rnOld" style="width:150px"></select></div>
+      <div><label style="margin-top:0">改成</label><input id="rnNew" placeholder="新名字" style="width:150px"></div>
+      <button class="mini" id="rnGo" style="margin-top:0;padding:9px 14px">执行改名</button>
+    </div>
+    <p style="font-size:11.5px;color:#96714a;margin:8px 0 0;line-height:1.7">⚠ 不要在下面的名单框里直接改字 —— 那只换了登记的<b>下拉选项</b>，<b>已登记的号和已经结算过的订单仍是旧名字</b>，而且系统分不清你是「改名」还是「删掉一个 + 新增一个」。要改名就用这里。</p>
+  </div>
   <label>客服（一行一个，顺序即下拉顺序）</label>
   <textarea id="cAgents" rows="5" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:ui-monospace,Consolas,monospace"></textarea>
   <label>套餐（一行一个，格式 <code>显示名=天数=单价</code>；天数填 0 表示永久，单价单位元）</label>
@@ -6159,11 +6250,52 @@ $('btnLedger').onclick=function(){
 
 // ===== 2026-10-27：客服名单 / 套餐档位维护（只读口令看不到这个按钮，服务端也会拦）=====
 // 客服一行一个；套餐一行一个「显示名=天数」，天数 0 = 永久。改完保存，APK/EXE 下次登记自动拿到。
+// 2026-11-06：新增「客服改名」——名单框只负责增删和排序，改名必须走上面的专用入口，
+//   否则历史号 / 结算账本会停在旧名字（原因见 worker 里 /api/console/agent_rename 的注释）。
+function buildRenameSel(){
+  var c=(DATA&&DATA.cfg)||{agents:[]};
+  var s=$('rnOld');if(!s)return;
+  var cur=s.value||'';
+  s.innerHTML='';
+  var g0=document.createElement('option');g0.value='';g0.textContent='— 选择要改的客服 —';s.appendChild(g0);
+  (c.agents||[]).forEach(function(a){
+    var o=document.createElement('option');o.value=a;o.textContent=a;s.appendChild(o);
+  });
+  if(cur&&(c.agents||[]).indexOf(cur)>=0)s.value=cur;
+}
+// 保存名单前先看一眼：一边少人一边多人，很可能是在框里直接改了字
+function suspectRename(oldList,newList){
+  var gone=(oldList||[]).filter(function(a){return (newList||[]).indexOf(a)<0;});
+  var add=(newList||[]).filter(function(a){return (oldList||[]).indexOf(a)<0;});
+  if(!gone.length||gone.length!==add.length)return null;
+  return {gone:gone,add:add};
+}
 $('btnCfg').onclick=function(){
   var c=(DATA&&DATA.cfg)||{agents:[],plans:[]};
   $('cAgents').value=(c.agents||[]).join('\\n');
   $('cPlans').value=(c.plans||[]).map(function(p){return p.label+'='+p.days+'='+(p.price>=0?p.price:'');}).join('\\n');
+  $('rnNew').value='';buildRenameSel();
   $('cm').textContent='';$('cfgModal').hidden=false;
+};
+$('rnGo').onclick=function(){
+  var t=JSON.parse(TOKEN||'{}');
+  var o=$('rnOld').value||'', n=($('rnNew').value||'').trim();
+  if(!o){$('cm').textContent='先在左边选一个要改的客服';$('cm').className='msg err';return;}
+  if(!n){$('cm').textContent='填一下新名字';$('cm').className='msg err';return;}
+  if(o===n){$('cm').textContent='新旧名字一样，不用改';$('cm').className='msg err';return;}
+  if(!confirm('确定把「'+o+'」改名为「'+n+'」？\\n\\n会一起改掉：登记下拉、所有已登记的号、月度结算里的成交记录。\\n这一步不可撤销（只能再改回去）。'))return;
+  $('rnGo').disabled=true;$('cm').textContent='正在改…';$('cm').className='msg';
+  api('/api/console/agent_rename',{user:t.user,pass:t.pass,old:o,new:n}).then(function(r){
+    $('rnGo').disabled=false;
+    if(r.ok&&r.d&&r.d.ok){
+      $('cm').textContent=r.d.message||'已改名';$('cm').className='msg ok';
+      var c=r.d.cfg||{};
+      $('cAgents').value=(c.agents||[]).join('\\n');
+      $('rnNew').value='';buildRenameSel();loadData();
+    }else{
+      $('cm').textContent=(r.d&&r.d.message)||'改名失败';$('cm').className='msg err';
+    }
+  }).catch(function(){$('rnGo').disabled=false;$('cm').textContent='网络错误，请重试';$('cm').className='msg err';});
 };
 $('cCancel').onclick=function(){$('cfgModal').hidden=true;};
 $('cSave').onclick=function(){
@@ -6183,6 +6315,12 @@ $('cSave').onclick=function(){
     return o2;
   }).filter(Boolean);
   if(!agents.length||!plans.length){$('cm').textContent='客服和套餐至少要各留一条';$('cm').className='msg err';return;}
+  // 2026-11-06：疑似改名先拦一下。名单框是给「加人 / 删人 / 排序」用的，
+  //   在里面把一个字改掉只会换下拉，历史号和结算账本不动 —— 用户看不出两者的区别，这里明确问一次。
+  var sus=suspectRename((DATA&&DATA.cfg&&DATA.cfg.agents)||[],agents);
+  if(sus&&!confirm('名单里少了「'+sus.gone.join('、')+'」、多了「'+sus.add.join('、')+'」。\\n\\n'
+    +'· 如果这是「改名」→ 点「取消」，改用上面的「客服改名」（否则已登记的号、结算账本还是旧名字）\\n'
+    +'· 如果确实是「删掉一个客服、另外新增一个」→ 点「确定」继续保存'))return;
   $('cSave').disabled=true;
   api('/api/console/cfg',{user:t.user,pass:t.pass,agents:agents,plans:plans}).then(function(o){
     $('cSave').disabled=false;
