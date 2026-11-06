@@ -38,6 +38,9 @@ jobs:
       NB_PASS: ${{ secrets.NB_PASS }}
       EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
       EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+      # 2026-11-06：第二发信通道（可选，双通道轮发分流 QQ 500 封/日上限）
+      EMAIL_FROM2: ${{ secrets.EMAIL_FROM2 }}
+      EMAIL_AUTH_CODE2: ${{ secrets.EMAIL_AUTH_CODE2 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

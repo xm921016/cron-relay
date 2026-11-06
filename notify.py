@@ -39,9 +39,29 @@ def _cred():
     )
 
 
+# 2026-11-06：多发信通道（轮发）。QQ 邮箱普通号每日发信上限 ~500 封，且高频连发会被断连，
+# 单通道扛不住补发/高峰；第二个通道（EMAIL_FROM2/EMAIL_AUTH_CODE2）可选配置，未配置时行为不变。
+# 轮发策略：每成功发一封就把指针移到下一个通道（流量对半摊）；某通道失败当场用下一个通道重试一次，
+# 全失败才算失败（失败件照旧退回队列，下一班重试时会轮到另一个通道）。
+_ACCTS = []
+_ACCT_AT = [0]
+
+
+def _accts():
+    if not _ACCTS:
+        pairs = [
+            _cred(),
+            ((os.environ.get("EMAIL_FROM2", "") or "").strip(),
+             (os.environ.get("EMAIL_AUTH_CODE2", "") or "").strip()),
+        ]
+        for f, a in pairs:
+            if f and a:
+                _ACCTS.append((f, a))
+    return _ACCTS
+
+
 def mail_ready():
-    f, a = _cred()
-    return bool(f and a)
+    return bool(_accts())
 
 
 def send_user_email(to_email, subject, body):
@@ -49,23 +69,29 @@ def send_user_email(to_email, subject, body):
     to_email = (to_email or "").strip()
     if not to_email or "@" not in to_email:
         return False
-    f, a = _cred()
-    if not f or not a:
+    accts = _accts()
+    if not accts:
         print("[notify] 未配置 EMAIL_FROM/EMAIL_AUTH_CODE，跳过直邮")
         return False
-    try:
-        msg = MIMEText(body, "plain", "utf-8")
-        msg["Subject"] = subject
-        msg["From"] = formataddr((DISPLAY_NAME, f))
-        msg["To"] = to_email
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
-            server.login(f, a)
-            server.sendmail(f, [to_email], msg.as_string())
-        print(f"[notify] 已直邮号主 {to_email}：{subject}")
-        return True
-    except Exception as e:
-        print(f"[notify] 直邮失败 {to_email}：{e}")
-        return False
+    last_err = ""
+    for i in range(len(accts)):
+        f, a = accts[(_ACCT_AT[0] + i) % len(accts)]
+        try:
+            msg = MIMEText(body, "plain", "utf-8")
+            msg["Subject"] = subject
+            msg["From"] = formataddr((DISPLAY_NAME, f))
+            msg["To"] = to_email
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+                server.login(f, a)
+                server.sendmail(f, [to_email], msg.as_string())
+            _ACCT_AT[0] = (_ACCT_AT[0] + i + 1) % len(accts)
+            tag = "" if len(accts) == 1 else f"（via {f}）"
+            print(f"[notify] 已直邮号主 {to_email}{tag}：{subject}")
+            return True
+        except Exception as e:
+            last_err = str(e)
+            print(f"[notify] 直邮失败 {to_email}（通道 {f}）：{e}")
+    return False
 
 
 def _who(nickname, name):
