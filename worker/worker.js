@@ -3957,11 +3957,14 @@ async function handle(request) {
       // 原来每次首屏各全表扫一遍（815 + 795 = 1,610 行），而这两张表一天才变一两次。
       // 必须在 Promise.all 之前建好这个 promise，否则下面两个位置会各查一次 D1（缓存也救不了）。
       const _metaP = d1ok() ? metaDicts() : Promise.resolve(null);
-      const [master, c2, cur, prev, dr, peerUrlRaw, plan, ranRows, deadRows, suspectRows, freshRows, actions, streakRows, songRows, accRows, noticeRows, deadTodayRows, regCfgNow] = await Promise.all([
+      const [master, c2, cur, prev, old, dr, peerUrlRaw, plan, ranRows, deadRows, suspectRows, freshRows, actions, streakRows, songRows, accRows, noticeRows, deadTodayRows, regCfgNow] = await Promise.all([
         mergePool(),
         cfg(),
         readSnapDay(date),
         readSnapDay(prevDate),
+        // 2026-11-07：14 天前快照 —— 给「今日零增长 / 净增≤0」标记算两周平均日增与回吐估算。
+        // 只在 KV 缓存（TTL 5 分钟）未命中时跑这一次 SELECT（约 700 行 = 免费额度的 0.014%），命中时 0 开销。
+        readSnapDay(dateMinusN(date, 14)),
         d1ok() ? d1All('SELECT pool,uid,dur FROM durs') : Promise.resolve(null),
         POOL.get('PEER_URL').catch(() => null),
         buildPlan(date).catch(() => null),
@@ -4143,7 +4146,7 @@ async function handle(request) {
         if (!x || role === 'full') return x;
         return Object.assign({}, x, { url: '' });
       });
-      const _out = { ok: true, date: date, prevDate: prevDate, hz: hz, dz: dz, durs: durs, snap: { cur: cur, prev: prev },
+      const _out = { ok: true, date: date, prevDate: prevDate, oldDate: dateMinusN(date, 14), hz: hz, dz: dz, durs: durs, snap: { cur: cur, prev: prev, old: old },
                     coverage: cov, actions: actionsOut, dead: dead, deadToday: deadToday, suspects: suspects, fresh: fresh,
                     streak: streak, songs: songs, artists: artists, periods: periods,
                     // 2026-10-27：role 决定页面要不要把写入口关掉；cfg 供筛选下拉与编辑弹窗用
@@ -5523,8 +5526,8 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <tr><td><span class="badge b-gray">无650任务</span></td><td>后台没返回 650 任务（不是音乐人 / 没报名该任务 / 歌曲未通过审核）</td><td>要管：让号主去音乐人后台确认</td></tr>
     <tr><td><span class="badge b-gray">周期归零</span>（较昨日列 + 标记列）</td><td>昨日 650 已接近满（≥80%）、今天突然 0%，但近30日播放量没塌 —— 这是 <b>650 换新周期</b>，进度从头计，不是掉量。<b>周期按 31 天日历走，不看进度</b>：上期只做到 98% 到期也一样归零重来，没用完的百分比不会带到新一期</td><td>不用管：已不计入「今日下跌」，也不再标成「有播放·650为0」</td></tr>
     <tr><td colspan="3" style="background:#fdf9e6;font-weight:600;color:#8a6d00">D · 进度停滞（还在周期内，只是没动）</td></tr>
-    <tr><td><span class="badge b-yellow">今日零增长</span></td><td>650 进度和昨天完全一样（还没到 100%），<b>近30日播放量也刚好持平</b>（不多不少；在跌的那种已单独标成下面的「净增≤0」）</td><td>先观察 2~3 天，不是每天都一定涨</td></tr>
-    <tr><td><span class="badge b-yellow">近30日净增≤0</span></td><td>近30日播放量今天<b>没涨或略降</b>（30 天滚动窗口），650 进度也没涨 —— 说明今天补进去的播放被 <b>30 天前那一波老播放到期退出</b>抵掉了，不是播放没算进去。只在两边快照采集时刻相差 ≤3 小时时才判（否则是拿今早的数和昨晚的数硬比）</td><td>偶发不用管（30 天前有过高峰的号必然会遇到一次）。连续 3 天以上净增≤0 → 说明补的量追不上退的量，加每号播放次数或换更热的歌</td></tr>
+    <tr><td><span class="badge b-yellow">今日零增长</span></td><td>650 进度和昨天完全一样（还没到 100%），<b>近30日播放量也刚好持平</b>（不多不少；在跌的那种已单独标成下面的「净增≤0」）。原因基本是 <b>30 天滚动回吐</b>：悬浮说明里会给两个数 —— 该号近两周平均每天净涨多少次（=每天正常应增加的水平）、今天被多少次老播放到期退出抵掉</td><td>先观察 2~3 天，不是每天都一定涨</td></tr>
+    <tr><td><span class="badge b-yellow">近30日净增≤0</span></td><td>近30日播放量今天<b>没涨或略降</b>（30 天滚动窗口），650 进度也没涨 —— 说明今天补进去的播放被 <b>30 天前那一波老播放到期退出</b>抵掉了，不是播放没算进去。只在两边快照采集时刻相差 ≤3 小时时才判（否则是拿今早的数和昨晚的数硬比）。悬浮说明里附<b>两周均值与回吐估算</b>（按该号 14 天前快照到今天的平均日增算，新号/断档没有这两个数）</td><td>偶发不用管（30 天前有过高峰的号必然会遇到一次）。连续 3 天以上净增≤0 → 说明补的量追不上退的量，加每号播放次数或换更热的歌</td></tr>
     <tr><td><span class="badge b-yellow">650未结算</span></td><td>650 进度和昨天一样，但<b>近30日播放量在涨</b>：播放已入账，网易分批结算还没滚到 650（入账窗口实测持续到 11:30~12:00）。这类不算真停滞，悬浮提示里能看到对比双方快照的采集时刻</td><td>不用管；连续 3 天以上播放量在涨而 650 不动再人工查</td></tr>
     <tr><td><span class="badge b-yellow">N天未涨</span></td><td>连续 N 天 650 进度没涨（含小幅回落；没有快照的断档天不计；当前已到 100% 的号不标）。<b>先看「近30日播放量」</b>：在跌 = 30 天滚动窗口里老播放退出（做过满 100% 的号会一直回落到新播放补不回为止，属自然衰减）；在涨却不动 = 播放被判无效</td><td>播放量也在跌 → 不用管；播放量在涨却 4 天不动 → 人工查</td></tr>
     <tr><td colspan="3" style="background:#eef5fd;font-weight:600;color:#255ea6">E · 入池状态 —— 刚进来的号，进度低是正常的，别当故障查</td></tr>
@@ -5733,7 +5736,8 @@ function accsOf(day,pool){
   // 这里原来按 snap[日期][池] 取 → 取不到，a/p 恒为 null，
   // 导致「昨进度 / 今进度 / 日环比 / 近30日播放 / 任务」五列全空、今日有数据恒为 0。
   var S=DATA.snap||{};
-  if(S.cur||S.prev){var src=(day&&day===DATA.prevDate)?S.prev:S.cur;return (src&&src[pool])||{};}
+  // 2026-11-07：加 S.old（14 天前快照）—— 给「今日零增长 / 净增≤0」标记算两周平均日增与回吐估算。
+  if(S.cur||S.prev||S.old){var src=(day&&day===DATA.oldDate)?S.old:((day&&day===DATA.prevDate)?S.prev:S.cur);return (src&&src[pool])||{};}
   return (S[day]&&S[day][pool])||{};
 }
 // ===== 2026-10-27：客服名单 / 套餐档位（服务端 reg_cfg）=====
@@ -5879,7 +5883,8 @@ function buildRows(){
   [['hz',DATA.hz],['dz',DATA.dz]].forEach(function(pd){
     var pool=pd[0];
     pd[1].forEach(function(e){
-      var a=accsOf(DATA.date,pool)[e.uid]||null,p=accsOf(DATA.prevDate,pool)[e.uid]||null;
+      // 2026-11-07：o = 14 天前快照（DATA.oldDate 由后端给，老缓存响应没有这个键时 accsOf 回落 S.cur → 取不到 → o 为 null，标记自动降级为不带数字的老文案）
+      var a=accsOf(DATA.date,pool)[e.uid]||null,p=accsOf(DATA.prevDate,pool)[e.uid]||null,o=accsOf(DATA.oldDate,pool)[e.uid]||null;
       var delta=(a&&p&&a.rate!=null&&p.rate!=null)?(a.rate-p.rate):null;
       // 2026-10-25：周期归零判定 —— 昨日已接近满(≥80%)、今天突然 0%，但近30日播放量没塌(仍有昨日90%以上)。
       // 这是 650 任务换新周期（进度重新从 0 起算），不是掉量，不该算进「今日下跌」、也不该显示成 -100。
@@ -5890,7 +5895,7 @@ function buildRows(){
       //   采集链路（run.py periodEnd → console:period）保留，仅作数据留档，不参与任何判定。
       var reset=!!(a&&p&&a.rate===0&&p.rate!=null&&p.rate>=80&&(a.rpc30||0)>=(p.rpc30||0)*0.9);
       var st=(DATA.streak&&DATA.streak[pool]&&DATA.streak[pool][String(e.uid)])||0;
-      rows.push({pool:pool,e:e,a:a,p:p,delta:delta,streak:st,reset:reset,
+      rows.push({pool:pool,e:e,a:a,p:p,o:o,delta:delta,streak:st,reset:reset,
                  days:daysSince(e.added),sv:(e.pub?null:songVerdict(e,a))});
     });
   });
@@ -5962,12 +5967,22 @@ function computeMarks(r, susSet){
   function bjHour(s){var m=/^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2})/.exec(String(s||''));if(!m)return null;return ((+m[4]+8)%24)+(+m[5])/60;}
   function cmpOk(s1,s2,tol){var x=bjHour(s1),y=bjHour(s2);if(x==null||y==null)return false;var d=x-y;if(d<0)d=-d;return d<=tol||d>=24-tol;}
   var rpcD=(a&&r.p&&a.rpc30!=null&&r.p.rpc30!=null)?(a.rpc30-r.p.rpc30):null;
+  // 2026-11-07：两周基准 —— (今天rpc30 - 14天前rpc30)/14 = 该号平均每天净涨次数（=「正常应增加」的
+  // 观测水平，本身已含日常回吐，就是号主在列表里习惯看到的涨速）。回吐估算 = 平均日增 - 今日净变化，
+  // 即今天补进去的播放里被 30 天前老播放到期退出抵掉的那部分。14 天前快照缺失（新号/断档）时不算数。
+  var o14=r.o||null,avg14=null,back14=null;
+  if(a&&o14&&a.rpc30!=null&&o14.rpc30!=null&&a.rpc30>o14.rpc30){
+    avg14=Math.round((a.rpc30-o14.rpc30)/14);
+    if(rpcD!=null)back14=avg14-rpcD;
+  }
+  var avg14Txt=(avg14!=null)?('该号近两周平均每天净涨约 '+avg14+' 次（=每天正常应增加的水平）'):'';
+  var back14Txt=(back14!=null&&back14>0)?('，按这个水平估算今天有约 '+back14+' 次 30 天前的老播放到期退出、把新增抵掉'):'';
   // 只对「还没做满 100%」且「近30日播放量已经不是个位数」的号有意义：做满的号本来就不用管，
   // 播放量才几次的新号差个 ±2 也说明不了什么（不加这两条，11-05 会多出 7 个噪音行）。
   var netLoss=!!(!hasSvc&&!hasCycle&&!r.reset&&a&&r.p&&rpcD!=null&&rpcD<=0&&a.rate!=null&&r.p.rate!=null&&a.rate<100&&a.rate<=r.p.rate&&a.rpc30>=100&&cmpOk(a.at,r.p.at,3));
-  if(netLoss)add('b-yellow','近30日净增≤0','近30日播放量今天没涨或略降（昨天 '+r.p.rpc30+' 次 → 今天 '+a.rpc30+' 次，差 '+(rpcD>0?'+':'')+rpcD+' 次），650 进度也没涨：今天补的播放被 30 天前的老播放到期退出抵掉了，不是播放没算进去。'+cmpAt(a,r.p)+'。常见于「30 天前刚好有一波高峰」的号（已满 100% 的、近30日播放才个位数的新号都不标）；连续 3 天以上净增≤0 才需要加播放量或换歌');
+  if(netLoss)add('b-yellow','近30日净增≤0','近30日播放量今天没涨或略降（昨天 '+r.p.rpc30+' 次 → 今天 '+a.rpc30+' 次，差 '+(rpcD>0?'+':'')+rpcD+' 次），650 进度也没涨：这是 30 天滚动回吐 —— 今天补的播放被 30 天前的老播放到期退出抵掉了，不是播放没算进去、也不是没采集。'+(avg14!=null?avg14Txt+back14Txt+'。':'')+'常见于「30 天前刚好有一波高峰」的号（已满 100% 的、近30日播放才个位数的新号都不标）；连续 3 天以上净增≤0 才需要加播放量或换歌。'+cmpAt(a,r.p));
   if(!hasSvc&&!hasCycle&&a&&r.p&&a.rate!=null&&r.p.rate!=null&&a.rate<100&&a.rate-r.p.rate===0&&a.rpc30!=null&&r.p.rpc30!=null&&a.rpc30>r.p.rpc30)add('b-yellow','650未结算','650 进度和昨天一样，但近30日播放量在涨：播放已入账，网易分批结算还没滚到 650（入账窗口实测持续到 11:30~12:00）。停 1~2 天属正常节奏；连续 3 天以上播放量在涨而 650 不动才需要人工查。'+cmpAt(a,r.p));
-  else if(!hasSvc&&!hasCycle&&!netLoss&&a&&r.p&&a.rate!=null&&r.p.rate!=null&&a.rate<100&&a.rate-r.p.rate===0)add('b-yellow','今日零增长','650 进度和昨天完全一样，且近30日播放量也没涨（=不多不少刚好持平）。650 是后台分批结算，会停一两天再突然跳，先观察 2~3 天；播放量在跌的那种已单独标成「近30日净增≤0」，属30天前老播放到期退出，不是故障。'+cmpAt(a,r.p));
+  else if(!hasSvc&&!hasCycle&&!netLoss&&a&&r.p&&a.rate!=null&&r.p.rate!=null&&a.rate<100&&a.rate-r.p.rate===0)add('b-yellow','今日零增长','650 进度和昨天完全一样，且近30日播放量也没涨（=不多不少刚好持平）。这基本是 30 天滚动回吐，不是播放失效、也不是没采集'+(avg14!=null?('：'+avg14Txt+'，今天净变化 0，'+back14Txt.replace('，按这个水平估算','即')):'：每天补的播放被 30 天前同量的老播放到期退出抵掉')+'。播放量在跌的那种已单独标成「近30日净增≤0」；650 是后台分批结算，会停一两天再突然跳，先观察 2~3 天，连续 3 天以上零增长且实时复核仍是 0% 再人工查。'+cmpAt(a,r.p));
   if(!hasSvc&&!hasCycle&&!r.reset&&a&&a.rate!=null&&a.rate<100&&r.streak&&r.streak>=2)add('b-yellow','连续'+r.streak+'天未涨','连续 '+r.streak+' 天 650 进度没涨（含小幅回落，没快照的断档天已跳过）。先看「近30日播放量」：在跌=30天滚动窗口老播放退出（做过满 100% 的号常见，属自然衰减，不用管）；在涨却不动=播放被判无效，超过 4 天才需要人工查');
   // E 入池状态
   // 2026-10-26：给当天登记的号加行内标记，这样顶部「今日入池」这个数就能被搜索框直接筛出来（顶部=行内）。
