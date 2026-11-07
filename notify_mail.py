@@ -26,6 +26,7 @@
 """
 import json
 import os
+import re
 import sys
 import time
 
@@ -36,6 +37,24 @@ PASS = (os.environ.get("ASSIGN_PASS", "") or os.environ.get("NB_PASS", "")).stri
 DRY = "--dry" in sys.argv
 NOSCAN = "--noscan" in sys.argv
 LIMIT = int(os.environ.get("MAIL_LIMIT", "50") or 50)
+
+# 邮箱粗校验（2026-11-07 新增）：只挡「明显不可能存在」的地址，不做 RFC 级严格校验，
+# 免得把少见但合法的写法误杀。起因：客户把邮箱填成 1363273659.@qq.com（本地部分末尾
+# 多了一个点），QQ 回 550 recipient non-existent，一条坏数据把整班 workflow 打成红的。
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
+
+
+def email_ok(addr):
+    s = (addr or "").strip()
+    if not s or len(s) > 254 or not _EMAIL_RE.match(s):
+        return False
+    local, _, domain = s.partition("@")
+    # 首尾带点、连续点都是 SMTP 必然拒收的形态（".a@x.com" / "a.@x.com" / "a..b@x.com"）
+    if local.startswith(".") or local.endswith(".") or ".." in s:
+        return False
+    if domain.startswith(".") or domain.endswith("."):
+        return False
+    return True
 
 
 def call(path, payload, timeout=60):
@@ -66,6 +85,7 @@ def main():
     # ② 领取待发（循环清队列：CF 发令腿只有每小时一班，一班内尽量多发；
     #    每轮领 ≤50、每封间隔 8 秒，80 封 ≈ 13 分钟，卡在 workflow 15 分钟超时内）
     all_sent, all_failed = [], []
+    all_bad = []   # 邮箱格式非法、根本没进 SMTP 的条数（不计入失败，见文件末尾退出码说明）
     while True:
         # 上限检查必须在 claim 之前 —— 否则领完 50 条才发现到量，直接 break 会把
         # 这批挂在 claimed 等 2 小时超时（2026-11-06 实测连留三班 150 条的教训）
@@ -94,7 +114,7 @@ def main():
             print("[notify-mail] EMAIL_FROM/EMAIL_AUTH_CODE 未配置，跳过（状态保持 claimed，2 小时后自动回退）")
             return 1
 
-        sent, failed = [], []   # 每轮单独一份（跑完随轮回写清空）
+        sent, failed, bad = [], [], []   # 每轮单独一份（跑完随轮回写清空）
 
         for idx, t in enumerate(todo):
             # 2026-11-06：QQ SMTP 对高频连发直接断连（实测连续 19 封后全部 Connection unexpectedly
@@ -105,6 +125,14 @@ def main():
             if who.startswith("manual:"):
                 who = who[7:] or str(t.get("uid") or "")
             kind = str(t.get("kind") or "")
+            # 2026-11-07：格式非法的邮箱不进 SMTP（一定 550，只会白烧一封的配额 + 把班次打红）。
+            # 仍然按 retry 回写，让 attempts 正常累加，3 次后由 worker 自动标 dropped。
+            email = (t.get("email") or "").strip()
+            if not email_ok(email):
+                bad.append(t)
+                all_bad.append(t)
+                print(f"   [{who}] 邮箱格式非法，不发（{email or '空'}）")
+                continue
             try:
                 if kind == "reg":
                     ok = notify.notify_reg_ok(t.get("email"), "", who, t.get("group") or "")
@@ -132,18 +160,27 @@ def main():
             code, d = call("/api/mail_sent", {"pass": PASS, "result": "sent", "items": [
                 {"pool": x["pool"], "uid": x["uid"], "kind": x["kind"], "ref": x["ref"]} for x in sent]})
             print(f"[notify-mail] 已标记 sent {len(sent)} 条（HTTP {code} {d.get('updated')}）")
-        if failed:
+        if failed or bad:
+            retry_items = failed + bad
             code, d = call("/api/mail_sent", {"pass": PASS, "result": "retry", "items": [
-                {"pool": x["pool"], "uid": x["uid"], "kind": x["kind"], "ref": x["ref"]} for x in failed]})
+                {"pool": x["pool"], "uid": x["uid"], "kind": x["kind"], "ref": x["ref"]} for x in retry_items]})
             dp = d.get("dropped") or 0
-            msg = f"[notify-mail] 失败 {len(failed)} 条已回写（HTTP {code}）：退回 {len(failed) - dp} 条重试"
+            msg = (f"[notify-mail] 失败 {len(failed)} 条 + 非法邮箱 {len(bad)} 条已回写（HTTP {code}）："
+                   f"退回 {len(retry_items) - dp} 条重试")
             if dp:
-                msg += f"，放弃 {dp} 条（已连续失败 3 次，标 dropped 不再试）"
+                msg += f"，放弃 {dp} 条（连续失败 3 次 / 非法邮箱累计 3 次，标 dropped 不再试）"
             print(msg)
-        sent, failed = [], []
+        sent, failed, bad = [], [], []
 
-    print(f"[notify-mail] 完成：成功 {len(all_sent)} / 失败 {len(all_failed)}")
-    return 0 if not all_failed else 1
+    print(f"[notify-mail] 完成：成功 {len(all_sent)} / 失败 {len(all_failed)}"
+          + (f" / 非法邮箱 {len(all_bad)}" if all_bad else ""))
+    # 2026-11-07 改退出码：原来「有一条失败就 exit 1」，一个客户把邮箱填错（1363273659.@qq.com）
+    # 就让整班 workflow 变红，GitHub 每小时发一封失败邮件，真故障反而被淹掉。改成只有
+    # 「一封都没发成功、而且确实有失败」才判 1；局部失败交给日志 + 队列自动重试兜。
+    if all_failed and not all_sent:
+        print("[notify-mail] 全部失败，判为真故障")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

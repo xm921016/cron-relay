@@ -94,7 +94,10 @@ def summarize(rows):
         o["hours"].append(((x.get("dimensions") or {}).get("datetimeHour"), n, int(p50)))
     for o in out.values():
         o["p50"] = int(o["p50w"] / o["req"]) if o["req"] else 0
-        o["hours"].sort(key=lambda t: t[3], reverse=True)
+        # 2026-11-07 修：上面 append 的是 3 元组 (hour, 请求数, p50)，这里却按 t[3] 取第 4 个元素，
+        # 每天 schedule 必抛 IndexError: tuple index out of range，脚本在告警判定前就死
+        # （等于 CPU 监控从未真正跑完过）。下游 for h, n, p50 in hrs 也是按 3 元组解包，故改 t[2]。
+        o["hours"].sort(key=lambda t: t[2], reverse=True)
     return out
 
 
