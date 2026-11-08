@@ -3384,8 +3384,8 @@ const REG_HTML = `<!DOCTYPE html>
 <meta name="robots" content="noindex,nofollow">
 <title>账号登记</title>
 <style>
-:root{--bg:#f2f3f5;--card:#fff;--txt:#1a1a1a;--mut:#8b8b90;--line:#e8e8ec;--bd:#b4bac5;--pri:#ff2c55;--ok:#178a55}
-@media (prefers-color-scheme:dark){:root{--bg:#101013;--card:#1c1c20;--txt:#f2f2f5;--mut:#8b8b93;--line:#2c2c32;--bd:#4a4a56;--ok:#3ddc97}}
+:root{--bg:#f2f3f5;--card:#fff;--txt:#1a1a1a;--mut:#8b8b90;--line:#e8e8ec;--bd:#2f2f34;--pri:#ff2c55;--ok:#178a55}
+@media (prefers-color-scheme:dark){:root{--bg:#101013;--card:#1c1c20;--txt:#f2f2f5;--mut:#8b8b93;--line:#2c2c32;--bd:#dcdce4;--ok:#3ddc97}}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{margin:0;background:var(--bg);color:var(--txt);font:16px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
 .wrap{max-width:480px;margin:0 auto;padding:18px 16px 44px}
@@ -3405,7 +3405,10 @@ label{display:block;font-size:14px;font-weight:700;color:var(--txt);margin:16px 
 /* 2026-11-08：输入框边线原来用 --line(#e8e8ec)，白底上几乎看不见边界，
    买家不知道哪里能点。单独给一条更深的 --bd，按钮底色仍用 --line 不变。 */
 input{width:100%;border:1px solid var(--bd);background:transparent;color:var(--txt);border-radius:11px;padding:11px 12px;font-size:15px;font-family:inherit;outline:none}
-input:focus{border-color:var(--pri)}
+/* 2026-11-08：默认边线改成近黑（--bd），红色只留给「填错了」——聚焦不再是红色，
+   改用一圈淡淡的描边表示「光标在这里」。 */
+input:focus{border-color:var(--txt);box-shadow:0 0 0 3px rgba(128,128,128,.18)}
+input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
 .hide{display:none!important}
 .ok{color:var(--ok)}
 .who{font-size:14px;background:rgba(23,138,85,.1);color:var(--ok);border-radius:10px;padding:10px 12px;word-break:break-all}
@@ -3673,31 +3676,56 @@ input:focus{border-color:var(--pri)}
     setTip('已保存（也可以直接长按二维码存图）');
   };
 
+  /* 2026-11-08：填错才标红。默认边线是近黑，红色专门表示「这个框要改」，
+     用户一编辑就自动去掉红边，不用等他再点一次提交。 */
+  var FIELDS = ['i-song', 'i-phone', 'i-email'];
+  function clearBad(){
+    for (var i = 0; i < FIELDS.length; i++) { var el = E(FIELDS[i]); if (el) el.classList.remove('bad'); }
+  }
+  function markBad(id){ var el = E(id); if (el) el.classList.add('bad'); }
+  for (var fi = 0; fi < FIELDS.length; fi += 1) {
+    (function(id){
+      var el = E(id);
+      if (!el) return;
+      el.addEventListener('input', function(){ el.classList.remove('bad'); });
+    })(FIELDS[fi]);
+  }
+
   E('b-sub').onclick = function(){
     if (st.busy || st.done) return;
     if (!st.mu) { E('sub-tip').textContent = '请先扫码登录'; return; }
     var song = E('i-song').value.trim();
     var phone = E('i-phone').value.replace(/[^0-9]/g, '');
     var email = E('i-email').value.trim();
-    if (!song) { E('sub-tip').textContent = '请填歌曲链接'; return; }
+    clearBad();
+    if (!song) { markBad('i-song'); E('sub-tip').textContent = '请填歌曲链接'; return; }
     /* 2026-11-08：只收单曲。合集链接（专辑/歌单/电台/排行榜/MV）一律当场退回，
        服务端 resolveSong 还会再查一次，这里先拦是为了让买家立刻知道该改什么。 */
     if (/(playlist|album|radio|program|toplist|djradio|artist|mv)/i.test(song)) {
+      markBad('i-song');
       E('sub-tip').textContent = '只收单曲链接：专辑 / 歌单 / 电台 / 排行榜都不能登记。请在 APP 里打开那首歌，再点「分享 → 复制链接」';
       return;
     }
     if (!/(music\\.163\\.com|163cn\\.tv|163cn\\.com)/i.test(song)) {
+      markBad('i-song');
       E('sub-tip').textContent = '这不像网易云的单曲分享链接，请用 APP 里那首歌的「分享 → 复制链接」';
       return;
     }
-    if (phone && phone.length !== 11) { E('sub-tip').textContent = '手机号是 11 位，或者留空'; return; }
-    if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) { E('sub-tip').textContent = '请填一个能收到信的邮箱'; return; }
+    if (phone && phone.length !== 11) { markBad('i-phone'); E('sub-tip').textContent = '手机号是 11 位，或者留空'; return; }
+    if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) { markBad('i-email'); E('sub-tip').textContent = '请填一个能收到信的邮箱'; return; }
     st.busy = true;
     E('b-sub').disabled = true;
     E('sub-tip').textContent = '正在登记，请不要关页面…';
     api('/api/r/submit', { t: T, mu: st.mu, phone: phone, link: song, email: email }).then(function(j){
       st.busy = false;
-      if (!j.ok) { E('b-sub').disabled = false; E('sub-tip').textContent = j.message || '登记失败'; return; }
+      if (!j.ok) {
+        E('b-sub').disabled = false;
+        var m = j.message || '登记失败';
+        /* 服务端退回的「不是单曲 / 链接不对」也算填错，照样标红那个框 */
+        if (m.indexOf('单曲') >= 0 || m.indexOf('链接') >= 0) markBad('i-song');
+        E('sub-tip').textContent = m;
+        return;
+      }
       st.done = true;
       show('m-box', false); show('d-box', true);
       E('d-msg').textContent = j.message || '登记成功';
