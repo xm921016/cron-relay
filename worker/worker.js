@@ -6191,7 +6191,7 @@ function render(){
     if(!noteCell)noteCell='<span style="color:#bbb">—</span>';
     h+='<tr><td class="num">'+(i+1)+'</td>'
       +'<td><span class="badge '+(r.pool==='hz'?'b-hz">主群':'b-dz">定制')+'</span></td>'
-      +'<td>'+esc(String(e.name||'').replace(/^qr:.+/,'扫码登录'))+'</td>'
+      +'<td>'+esc(String(e.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</td>'
       +'<td>'+agCell+'</td>'
       +'<td class="num" data-l="UID">'+esc(e.uid)+'</td>'
       // 2026-11-02：新增邮箱列（数据来自 /api/console/data 的 entries[].email，dz 池走对穿同样带）
@@ -6560,7 +6560,7 @@ function lgRender(o){
     h+='<tr'+(r.rb?' style="background:#f7fafd"':'')+'>'
       +'<td style="'+MD+'">'+esc(r.day)+'</td>'
       +'<td style="'+MD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
-      +'<td style="'+MD+';max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.name||r.uid)+'">'+esc(String(r.name||r.uid||'').replace(/^qr:.+/,'扫码登录'))
+      +'<td style="'+MD+';max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.name||r.uid)+'">'+esc(String(r.name||r.uid||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))
         +(r.alive?'':' <span class="badge b-red" title="退单：成交后号被删了（掉线判死 / 手动删），不计收入、不计提成">退单</span>')
         +(r.gift?' <span class="badge b-yellow" title="公益赠号或手动加的号，不是客户买的，不算提成">赠号</span>':'')
       +'</td>'
@@ -6605,7 +6605,7 @@ $('lgCsv').onclick=function(){
   if(!LGDATA||!LGDATA.rows||!LGDATA.rows.length){$('lgm').textContent='还没有数据，先点查询';$('lgm').className='msg err';return;}
   var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','是否退单','备注']];
   for(var i=0;i<LGDATA.rows.length;i++){var r=LGDATA.rows[i];
-    out.push([r.day,r.pool==='hz'?'主群':'定制群',String(r.name||'').replace(/^qr:.+/,'扫码登录'),r.uid,r.agent,r.plan,
+    out.push([r.day,r.pool==='hz'?'主群':'定制群',String(r.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'),r.uid,r.agent,r.plan,
       r.rb?'0':(r.gift?'赠号':(r.price==null?'':r.price)),r.rb?'补号':'',r.alive?'':'退单',r.remark]);}
   var csv='\\ufeff'+out.map(function(a){return a.map(function(v){return '"'+String(v==null?'':v).replace(/"/g,'""')+'"';}).join(',');}).join('\\r\\n');
   var a=document.createElement('a');
