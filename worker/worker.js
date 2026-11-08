@@ -2251,6 +2251,9 @@ async function d1QueueNotice(e, kind) {
 const MAIL_STAGES = [30, 15, 7, 3, 1];   // 剩余天数 ≤ 档位 触发；同档同到期日只发一次
 async function mailEnqueue(pool, uid, kind, ref, email, name, agent, exp) {
   if (!d1ok()) return false;
+  // 2026-11-08：扫码/无手机号登记的占位名（qr: / manual: / name: 前缀）不该出现在邮件正文。
+  // 邮件端 who = name or uid，原样传真会变成「qr:123456」。这里剥掉前缀，让 uid 兜底。
+  name = String(name || '').replace(/^(?:qr|manual|name):[0-9A-Za-z_-]*$/i, '');
   return d1Run('INSERT OR IGNORE INTO mail_queue (pool,uid,kind,ref,email,name,agent,exp,state,created_at) ' +
     'VALUES (?,?,?,?,?,?,?,?,?,?)',
     [String(pool || ''), String(uid != null ? uid : ''), String(kind || ''), String(ref || ''),
@@ -2899,7 +2902,7 @@ async function handle(request) {
         noListen: entries.filter(e => e.noListen).length,
         public: entries.filter(e => e.pub || !e.song).length,
         expiring: entries.filter(isSoonExpired).length,
-        manual: entries.filter(e => String(e.name).indexOf('manual:') === 0).length,
+        manual: entries.filter(e => String(e.name).indexOf('qr:') === 0 || String(e.name).indexOf('manual:') === 0).length,
         limit: c.poolLimitG1,
         remain: Math.max(0, c.poolLimitG1 - entries.length),
       };
@@ -3084,7 +3087,7 @@ async function handle(request) {
       // 2026-10-27：客服 + 套餐（口径同 /api/join）
       const rc2 = await regCfg();
       const pl2 = planOf(rc2, body.plan);
-      const ent = { ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: phone || ('manual:' + v.uid), uid: v.uid, email: email, phone: phone, grp: isG2 ? 2 : 1, exp: expQ.exp || (pl2 ? pl2.exp : undefined),
+      const ent = { ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: phone || ('qr:' + v.uid), uid: v.uid, email: email, phone: phone, grp: isG2 ? 2 : 1, exp: expQ.exp || (pl2 ? pl2.exp : undefined),
         agent: normAgent(body.agent), plan: pl2 ? pl2.label : normAgent(body.plan).slice(0, 8) };
       const r = await addEntry(ent);
       if (!r.ok) return json({ ok: false, message: r.msg }, 400);
@@ -3094,7 +3097,7 @@ async function handle(request) {
       // 还查不到就明确回失败，绝不再假成功。
       let d1Confirmed = null;   // null = 没法确认（D1 查询本身失败，不当成登记失败）
       if (d1ok()) {
-        const keyName = phone || ('manual:' + v.uid);
+        const keyName = phone || ('qr:' + v.uid);
         const probe = () => d1All('SELECT uid FROM accounts WHERE pool=? AND (uid=? OR name=?) LIMIT 1',
                                   [POOL_NAME, String(v.uid), keyName]);
         let chk = await probe();
@@ -3125,7 +3128,7 @@ async function handle(request) {
       try { await ccBust(); } catch (e) {}
       let msg = '登记成功，次日生效。';
       if (v.provisional) msg += '（注：网易校验接口暂时不可达[' + (v.diag || '') + ']，已跳过在线校验；明天任务会自动复验）';
-      return json({ ok: true, uid: String(v.uid), name: phone || ('manual:' + v.uid), pool: POOL_NAME, d1: d1Confirmed === true, message: msg });
+      return json({ ok: true, uid: String(v.uid), name: phone || ('qr:' + v.uid), pool: POOL_NAME, d1: d1Confirmed === true, message: msg });
     }
     // ---- 补录/修改通知邮箱（老号自助通道，只改 email 一个字段，其余原样）----
     if (url.pathname === '/api/updatemail' && request.method === 'POST') {
@@ -5267,7 +5270,7 @@ function badges(e){
   if(e.noListen)h+='<span class="badge b-red">只收</span>';
   if(!e.song||e.pub)h+='<span class="badge b-gray">公益</span>';
   if(!e.email)h+='<span class="badge b-yellow">无邮箱</span>';
-  if(String(e.name).indexOf('manual:')===0)h+='<span class="badge b-gray">扫码</span>';
+  if(String(e.name).indexOf('qr:')===0)h+='<span class="badge b-gray">扫码</span>';
   return h||'<span style="color:#bbb">正常</span>';
 }
 function render(){
@@ -5288,7 +5291,7 @@ function render(){
   var h='';
   list.forEach(function(e,i){
     var song=e.song?'<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>':'<span style="color:#bbb">—</span>';
-    h+='<tr><td class="num">'+(i+1)+'</td><td>'+esc(String(e.name||'').replace(/^manual:.+/,'扫码登录'))+'</td><td class="num">'+esc(e.uid)+'</td><td class="num">'+song+'</td><td class="num">'+esc(e.added)+'</td><td>'+esc(e.email||'—')+'</td><td>'+badges(e)+'</td></tr>';
+    h+='<tr><td class="num">'+(i+1)+'</td><td>'+esc(String(e.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</td><td class="num">'+esc(e.uid)+'</td><td class="num">'+song+'</td><td class="num">'+esc(e.added)+'</td><td>'+esc(e.email||'—')+'</td><td>'+badges(e)+'</td></tr>';
   });
   $('tb').innerHTML=h||'<tr><td colspan="7" style="text-align:center;color:#999;padding:20px">没有匹配的账号</td></tr>';
 }
@@ -6188,7 +6191,7 @@ function render(){
     if(!noteCell)noteCell='<span style="color:#bbb">—</span>';
     h+='<tr><td class="num">'+(i+1)+'</td>'
       +'<td><span class="badge '+(r.pool==='hz'?'b-hz">主群':'b-dz">定制')+'</span></td>'
-      +'<td>'+esc(String(e.name||'').replace(/^manual:.+/,'扫码登录'))+'</td>'
+      +'<td>'+esc(String(e.name||'').replace(/^qr:.+/,'扫码登录'))+'</td>'
       +'<td>'+agCell+'</td>'
       +'<td class="num" data-l="UID">'+esc(e.uid)+'</td>'
       // 2026-11-02：新增邮箱列（数据来自 /api/console/data 的 entries[].email，dz 池走对穿同样带）
@@ -6331,7 +6334,7 @@ function renderRunbar(){
     }
     // 2026-10-26：10-23 那批清理脚本把 name 写成「manual:<uid>」了，D1 已就地修正，
     // 这里再兜一层，避免老数据或别处再传脏值。
-    function nmTxt(n){ return esc(String(n||'').replace(/^manual:.+/,'扫码登录')); }
+    function nmTxt(n){ return esc(String(n||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'')); }
     D.slice(0,12).forEach(function(d){dh+='<tr><td>'+(d.pool==='hz'?'主群':'定制')+'</td><td class="num">'+esc(d.uid)+'</td><td>'+nmTxt(d.name)+'</td><td>'+rsTxt(d.reason)+'</td><td>'+ntTxt(d)+'</td><td class="num">'+esc((d.at||'').slice(5,16))+'</td></tr>';});
     S.slice(0,12).forEach(function(s){
       // 2026-11-04：已发过重登提醒的单独标出来 —— 这类号已摘出听众环、不再占应跑名额，
@@ -6557,7 +6560,7 @@ function lgRender(o){
     h+='<tr'+(r.rb?' style="background:#f7fafd"':'')+'>'
       +'<td style="'+MD+'">'+esc(r.day)+'</td>'
       +'<td style="'+MD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
-      +'<td style="'+MD+';max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.name||r.uid)+'">'+esc(r.name||r.uid)
+      +'<td style="'+MD+';max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.name||r.uid)+'">'+esc(String(r.name||r.uid||'').replace(/^qr:.+/,'扫码登录'))
         +(r.alive?'':' <span class="badge b-red" title="退单：成交后号被删了（掉线判死 / 手动删），不计收入、不计提成">退单</span>')
         +(r.gift?' <span class="badge b-yellow" title="公益赠号或手动加的号，不是客户买的，不算提成">赠号</span>':'')
       +'</td>'
@@ -6602,7 +6605,7 @@ $('lgCsv').onclick=function(){
   if(!LGDATA||!LGDATA.rows||!LGDATA.rows.length){$('lgm').textContent='还没有数据，先点查询';$('lgm').className='msg err';return;}
   var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','是否退单','备注']];
   for(var i=0;i<LGDATA.rows.length;i++){var r=LGDATA.rows[i];
-    out.push([r.day,r.pool==='hz'?'主群':'定制群',r.name,r.uid,r.agent,r.plan,
+    out.push([r.day,r.pool==='hz'?'主群':'定制群',String(r.name||'').replace(/^qr:.+/,'扫码登录'),r.uid,r.agent,r.plan,
       r.rb?'0':(r.gift?'赠号':(r.price==null?'':r.price)),r.rb?'补号':'',r.alive?'':'退单',r.remark]);}
   var csv='\\ufeff'+out.map(function(a){return a.map(function(v){return '"'+String(v==null?'':v).replace(/"/g,'""')+'"';}).join(',');}).join('\\r\\n');
   var a=document.createElement('a');
