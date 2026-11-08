@@ -5267,7 +5267,7 @@ function badges(e){
   if(e.noListen)h+='<span class="badge b-red">只收</span>';
   if(!e.song||e.pub)h+='<span class="badge b-gray">公益</span>';
   if(!e.email)h+='<span class="badge b-yellow">无邮箱</span>';
-  if(String(e.name).indexOf('manual:')===0)h+='<span class="badge b-gray">手动</span>';
+  if(String(e.name).indexOf('manual:')===0)h+='<span class="badge b-gray">扫码</span>';
   return h||'<span style="color:#bbb">正常</span>';
 }
 function render(){
@@ -5288,7 +5288,7 @@ function render(){
   var h='';
   list.forEach(function(e,i){
     var song=e.song?'<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>':'<span style="color:#bbb">—</span>';
-    h+='<tr><td class="num">'+(i+1)+'</td><td>'+esc(String(e.name||'').replace(/^manual:/,'手动·'))+'</td><td class="num">'+esc(e.uid)+'</td><td class="num">'+song+'</td><td class="num">'+esc(e.added)+'</td><td>'+esc(e.email||'—')+'</td><td>'+badges(e)+'</td></tr>';
+    h+='<tr><td class="num">'+(i+1)+'</td><td>'+esc(String(e.name||'').replace(/^manual:.+/,'扫码登录'))+'</td><td class="num">'+esc(e.uid)+'</td><td class="num">'+song+'</td><td class="num">'+esc(e.added)+'</td><td>'+esc(e.email||'—')+'</td><td>'+badges(e)+'</td></tr>';
   });
   $('tb').innerHTML=h||'<tr><td colspan="7" style="text-align:center;color:#999;padding:20px">没有匹配的账号</td></tr>';
 }
@@ -6188,7 +6188,7 @@ function render(){
     if(!noteCell)noteCell='<span style="color:#bbb">—</span>';
     h+='<tr><td class="num">'+(i+1)+'</td>'
       +'<td><span class="badge '+(r.pool==='hz'?'b-hz">主群':'b-dz">定制')+'</span></td>'
-      +'<td>'+esc(e.name)+'</td>'
+      +'<td>'+esc(String(e.name||'').replace(/^manual:.+/,'扫码登录'))+'</td>'
       +'<td>'+agCell+'</td>'
       +'<td class="num" data-l="UID">'+esc(e.uid)+'</td>'
       // 2026-11-02：新增邮箱列（数据来自 /api/console/data 的 entries[].email，dz 池走对穿同样带）
@@ -6331,7 +6331,7 @@ function renderRunbar(){
     }
     // 2026-10-26：10-23 那批清理脚本把 name 写成「manual:<uid>」了，D1 已就地修正，
     // 这里再兜一层，避免老数据或别处再传脏值。
-    function nmTxt(n){ return esc(String(n||'').replace(/^manual:/,'')); }
+    function nmTxt(n){ return esc(String(n||'').replace(/^manual:.+/,'扫码登录')); }
     D.slice(0,12).forEach(function(d){dh+='<tr><td>'+(d.pool==='hz'?'主群':'定制')+'</td><td class="num">'+esc(d.uid)+'</td><td>'+nmTxt(d.name)+'</td><td>'+rsTxt(d.reason)+'</td><td>'+ntTxt(d)+'</td><td class="num">'+esc((d.at||'').slice(5,16))+'</td></tr>';});
     S.slice(0,12).forEach(function(s){
       // 2026-11-04：已发过重登提醒的单独标出来 —— 这类号已摘出听众环、不再占应跑名额，
