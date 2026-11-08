@@ -3384,8 +3384,8 @@ const REG_HTML = `<!DOCTYPE html>
 <meta name="robots" content="noindex,nofollow">
 <title>账号登记</title>
 <style>
-:root{--bg:#f2f3f5;--card:#fff;--txt:#1a1a1a;--mut:#8b8b90;--line:#e8e8ec;--pri:#ff2c55;--ok:#178a55}
-@media (prefers-color-scheme:dark){:root{--bg:#101013;--card:#1c1c20;--txt:#f2f2f5;--mut:#8b8b93;--line:#2c2c32;--ok:#3ddc97}}
+:root{--bg:#f2f3f5;--card:#fff;--txt:#1a1a1a;--mut:#8b8b90;--line:#e8e8ec;--bd:#b4bac5;--pri:#ff2c55;--ok:#178a55}
+@media (prefers-color-scheme:dark){:root{--bg:#101013;--card:#1c1c20;--txt:#f2f2f5;--mut:#8b8b93;--line:#2c2c32;--bd:#4a4a56;--ok:#3ddc97}}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{margin:0;background:var(--bg);color:var(--txt);font:16px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
 .wrap{max-width:480px;margin:0 auto;padding:18px 16px 44px}
@@ -3402,7 +3402,9 @@ button:disabled{opacity:.5}
 /* 2026-11-08：标签原来是 13px 灰字，买家（尤其手机上）几乎看不见「要填什么」，
    改成 14px 加粗 + 正文色，和输入框拉开层次。 */
 label{display:block;font-size:14px;font-weight:700;color:var(--txt);margin:16px 0 6px}
-input{width:100%;border:1px solid var(--line);background:transparent;color:var(--txt);border-radius:11px;padding:11px 12px;font-size:15px;font-family:inherit;outline:none}
+/* 2026-11-08：输入框边线原来用 --line(#e8e8ec)，白底上几乎看不见边界，
+   买家不知道哪里能点。单独给一条更深的 --bd，按钮底色仍用 --line 不变。 */
+input{width:100%;border:1px solid var(--bd);background:transparent;color:var(--txt);border-radius:11px;padding:11px 12px;font-size:15px;font-family:inherit;outline:none}
 input:focus{border-color:var(--pri)}
 .hide{display:none!important}
 .ok{color:var(--ok)}
