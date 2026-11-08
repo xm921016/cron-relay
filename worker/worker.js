@@ -3478,7 +3478,7 @@ input:focus{border-color:var(--pri)}
 (function(){
   var T = (location.pathname.split('/').pop() || '').toUpperCase();
   var E = function(id){ return document.getElementById(id); };
-  var st = { key:'', dev:'', bag:'', mu:'', timer:0, tick:0, busy:false, done:false, scanned:false, weird:0, neg:0 };
+  var st = { key:'', dev:'', bag:'', mu:'', timer:0, tick:0, busy:false, done:false, scanned:false, weird:0, neg:0, dead:false, scanAt:0 };
 
   function show(id, on){ if (on) E(id).classList.remove('hide'); else E(id).classList.add('hide'); }
   function setTip(s){ E('qr-tip').textContent = s; }
@@ -3529,15 +3529,24 @@ input:focus{border-color:var(--pri)}
   }
 
   var cdTimer = 0;
+  /* 2026-11-08：等待期间「换一张」必须置灰。以前买家一边等一边点，码被换成新的，
+     手机上确认的还是旧码，页面就永远等不到 803——表现就是「确认了没反应」。
+     只有码真的废了（过期 / 800 / 风控连拒 / 出码失败）才解禁。 */
+  function setNewBtn(on){
+    try { E('b-new').disabled = !on; } catch(e) {}
+  }
+  function stopWait(msg){
+    st.dead = true;
+    clearInterval(cdTimer); clearTimeout(pTimer);
+    E('qr').classList.add('dim');
+    setTip(msg);
+    setNewBtn(true);
+  }
   function countdown(sec){
     clearInterval(cdTimer); st.tick = sec;
     cdTimer = setInterval(function(){
       st.tick--;
-      if (st.tick <= 0) {
-        clearInterval(cdTimer); E('qr').classList.add('dim');
-        setTip('二维码已过期，点「换一张」');
-        return;
-      }
+      if (st.tick <= 0) { stopWait('二维码已过期，点「换一张」'); return; }
       /* 2026-11-08：已扫码后不要让倒计时把「已扫码，请点确认」刷回「请扫码」，
          否则买家看到的就是「手机确认了、网页还是那句请扫码」。 */
       if (!st.mu && !st.scanned && !st.neg) setTip('请用网易云 APP 扫码（' + st.tick + 's）');
@@ -3547,17 +3556,19 @@ input:focus{border-color:var(--pri)}
   var pTimer = 0;
   function newQr(){
     if (st.busy || st.done) return;
-    st.busy = true;
+    st.busy = true; st.dead = false; st.neg = 0; st.weird = 0;
+    st.scanned = false; st.scanAt = 0;
+    setNewBtn(false);
     setTip('正在生成二维码…');
     E('qr').classList.remove('dim');
     api('/api/r/qrkey?t=' + encodeURIComponent(T) + '&dev=' + encodeURIComponent(st.dev)).then(function(j){
       st.busy = false;
-      if (!j.ok) { setTip(j.message || '出码失败，点「换一张」重试'); return; }
+      if (!j.ok) { setTip(j.message || '出码失败，点「换一张」重试'); setNewBtn(true); return; }
       st.key = j.key; st.bag = j.bag;
       E('qr').src = j.img;
       countdown(j.ttl || 300);
       poll();
-    }).catch(function(e){ st.busy = false; setTip('出码失败：' + (e.message || '网络异常')); });
+    }).catch(function(e){ st.busy = false; setTip('出码失败：' + (e.message || '网络异常')); setNewBtn(true); });
   }
 
   /* 2026-11-08：以前只有 801/802/803/800 四个分支，其它情况（网易回了非 JSON、
@@ -3565,50 +3576,70 @@ input:focus{border-color:var(--pri)}
      网页一动不动。现在任何异常都会把话说出来，并且不再空转。 */
   function poll(){
     clearTimeout(pTimer);
-    if (st.done || !st.key || st.mu) return;
+    if (st.done || st.dead || !st.key || st.mu) return;
     api('/api/r/qrcheck?t=' + encodeURIComponent(T) + '&key=' + encodeURIComponent(st.key) +
         '&dev=' + encodeURIComponent(st.dev) + '&bag=' + encodeURIComponent(st.bag)).then(function(j){
+      if (st.done || st.dead) return;
       if (j.bag) st.bag = j.bag;
       if (!j.ok) {
-        clearInterval(cdTimer);
-        setTip(j.message || '扫码状态读不到，点「换一张」重试');
+        stopWait(j.message || '扫码状态读不到，点「换一张」重试');
         return;
       }
       if (j.code === 803) {
         if (j.mu) { got(j); return; }
-        clearInterval(cdTimer);
-        setTip('扫码成功，但没拿到登录凭证。点「换一张」再扫一次' + (j.dbg ? '（' + j.dbg + '）' : ''));
+        stopWait('扫码成功，但没拿到登录凭证。点「换一张」再扫一次' + (j.dbg ? '（' + j.dbg + '）' : ''));
         return;
       }
-      if (j.code === 800) { clearInterval(cdTimer); E('qr').classList.add('dim'); setTip('二维码已过期，点「换一张」'); return; }
-      if (j.code === 802) { st.scanned = true; st.neg = 0; st.weird = 0; setTip('已扫码，请在手机上点「确认登录」'); }
-      else if (j.code === 801) { st.neg = 0; st.weird = 0; setTip(st.scanned ? '已扫码，正在等你在手机上点「确认登录」' : '等待扫码…（' + Math.max(0, st.tick) + 's）'); }
-      else if (j.code < 0) {
-        /* -462「请完成验证操作」：实测是网易对**某一次轮询**的风控回包 —— 每 20 秒左右
-           冒一次，紧接着又回 801，二维码本身没坏。所以只提示 + 降频重试，
-           绝不废码、绝不停止轮询（以前这里什么都不显示，买家以为是点了没反应）。 */
-        st.neg = (st.neg || 0) + 1;
-        if (st.neg === 1 || st.neg % 5 === 0) {
-          setTip(st.scanned ? '网易正在校验这次登录，稍等一下…（不用重新扫码）'
-                            : '网易正在校验请求，马上就好…（二维码不用换）');
+      if (j.code === 800) { stopWait('二维码已过期，点「换一张」'); return; }
+      if (j.code === 802) {
+        st.scanned = true; if (!st.scanAt) st.scanAt = Date.now();
+        st.neg = 0; st.weird = 0;
+        setTip('已扫码，请在手机上点「确认登录」');
+      }
+      else if (j.code === 801) {
+        st.neg = 0; st.weird = 0;
+        if (st.scanned) {
+          var w = Date.now() - (st.scanAt || Date.now());
+          setTip(w > 45000
+            ? '还没收到确认：请回到手机上点「确认登录」，点了会自动跳转，不用刷新页面'
+            : '已扫码，正在等你在手机上点「确认登录」');
+        } else {
+          setTip('等待扫码…（' + Math.max(0, st.tick) + 's）');
         }
-        pTimer = setTimeout(poll, 4000);
+      }
+      else if (j.code < 0) {
+        /* -462「请完成验证操作」：网易对**单次轮询**的风控回包，正常情况下隔一次
+           就恢复成 801，所以前 3 次只降频重试、不废码。但实测也有整张码被卡死的
+           情况（买家干等 1~2 分钟没动静）—— 连续 4 次（约 16 秒）都过不去就直接判死，
+           把「换一张」解禁并说清怎么办，绝不让页面永远停在「校验中…」。
+           2026-11-08：原来的写法是无限重试，买家看到的就是永远那一句提示。 */
+        st.neg = (st.neg || 0) + 1;
+        if (st.neg < 4) {
+          if (st.neg === 1) {
+            setTip(st.scanned ? '网易正在核对这次登录，稍等一下…（不用重新扫码）'
+                              : '网易正在校验请求，稍等一下…（二维码不用换）');
+          }
+          pTimer = setTimeout(poll, 4000);
+          return;
+        }
+        stopWait('这张二维码网易没放行（' + (j.message || ('code ' + j.code)) + '）。'
+               + '点「换一张」重新扫码；如果还是这样，把手机换成流量（4G/5G）再扫，'
+               + '或者直接找客服代取。');
         return;
       }
       else {
         st.weird = (st.weird || 0) + 1;
         if (st.weird < 3) { pTimer = setTimeout(poll, 2000); return; }   /* 偶发抖动先静默重试两次 */
-        clearInterval(cdTimer);
-        setTip('扫码状态异常（code ' + j.code + (j.message ? '：' + j.message : '') + '），点「换一张」重试');
+        stopWait('扫码状态异常（code ' + j.code + (j.message ? '：' + j.message : '') + '），点「换一张」重试');
         return;
       }
       pTimer = setTimeout(poll, 2000);
-    }).catch(function(){ setTip('网络抖动，正在重试…'); pTimer = setTimeout(poll, 3000); });
+    }).catch(function(){ if (st.dead || st.done) return; setTip('网络抖动，正在重试…'); pTimer = setTimeout(poll, 3000); });
   }
 
   function got(j){
-    st.mu = j.mu; st.scanned = true;
-    clearInterval(cdTimer);
+    st.mu = j.mu; st.scanned = true; st.dead = true;
+    clearInterval(cdTimer); clearTimeout(pTimer);
     E('qr').classList.add('dim');
     setTip('扫码成功');
     E('who').textContent = '已识别账号：' + (j.nick || '网易云账号') + (j.uid ? '（uid ' + j.uid + '）' : '');
