@@ -3409,6 +3409,8 @@ input:focus{border-color:var(--pri)}
 .who{font-size:14px;background:rgba(23,138,85,.1);color:var(--ok);border-radius:10px;padding:10px 12px;word-break:break-all}
 .steps{font-size:13px;color:var(--mut);line-height:1.85;margin:14px 0 0;padding:12px;background:var(--bg);border-radius:10px}
 .steps b{color:var(--txt);font-weight:600}
+/* 2026-11-08：给一段真实的分享范例，买家照着认「长这样就是对的了」 */
+.ex{font-size:12.5px;color:var(--mut);background:var(--bg);border-left:3px solid var(--pri);border-radius:8px;padding:9px 11px;margin:8px 0 0;line-height:1.7;word-break:break-all;text-align:left}
 .err{color:#d93025;font-size:14px;line-height:1.8}
 .big{font-size:32px;text-align:center;margin:6px 0 2px}
 /* 2026-11-08：电脑上打开时左右两栏（左二维码 / 右填表），省得来回滚；
@@ -3459,10 +3461,12 @@ input:focus{border-color:var(--pri)}
           <label>歌曲链接（只能填单曲）</label>
           <input id="i-song" placeholder="APP：我的 → 顶上头像 → 歌曲 → 发布的歌" autocomplete="off">
           <p class="tip" style="text-align:left;margin:8px 0 0">怎么拿链接：网易云 APP → <b>我的</b> → 点顶上<b>头像</b> → <b>歌曲</b>标签页 → 我发布的歌 → 点那首歌的<b>分享</b> → 复制链接。</p>
-          <p class="tip" style="text-align:left;margin:6px 0 0">只收<b>单曲</b>：专辑、歌单、电台、排行榜链接一律退回。原创 / 共创作品，共创人<b>不超过 2 人</b>。</p>
+          <p class="tip" style="text-align:left;margin:10px 0 0">分享出来长这样，整段粘进来就行：</p>
+          <p class="ex">分享任素汐的单曲《我要你》: https://163cn.tv/bkyZ4bVK (来自@网易云音乐)</p>
+          <p class="tip" style="text-align:left;margin:8px 0 0">只收<b>单曲</b>：专辑、歌单、电台、排行榜链接一律退回。原创 / 共创作品，共创人<b>不超过 2 人</b>。</p>
           <label>手机号（选填）</label>
           <input id="i-phone" inputmode="numeric" placeholder="18888888888" autocomplete="off">
-          <label>通知邮箱（必填，掉线或需要验证时靠它找你）</label>
+          <label>通知邮箱（必填，掉线或需要验证时邮件通知）</label>
           <input id="i-email" inputmode="email" placeholder="123456@qq.com" autocomplete="off">
           <div class="row" style="margin-top:18px"><button id="b-sub" class="pri">完成登记</button></div>
           <p class="tip" id="sub-tip" style="margin:12px 0 0"></p>
