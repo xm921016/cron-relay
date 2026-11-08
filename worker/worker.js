@@ -3249,11 +3249,41 @@ async function regPass() {
 /* 返回：null=不存在 / undefined=查询失败 / 行对象 */
 async function regTokenGet(code) {
   if (!d1ok()) return undefined;
+  const c = regNormCode(code);
   const rows = await d1All(
     'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone,ledger_id FROM reg_tokens WHERE token=?',
-    [regNormCode(code)]);
-  if (rows === null) return undefined;
-  return rows.length ? rows[0] : null;
+    [c]);
+  if (rows === null) {
+    /* 2026-11-08：D1「读」额度打满（UTC 日 500 万行，超额回 code 7500）时，
+       这一行读不出来 → /api/r/state、/qrkey、/qrcheck、/submit 全部 503，
+       买家拿着刚生成的链接连页面都打不开。而 reg_tokens 只有十几行、每次状态变更
+       都会同步写 KV（regTokenNew / regTokenUse / regTokenUndo / regtoken_void），
+       所以 KV 镜像天然可以当读兜底。
+       ⚠️ 这里是「读失败」兜底，不是「读到空」：读到空仍然回 null（链接无效），
+       只有连 KV 也没有时才回 undefined（页面提示系统忙）。 */
+    try {
+      const kv = await POOL.get('regtok:' + c);
+      if (kv) return JSON.parse(kv);
+    } catch (e) { console.error('regtok KV 兜底失败:', e && e.message); }
+    return undefined;
+  }
+  if (!rows.length) return null;
+  /* 顺手回填镜像：D1 真正读挂的那一刻，KV 里必须已经有这条 token。 */
+  try { await POOL.put('regtok:' + c, JSON.stringify(rows[0]), { expirationTtl: 259200 }); } catch (e) {}
+  return rows[0];
+}
+/* reg_tokens 的 KV 镜像写（读路径见 regTokenGet）。写失败只告警，D1 仍是权威。 */
+async function regTokenMirror(row, ttlSec) {
+  if (!row || !row.token) return;
+  const o = {
+    token: String(row.token), agent: String(row.agent || ''), plan: String(row.plan || ''),
+    days: Number(row.days) || 0, note: String(row.note || ''), state: String(row.state || 'unused'),
+    ctime: row.ctime || '', exp_at: row.exp_at || '', used_at: row.used_at || null,
+    uid: row.uid || null, uname: row.uname || null, phone: row.phone || null,
+    ledger_id: row.ledger_id || null,
+  };
+  const ttl = Math.max(60, Math.min(259200, Number(ttlSec) || 259200));
+  try { await POOL.put('regtok:' + o.token, JSON.stringify(o), { expirationTtl: ttl }); } catch (e) {}
 }
 /* 有效状态：unused 且未过期 */
 function regStateOf(row) {
@@ -3273,15 +3303,34 @@ async function regTokenNew(agent, plan, days, note, hours) {
     'INSERT INTO reg_tokens (token,agent,plan,days,note,state,ctime,exp_at) VALUES (?,?,?,?,?,?,?,?)',
     [code, String(agent || ''), String(plan || ''), Number(days) || 0, String(note || ''),
      'unused', regIso(now), regIso(expAt)]);
+  if (ok) {
+    /* 2026-11-08：新 token 立刻写一份 KV 镜像（TTL 跟链接有效期一致）。
+       D1 读额度随时可能被别的查询打满，那时候买家只能靠这份镜像把链接打开。 */
+    await regTokenMirror({ token: code, agent: agent, plan: plan, days: days, note: note,
+      state: 'unused', ctime: regIso(now), exp_at: regIso(expAt) }, ((hours || REG_TTL_H) * 3600) + 3600);
+  }
   return ok ? { code: code, ctime: regIso(now), exp_at: regIso(expAt) } : null;
 }
 /* 原子消耗：返回 1=成功 / 0=已被用掉或不存在 / -1=D1 失败 */
 async function regTokenUse(code, uid, uname, phone, ip, ua) {
-  return await d1Changes(
+  const c = regNormCode(code);
+  const n = await d1Changes(
     "UPDATE reg_tokens SET state='used', used_at=?, uid=?, uname=?, phone=?, ip=?, ua=? " +
     "WHERE token=? AND state='unused'",
     [regIso(Date.now()), String(uid || ''), String(uname || ''), String(phone || ''),
-     String(ip || '').slice(0, 40), String(ua || '').slice(0, 120), regNormCode(code)]);
+     String(ip || '').slice(0, 40), String(ua || '').slice(0, 120), c]);
+  if (n === 1) {
+    try {
+      const kv = await POOL.get('regtok:' + c);
+      if (kv) {
+        const o = JSON.parse(kv);
+        o.state = 'used'; o.used_at = regIso(Date.now()); o.uid = String(uid || '');
+        o.uname = String(uname || ''); o.phone = String(phone || '');
+        await POOL.put('regtok:' + c, JSON.stringify(o), { expirationTtl: 259200 });
+      }
+    } catch (e) {}
+  }
+  return n;
 }
 
 /* ================= 网易云扫码（无状态会话，cookie 由浏览器回传） ================= */
@@ -3750,9 +3799,21 @@ async function ncProfile(mu) {
 }
 /* 回滚 token（抢占后登记失败才用） */
 async function regTokenUndo(code) {
-  return await d1Changes(
+  const c = regNormCode(code);
+  const n = await d1Changes(
     "UPDATE reg_tokens SET state='unused', used_at=NULL, uid='', uname='', phone='' " +
-    "WHERE token=? AND state='used'", [regNormCode(code)]);
+    "WHERE token=? AND state='used'", [c]);
+  if (n === 1) {
+    try {
+      const kv = await POOL.get('regtok:' + c);
+      if (kv) {
+        const o = JSON.parse(kv);
+        o.state = 'unused'; o.used_at = null; o.uid = null; o.uname = null; o.phone = null;
+        await POOL.put('regtok:' + c, JSON.stringify(o), { expirationTtl: 259200 });
+      }
+    } catch (e) {}
+  }
+  return n;
 }
 
 async function handle(request) {
@@ -4070,7 +4131,7 @@ async function handle(request) {
     /* 校验 token：给页面显示套餐和剩余时间 */
     if (url.pathname === '/api/r/state') {
       const row = await regTokenGet(url.searchParams.get('t'));
-      if (row === undefined) return json({ ok: false, message: '数据库暂时读不到，请稍后重试' }, 503);
+      if (row === undefined) return json({ ok: false, message: '系统正在忙（数据库限流），请 1 分钟后再刷新；多次不行就把这句话发给客服' }, 503);
       if (!row) return json({ ok: false, message: '这个链接无效，请找客服重新要一条' }, 404);
       const stt = regStateOf(row);
       /* 已用掉的链接：回 used 标记，页面显示「登记完成」的绿勾，
@@ -4091,7 +4152,7 @@ async function handle(request) {
        所以这里一行 KV、一行 D1 都不写（免费额度零消耗）。 */
     if (url.pathname === '/api/r/qrkey') {
       const row = await regTokenGet(url.searchParams.get('t'));
-      if (row === undefined) return json({ ok: false, message: '数据库暂时读不到，请稍后重试' }, 503);
+      if (row === undefined) return json({ ok: false, message: '系统正在忙（数据库限流），请 1 分钟后再刷新；多次不行就把这句话发给客服' }, 503);
       if (!row || regStateOf(row) !== 'unused') return json({ ok: false, message: '链接不可用，请刷新页面' }, 410);
       const dev = String(url.searchParams.get('dev') || '').trim();
       if (!/^YD-[0-9a-f]{36}$/.test(dev)) return json({ ok: false, message: '设备号无效，请刷新页面重试' }, 400);
@@ -4110,7 +4171,7 @@ async function handle(request) {
     /* 轮询一次：801 等待 / 802 已扫待确认 / 803 成功（返回 MUSIC_U） / 800 过期 */
     if (url.pathname === '/api/r/qrcheck') {
       const row = await regTokenGet(url.searchParams.get('t'));
-      if (row === undefined) return json({ ok: false, code: 0, message: '数据库暂时读不到' }, 503);
+      if (row === undefined) return json({ ok: false, code: 0, message: '系统正在忙，请稍后刷新重试' }, 503);
       if (!row || regStateOf(row) !== 'unused') return json({ ok: false, code: 0, message: '链接不可用' }, 410);
       const key = String(url.searchParams.get('key') || '').trim().slice(0, 64);
       if (!key) return json({ ok: false, code: 0, message: '缺少 key' }, 400);
@@ -4139,7 +4200,7 @@ async function handle(request) {
       try { b0 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
       const code = regNormCode(b0.t);
       const row = await regTokenGet(code);
-      if (row === undefined) return json({ ok: false, message: '数据库暂时读不到，请稍后重试' }, 503);
+      if (row === undefined) return json({ ok: false, message: '系统正在忙（数据库限流），请 1 分钟后再刷新；多次不行就把这句话发给客服' }, 503);
       if (!row) return json({ ok: false, message: '链接无效，请找客服重新要一条' }, 404);
       if (regStateOf(row) !== 'unused') return json({ ok: false, message: '这个链接已经用过了，不能重复登记' }, 410);
 
@@ -4202,9 +4263,23 @@ async function handle(request) {
       let chk = await d1FindDup(String(v.uid), name);
       if (chk && !chk.length) { await d1Upsert(ent); chk = await d1FindDup(String(v.uid), name); }
       if (chk === null) {
-        return json({ ok: false, message: '登记没写进数据库（' + d1ErrHint() + '），请稍后重试；这次不会占名额。' }, 503);
-      }
-      if (chk.length === 0) {
+        /* 2026-11-08：d1FindDup 返回 null 表示「查询失败」，不是「没写进去」。
+           D1 读额度打满（code 7500）时必然走到这里，而上面 addEntry 已经把号写进
+           KV 权威键（entry:u<uid> / entry:n<name>）。所以改查 KV 复核：
+           有键 = 真的写进去了，正常回成功；没键 = 才判失败。
+           顺带修掉一个老 bug：token 在上面已经被 regTokenUse 消耗，原来这里回 503，
+           买家看到的是「登记其实成功 / 页面报失败 / 再点又说链接已用过」直接卡死。 */
+        let kvHit = false;
+        try {
+          const k1 = 'entry:u' + String(v.uid);
+          const k2 = 'entry:n' + encodeURIComponent(name);
+          kvHit = !!(await POOL.get(k1)) || !!(await POOL.get(k2));
+        } catch (e) {}
+        if (!kvHit) {
+          return json({ ok: false, message: '登记没写进数据库（' + d1ErrHint() + '），请稍后重试；这次不会占名额。' }, 503);
+        }
+        console.log('D1 自检读失败，KV 权威键已确认写入:', String(v.uid));
+      } else if (chk.length === 0) {
         return json({ ok: false, message: '这次没能写进数据库，请再点一次「完成登记」' }, 503);
       }
 
@@ -4270,6 +4345,12 @@ async function handle(request) {
                                [regNormCode(b3.code)]);
       if (n === -1) return json({ ok: false, message: '数据库不可用' }, 503);
       if (!n) return json({ ok: false, message: '没找到可作废的链接（可能已用掉或已作废）' }, 404);
+      /* 作废必须立刻反映到 KV 镜像，否则 D1 读挂时买家还能用这条已作废的链接。 */
+      try {
+        const k = 'regtok:' + regNormCode(b3.code);
+        const kv = await POOL.get(k);
+        if (kv) { const o = JSON.parse(kv); o.state = 'void'; await POOL.put(k, JSON.stringify(o), { expirationTtl: 259200 }); }
+      } catch (e) {}
       return json({ ok: true, message: '已作废' });
     }
     // ---- 补录/修改通知邮箱（老号自助通道，只改 email 一个字段，其余原样）----
