@@ -94,7 +94,15 @@ def main():
             break
         code, data = call("/api/mail_pending", {"pass": PASS, "limit": LIMIT, "dry": DRY})
         if code != 200 or not data.get("ok"):
-            print(f"[notify-mail] 领取失败 HTTP {code}: {data.get('message')}")
+            msg = str(data.get("message") or "")
+            # 2026-11-08：D1 免费读额度打满时 /api/mail_pending 必回 503（读 mail_queue 失败）。
+            # 此时队列行仍是 pending、没被 claim（claimed_at 为空），额度重置后下一班自动补发，不丢件。
+            # 这种错误会连续复现十几班，若照旧 return 1，GitHub 会连发十几封「Run failed」告警邮件，
+            # 把真正的故障淹没。故只打 warning 不判死（与 run.py「可播号不足一半只告警」同一口径）。
+            if "row read limit" in msg or "exceeded D1" in msg:
+                print("::warning::[notify-mail] D1 读额度已打满，本轮跳过；队列未动，额度重置后自动补发")
+                return 0
+            print(f"[notify-mail] 领取失败 HTTP {code}: {msg}")
             return 1
         todo = data.get("to_send") or []
         skipped = data.get("skipped") or []
