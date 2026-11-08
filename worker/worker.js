@@ -3399,7 +3399,9 @@ h1{font-size:19px;margin:0 0 6px;font-weight:600}
 button{flex:1;border:0;border-radius:11px;padding:12px 10px;font-size:15px;font-family:inherit;background:var(--line);color:var(--txt);cursor:pointer}
 button.pri{background:var(--pri);color:#fff;font-weight:600}
 button:disabled{opacity:.5}
-label{display:block;font-size:13px;color:var(--mut);margin:15px 0 6px}
+/* 2026-11-08：标签原来是 13px 灰字，买家（尤其手机上）几乎看不见「要填什么」，
+   改成 14px 加粗 + 正文色，和输入框拉开层次。 */
+label{display:block;font-size:14px;font-weight:700;color:var(--txt);margin:16px 0 6px}
 input{width:100%;border:1px solid var(--line);background:transparent;color:var(--txt);border-radius:11px;padding:11px 12px;font-size:15px;font-family:inherit;outline:none}
 input:focus{border-color:var(--pri)}
 .hide{display:none!important}
@@ -3458,10 +3460,10 @@ input:focus{border-color:var(--pri)}
           <input id="i-song" placeholder="APP：我的 → 顶上头像 → 歌曲 → 发布的歌" autocomplete="off">
           <p class="tip" style="text-align:left;margin:8px 0 0">怎么拿链接：网易云 APP → <b>我的</b> → 点顶上<b>头像</b> → <b>歌曲</b>标签页 → 我发布的歌 → 点那首歌的<b>分享</b> → 复制链接。</p>
           <p class="tip" style="text-align:left;margin:6px 0 0">只收<b>单曲</b>：专辑、歌单、电台、排行榜链接一律退回。原创 / 共创作品，共创人<b>不超过 2 人</b>。</p>
-          <label>手机号（选填，方便查单和掉线联系你）</label>
-          <input id="i-phone" inputmode="numeric" placeholder="不填也能登记" autocomplete="off">
+          <label>手机号（选填）</label>
+          <input id="i-phone" inputmode="numeric" placeholder="18888888888" autocomplete="off">
           <label>通知邮箱（必填，掉线或需要验证时靠它找你）</label>
-          <input id="i-email" inputmode="email" placeholder="you@example.com" autocomplete="off">
+          <input id="i-email" inputmode="email" placeholder="123456@qq.com" autocomplete="off">
           <div class="row" style="margin-top:18px"><button id="b-sub" class="pri">完成登记</button></div>
           <p class="tip" id="sub-tip" style="margin:12px 0 0"></p>
         </div>
@@ -3559,6 +3561,7 @@ input:focus{border-color:var(--pri)}
     st.busy = true; st.dead = false; st.neg = 0; st.weird = 0;
     st.scanned = false; st.scanAt = 0;
     setNewBtn(false);
+    try { E('b-save').disabled = false; } catch(e) {}
     setTip('正在生成二维码…');
     E('qr').classList.remove('dim');
     api('/api/r/qrkey?t=' + encodeURIComponent(T) + '&dev=' + encodeURIComponent(st.dev)).then(function(j){
@@ -3642,6 +3645,9 @@ input:focus{border-color:var(--pri)}
     clearInterval(cdTimer); clearTimeout(pTimer);
     E('qr').classList.add('dim');
     setTip('扫码成功');
+    /* 2026-11-08：已经登录成功了，这张码再存也没用（还会被误当成新码去扫），
+       所以「保存到相册」一起置灰，和「换一张」保持一致。 */
+    try { E('b-save').disabled = true; } catch(e) {}
     E('who').textContent = '已识别账号：' + (j.nick || '网易云账号') + (j.uid ? '（uid ' + j.uid + '）' : '');
     show('f-box', true);
     show('ph-box', false);
