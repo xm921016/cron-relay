@@ -1,0 +1,33 @@
+name: d1-reconcile-kv-shadow
+
+# KV 权威池 → D1 影子库一致性巡检 + 补齐。
+#
+# 背景（2026-11-08）：D1 每日免费读额度被打满后，`SELECT` 一律回 code 7500，
+# 而 `UPSERT`（ON CONFLICT 需要先读）时好时坏 —— 于是超额期间登记的号有可能
+# 只落在 KV 权威键（entry:u<uid>）里，D1 accounts 缺这一行。
+# relay 的分配是从 D1 读的，缺行 = 这个号当天不刷，用户会看到「登记了但不涨播放」。
+#
+# 本工作流每天 UTC 00:10（北京 08:10，额度刚重置）对照一次，把缺的号补回 D1。
+# 幂等：没有差异时只读 675 行，什么也不写。跑一周确认稳定后可以删掉。
+on:
+  schedule:
+    - cron: '10 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: reconcile KV pool -> D1 accounts
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: python3 tmp/reconcile_1108.py --apply
