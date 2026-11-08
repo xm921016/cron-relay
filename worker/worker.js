@@ -3478,7 +3478,7 @@ input:focus{border-color:var(--pri)}
 (function(){
   var T = (location.pathname.split('/').pop() || '').toUpperCase();
   var E = function(id){ return document.getElementById(id); };
-  var st = { key:'', dev:'', bag:'', mu:'', timer:0, tick:0, busy:false, done:false, scanned:false, weird:0 };
+  var st = { key:'', dev:'', bag:'', mu:'', timer:0, tick:0, busy:false, done:false, scanned:false, weird:0, neg:0 };
 
   function show(id, on){ if (on) E(id).classList.remove('hide'); else E(id).classList.add('hide'); }
   function setTip(s){ E('qr-tip').textContent = s; }
@@ -3540,7 +3540,7 @@ input:focus{border-color:var(--pri)}
       }
       /* 2026-11-08：已扫码后不要让倒计时把「已扫码，请点确认」刷回「请扫码」，
          否则买家看到的就是「手机确认了、网页还是那句请扫码」。 */
-      if (!st.mu && !st.scanned) setTip('请用网易云 APP 扫码（' + st.tick + 's）');
+      if (!st.mu && !st.scanned && !st.neg) setTip('请用网易云 APP 扫码（' + st.tick + 's）');
     }, 1000);
   }
 
@@ -3581,8 +3581,20 @@ input:focus{border-color:var(--pri)}
         return;
       }
       if (j.code === 800) { clearInterval(cdTimer); E('qr').classList.add('dim'); setTip('二维码已过期，点「换一张」'); return; }
-      if (j.code === 802) { st.scanned = true; st.weird = 0; setTip('已扫码，请在手机上点「确认登录」'); }
-      else if (j.code === 801) { st.weird = 0; setTip(st.scanned ? '已扫码，正在等你在手机上点「确认登录」' : '等待扫码…（' + Math.max(0, st.tick) + 's）'); }
+      if (j.code === 802) { st.scanned = true; st.neg = 0; st.weird = 0; setTip('已扫码，请在手机上点「确认登录」'); }
+      else if (j.code === 801) { st.neg = 0; st.weird = 0; setTip(st.scanned ? '已扫码，正在等你在手机上点「确认登录」' : '等待扫码…（' + Math.max(0, st.tick) + 's）'); }
+      else if (j.code < 0) {
+        /* -462「请完成验证操作」：实测是网易对**某一次轮询**的风控回包 —— 每 20 秒左右
+           冒一次，紧接着又回 801，二维码本身没坏。所以只提示 + 降频重试，
+           绝不废码、绝不停止轮询（以前这里什么都不显示，买家以为是点了没反应）。 */
+        st.neg = (st.neg || 0) + 1;
+        if (st.neg === 1 || st.neg % 5 === 0) {
+          setTip(st.scanned ? '网易正在校验这次登录，稍等一下…（不用重新扫码）'
+                            : '网易正在校验请求，马上就好…（二维码不用换）');
+        }
+        pTimer = setTimeout(poll, 4000);
+        return;
+      }
       else {
         st.weird = (st.weird || 0) + 1;
         if (st.weird < 3) { pTimer = setTimeout(poll, 2000); return; }   /* 偶发抖动先静默重试两次 */
