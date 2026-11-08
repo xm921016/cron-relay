@@ -2782,6 +2782,170 @@ function sliceBucket(uid, jobs, salt) {
   return (h >>> 0) % Math.max(1, jobs);
 }
 
+/* ============================================================================
+   首周加速分配（2026-11-08）
+   ----------------------------------------------------------------------------
+   口径前提（别搞错）：650 = 近 30 日「不同听众」累计有效播放，平台去重口径是
+   「同听众 + 同歌 + 同一天」。所以一首歌今天能涨多少，只取决于今天有多少个
+   不同的号去听它；跨天重复听仍然计数，同一天同一号重复才无效。
+
+   原来的平均分配：M 个听众每人听 p 首，总槽位 M*p 摊给 L 首歌 =>
+   每首歌每天刚好 M*p/L ≈ 32 个听众，650/32 要爬 21 天，这就是「首月 22 天」的来源。
+
+   改法：按「歌主入池天数」给每首歌定目标听众数，而不是一律 32。
+     入池 1~7 天  : 108 人/天（650/6，第 2 天起播，7 个自然日内冲满 100%）
+     入池 8~21 天 : 32 人/天（与现状一致，在途客户零感知）
+     入池 22 天+  : 25 人/天（早就满了；维持 100% 的下限是 22，留 14% 余量）
+   总槽位 S = 各歌目标之和，每人每晚听几首 per ≈ S/M。
+   注意 per 会从 32 涨到 52 左右：这不是「提高每日上限」，30 从来是下限不是上限，
+   只是新号那几首歌要多被 76 个人听，人得从别人身上匀出来。
+
+   分配算法：每首歌一个「听众窗口」，起点在归一化号空间里按天线性推进
+     ① 听众先按 uid 稳定排序（窗口 = 索引区间，索引含义每天必须一致）
+     ② 第 j 首歌起点 pos = (hash(歌)/2^32 + day*目标数/BASE_M) % 1，
+        取 pos*M 起连续「目标数」个号 => 这首歌今天就恰好被这么多人听到
+     ③ 每首歌每天按自己的目标数前进，所以加速档每天精确 +108 个新听众
+   ⚠ 三条踩过的坑，改之前必读（都能让加速「静默失效」，不报错、只是不满 650）：
+     ① 号必须按 uid 排序。不排的话同一个号今天第 5、明天第 300，日间推进全乱。
+     ② 起点必须用归一化比例 pos ∈ [0,1)，不能写 (h + day*t) % M。池子每天
+        新增约 31 个号，M 一变 mod 就整体错位：实测第 3 天起每天只推进 77 位
+        （应为 108），7 天累计从 756 掉到 530，首月根本满不了。
+     ③ BASE_M 必须 <= 典型 M（当前 743），保证每天推进的号位数 >= 目标数，
+        否则窗口重叠、同一批人被重复听，白烧算力。
+   实测（本地镜像 M=743 / L=742 / S=38,522）：per=52，每号首数 p50=52 / max=60
+   （已配平，见下方 cap 逻辑），加速档 108 首的歌听众 min=107 / 中位=108，
+   7 天累计 672 >= 650 => 「入池第 7 天满」。整轮 743 号由实测 2.0h 涨到约 3.4h，
+   仍在快照门闩（11:40）之前，不需要提前发令。
+   ============================================================================ */
+const ACCEL_ON = true;          // 总开关：改 false 立刻回到原来的平均分配（应急回滚用）
+const ACCEL_DAYS = 7;           // 入池 1~N 天算「加速档」
+const ACCEL_PER_DAY = 108;      // 加速档：每首歌每天要多少个不同听众（650 / 6）
+const KEEP_PER_DAY = 32;        // 在途档：与现状一致，不动存量客户的速度
+const IDLE_PER_DAY = 25;        // 满档：已 100%，维持住的下限是 22
+function daysBetween(from, to) {                 // to - from，单位天；非法值按「很远」处理
+  const t1 = Date.parse(String(from || '').slice(0, 10) + 'T00:00:00Z');
+  const t2 = Date.parse(String(to || '').slice(0, 10) + 'T00:00:00Z');
+  if (!isFinite(t1) || !isFinite(t2)) return 999;
+  return Math.floor((t2 - t1) / 86400000);
+}
+function accelTargetOf(added, today) {
+  const d = daysBetween(added, today);
+  if (d <= 0) return 0;                          // 当天登记的号已在 live 里被滤掉，兜底返回 0
+  if (d <= ACCEL_DAYS) return ACCEL_PER_DAY;
+  if (d <= 21) return KEEP_PER_DAY;
+  return IDLE_PER_DAY;
+}
+function buildPlanAccel(live, songs, listeners, today, idle) {
+  const M = listeners.length, L = songs.length;
+  if (!M || !L) return { ok: false, msg: '可用号或歌曲为空', m: M, l: L, idle, plans: [] };
+  // 每首歌的目标按「登记它的号里入池最早的那个」算：同一首歌被多个号登记时，
+  // 只要有一个是新号，这首歌就享受加速（宁可多给，不要漏掉首月客户）。
+  const owner = {};
+  for (const r of live) {
+    if (r.pub) continue;                         // 公益号的歌不进歌环，与 songs 的过滤保持一致
+    if (r.relogin) continue;                     // 失效号同理，见 songs 处 2026-11-08 的说明
+    const s = String(r.song || ''); if (!s) continue;
+    const a = String(r.added || '');
+    if (!owner[s] || (a && a < owner[s])) owner[s] = a;
+  }
+  const tgt = songs.map(s => accelTargetOf(owner[s], today));
+  let S = 0;
+  for (const t of tgt) S += t;
+  if (!S) return { ok: false, msg: '目标听众全为 0', m: M, l: L, idle, plans: [] };
+  // 单班时长保险：某天新号扎堆（例如单日新增 78 个）会把「平均每人首数」顶到 60+，
+  // 单班时长爆到 5h 以上就会顶到 09:00 快照门闩。超限就等比缩放目标数 ——
+  // 那天加速档拿不满 108（等比稀释），但整轮一定跑得完，不会丢播放。
+  const PER_CAP = 62;
+  let capped = 0;
+  if (S / M > PER_CAP) {
+    capped = 1;
+    const ratio = PER_CAP * M / S;
+    for (let j = 0; j < L; j++) tgt[j] = Math.max(1, Math.round(tgt[j] * ratio));
+    S = 0;
+    for (const t of tgt) S += t;
+  }
+  // ---- 分配模型：每首歌一个「听众窗口」，起点在归一化号空间里按天线性推进 ----
+  // 2026-11-08 实测踩出来的三条，改动前务必读完，否则加速会静默失效：
+  //   ① 号必须先按 uid 稳定排序。窗口是「号的索引区间」，索引含义每天必须一致；
+  //      否则同一个号今天排第 5、明天排第 300，日间推进就完全乱了。
+  //   ② 起点用归一化比例 pos ∈ [0,1) 再乘 M，**不能**写 `(h + day*t) % M`。
+  //      池子每天新增约 31 个号，M 一变 mod 就整体错位：实测第 3 天起每天只能
+  //      推进 77 位（应为 108），7 天累计从 756 掉到 530，首月根本满不了。
+  //      归一化后 pos 每天推进 t/BASE_M，与 M 无关 —— 实测连续 5 天每天精确 +108。
+  //   ③ BASE_M 必须 <= 典型 M（当前 743），保证每天推进的号位数 >= tgt，
+  //      否则窗口会重叠、白白重复听同一批人。
+  const BASE_M = 650;
+  const day = Math.floor(Date.parse(today + 'T00:00:00Z') / 86400000);
+  const order = new Array(M);
+  for (let i = 0; i < M; i++) order[i] = i;
+  order.sort((a, b) => (listeners[a].uid < listeners[b].uid ? -1 : listeners[a].uid > listeners[b].uid ? 1 : 0));
+  const buckets = new Array(M);
+  for (let j = 0; j < L; j++) {
+    const t = tgt[j];
+    if (!t) continue;
+    let pos = (hashStr(songs[j]) / 4294967296 + day * t / BASE_M) % 1;
+    if (pos < 0) pos += 1;
+    const start = Math.floor(pos * M) % M;
+    for (let k = 0; k < t; k++) {
+      const i = (start + k) % M;
+      const b = buckets[i];
+      if (b) b.push(j); else buckets[i] = [j];
+    }
+  }
+  const plans = [];
+  // ---- 配平：桶分配是「每首歌各自挑窗口」，桶大小天然不均（实测 p99 会到 per 的 1.3 倍）。
+  // 而整轮时长由**最慢的那个号**决定，不均就等于白拖时间。把超过 cap 的歌匀给不足 per 的号，
+  // 每首歌的听众总数不变（还是 tgt 个人听），只是换了几个号。
+  const per = Math.max(1, Math.round(S / M));
+  const cap = per + 8;
+  const over = [], thin = [];
+  for (let i = 0; i < M; i++) {
+    const b = buckets[i] || (buckets[i] = []);
+    if (b.length > cap) {
+      for (let x = cap; x < b.length; x++) over.push([b[x], i]);
+      b.length = cap;
+    }
+    if (b.length < per) thin.push(i);
+  }
+  let ti = 0;
+  for (let n = 0; n < over.length && thin.length; n++) {
+    const j = over[n][0], src = over[n][1];
+    let placed = false;
+    for (let k = 0; k < thin.length; k++) {
+      const i = thin[(ti + k) % thin.length];
+      const b = buckets[i];
+      if (b.length >= per || b.indexOf(j) >= 0) continue;
+      b.push(j); placed = true;
+      ti = (ti + k + 1) % thin.length;
+      break;
+    }
+    // 找不到空位就留在原桶：宁可那一个号慢一点，也不能让这首歌少一个听众
+    if (!placed) buckets[src].push(j);
+  }
+  let maxPlays = 0, sumPlays = 0;
+  for (let oi = 0; oi < M; oi++) {
+    const it = listeners[order[oi]];
+    const own = it.song;
+    const bj = buckets[oi];
+    const picks = [];
+    // 桶里就是「窗口覆盖到本号」的歌，天然不重复（每首歌只推一次），
+    // 只需剔除自己的歌。所以这里不需要 Set 去重，比旧版省一半 CPU。
+    if (bj) for (let x = 0; x < bj.length; x++) {
+      const s = songs[bj[x]];
+      if (s !== own) picks.push(s);
+    }
+    seededShuffle(picks, hashStr(it.uid + ':' + day));
+    if (picks.length > maxPlays) maxPlays = picks.length;
+    sumPlays += picks.length;
+    plans.push({ pool: it.pool, uid: it.uid, name: it.name, song: own,
+                 ck: it.ck, email: it.email, pub: it.pub ? 1 : 0, plays: picks });
+  }
+  const perAvg = Math.round(sumPlays / M);
+  return { ok: true, day: today, m: M, l: L, p: perAvg, plans, idle,
+           accel: { on: 1, days: ACCEL_DAYS, perDay: ACCEL_PER_DAY, slots: S, per: perAvg,
+                    max: maxPlays, capped: capped } };
+}
+
 function buildPlanFrom(rows, today) {
   const live = rows.filter(r => {
     const added = String(r.added || '');
@@ -2796,7 +2960,10 @@ function buildPlanFrom(rows, today) {
   // 2026-11-01：公益号登记的歌不进互听歌环 —— 它的号主明确说「自己的歌不需要别人听」，
   // 留在 songs 里会平白分走别的号的播放次数。注意只从歌环剔除，账号本身仍留在 listeners
   // 里照常帮别人听（这正是公益号的用途），song 字段也不清（随时能改回普通号）。
-  const songs = [...new Set(live.filter(r => !r.pub).map(r => String(r.song || '')).filter(Boolean))].sort();
+  // 2026-11-08：CK 已确认失效的号（relogin 非空）同样不进歌环。原来是「人摘出听众环、
+  // 歌留在歌环」，等于这几个号只收不听 —— 白占 6/748 的播放次数，还让 L/M 虚高。
+  // 号主重新登记清空 relogin_at 后，歌会自动回到歌环，不需要人工干预。
+  const songs = [...new Set(live.filter(r => !r.pub && !r.relogin).map(r => String(r.song || '')).filter(Boolean))].sort();
   const seen = new Set();
   const listeners = [];
   const idle = [];                                           // 只收不听：不进播放环，但要下发去签到/查工作台/验活
@@ -2811,13 +2978,17 @@ function buildPlanFrom(rows, today) {
     if (r.no_listen) { idle.push(item); continue; }
     // 2026-11-04：CK 已确认失效、账号仍在（判死加固 B 保留的那批）→ 摘出听众环。
     // 它留下来只会占一个「应跑」名额然后每天验活失败：coverage 天天缺这几个，页面上
-    // 又看不出原因。放进 idle 而不是直接丢：歌仍留在 songs 里（别人听它不受影响），
-    // 号也仍每轮验活；号主重新登记后 CK 变化会把 relogin_at 清空，下一轮自动回到听众环。
+    // 又看不出原因。放进 idle 而不是直接丢：号仍每轮验活，号主重新登记后 CK 变化会把
+    // relogin_at 清空，下一轮自动回到听众环。
+    // 2026-11-08 补：歌也不再留在 songs 里（原来只摘人不摘歌，等于让它们白占播放次数）。
     if (r.relogin) { idle.push(item); continue; }
     listeners.push(item);
   }
   const M = listeners.length, L = songs.length;
   if (!M || !L) return { ok: false, msg: '可用号或歌曲为空', m: M, l: L, idle, plans: [] };
+  // 2026-11-08：首周加速走「每首歌独立听众窗口」（见上方 buildPlanAccel 的口径说明）。
+  // ACCEL_ON=false 时下面这套平均分配原样保留，改一个常量就能回滚，不需要回滚整个文件。
+  if (ACCEL_ON) return buildPlanAccel(live, songs, listeners, today, idle);
   // p：先按「每首歌每天 ASSIGN_TARGET+1 个听众」反推，再夹进 [1, L-1]。
   // 2026-10-22 修正：原写法 Math.max(8, Math.min(L-1, x)) 在 L<9 时 p>L-1，每人取不满 p 首。
   const p = Math.max(1, Math.min(Math.max(8, Math.ceil((ASSIGN_TARGET + 1) * L / M)), Math.max(1, L - 1)));
