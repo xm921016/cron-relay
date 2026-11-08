@@ -4099,8 +4099,22 @@ async function handle(request) {
         // 2026-11-05 晚：回查本身失败（chk === null）原来被当成「没法确认」照样回成功 ——
         // D1 配额用尽时就是这个分支，成员看到「登记成功」、控制台却查不到这个号。
         // 现在明确告诉对方失败，不再假成功。
+        // 2026-11-08 二次修正：chk === null 是「回查失败」，不是「没写进去」。D1 读额度
+        // 打满（code 7500）时必然走到这里，而 addEntry 已经把号写进 KV 权威键
+        // （entry:u<uid> / entry:n<name>，KV 才是权威、D1 只是影子库）。所以改查 KV 复核：
+        // 有键 = 真写进去了，正常回成功；没键 = 才判失败。
+        // 不改的话客服今晚每次手动登记都会「其实成功了却报失败」→ 重试 → 「已登记过」，彻底没法干活。
         if (chk === null) {
-          return json({ ok: false, message: '登记没写进数据库（' + d1ErrHint() + '），请稍后重试；这次不会占名额。' }, 503);
+          let kvHit = false;
+          try {
+            const k1 = 'entry:u' + String(v.uid);
+            const k2 = 'entry:n' + encodeURIComponent(keyName);
+            kvHit = !!(await POOL.get(k1)) || !!(await POOL.get(k2));
+          } catch (e) {}
+          if (!kvHit) {
+            return json({ ok: false, message: '登记没写进数据库（' + d1ErrHint() + '），请稍后重试；这次不会占名额。' }, 503);
+          }
+          console.log('D1 回查读失败，KV 权威键已确认写入:', String(v.uid));
         }
       }
       // 2026-11-06：登记成功 → 排一封「登记成功 + 加售后群」邮件（Actions 每半小时派发）。
