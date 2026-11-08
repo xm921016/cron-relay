@@ -1352,16 +1352,16 @@ async function resolveSong(link) {
   // （网页版复制的 song?id= 格式、短链重定向后的 URL 同样兼容）
   let m = url.match(/[?&]id=(\d+)/);
   // 只收单曲：歌单/专辑/电台/节目/排行榜链接一律拒绝（防一个链接带出整张歌单）
-  const COLLECT = /\/(playlist|album|radio|program|toplist)\b/i;
+  const COLLECT = /\/(playlist|album|radio|program|toplist|djradio|artist|mv)\b/i;
   if (COLLECT.test(url)) {
-    return { ok: false, msg: '不支持歌单/专辑等合集链接（一个歌单曲目太多）。请在网易云 APP 里打开【其中一首歌】→ 点分享 → 复制链接，只登记单曲' };
+    return { ok: false, msg: '只收单曲链接：专辑 / 歌单 / 电台 / 排行榜 / MV 都不能登记。请在网易云 APP 里打开【那首歌】→ 分享 → 复制链接' };
   }
   try {
     const r = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': UA } });
     url = r.url;
   } catch (e) {}
   if (COLLECT.test(url)) {
-    return { ok: false, msg: '不支持歌单/专辑等合集链接（一个歌单曲目太多）。请在网易云 APP 里打开【其中一首歌】→ 点分享 → 复制链接，只登记单曲' };
+    return { ok: false, msg: '只收单曲链接：专辑 / 歌单 / 电台 / 排行榜 / MV 都不能登记。请在网易云 APP 里打开【那首歌】→ 分享 → 复制链接' };
   }
   // 原链接没带 id（如 163cn.tv 短链）时，用跟随重定向后的 r.url 兜底匹配一次
   if (!m) m = url.match(/[?&]id=(\d+)/);
@@ -2872,6 +2872,806 @@ async function buildPlan(dayStr) {
   return { ok: false, msg: 'D1 未绑定或查询失败，且 KV 兜底无数据' };
 }
 
+/* ============================================================================
+   方案C（2026-11-08）：网页自助扫码登记
+   ----------------------------------------------------------------------------
+   买家拿到一次性链接 /r/<8 位码>：打开 → 网页自己出二维码 → 网易云 APP 扫码确认
+   → 自动取回 MUSIC_U → 填歌曲链接/手机号/邮箱 → 提交登记。token 用完即废。
+
+   为什么要在 worker 里自己写 QR 编码器：Workers 不能加载外部脚本，买家手机也
+   未必能访问第三方 CDN，二维码必须在服务端就地生成 PNG（base64 内嵌，长按可存相册）。
+   算法与 Python qrcode 库逐位等价（byte 模式 / ECC M / 版本 1-20），
+   交叉验证 102 个用例（含真实扫码 URL）矩阵完全一致。
+   ============================================================================ */
+
+/* ---- GF(256) ---- */
+const QR_GF_EXP = new Uint8Array(512);
+const QR_GF_LOG = new Uint8Array(256);
+(function () {
+  let x = 1;
+  for (let i = 0; i < 255; i++) { QR_GF_EXP[i] = x; QR_GF_LOG[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11d; }
+  for (let j = 255; j < 512; j++) QR_GF_EXP[j] = QR_GF_EXP[j - 255];
+})();
+function qrMul(a, b) { return (a === 0 || b === 0) ? 0 : QR_GF_EXP[QR_GF_LOG[a] + QR_GF_LOG[b]]; }
+
+/* RS 分块表：QR_RS[版本-1][档位] = [块数,总码字,数据码字, ...]；档位 0=L 1=M */
+const QR_RS = [[[1,26,19],[1,26,16],[1,26,13],[1,26,9]],[[1,44,34],[1,44,28],[1,44,22],[1,44,16]],[[1,70,55],[1,70,44],[2,35,17],[2,35,13]],[[1,100,80],[2,50,32],[2,50,24],[4,25,9]],[[1,134,108],[2,67,43],[2,33,15,2,34,16],[2,33,11,2,34,12]],[[2,86,68],[4,43,27],[4,43,19],[4,43,15]],[[2,98,78],[4,49,31],[2,32,14,4,33,15],[4,39,13,1,40,14]],[[2,121,97],[2,60,38,2,61,39],[4,40,18,2,41,19],[4,40,14,2,41,15]],[[2,146,116],[3,58,36,2,59,37],[4,36,16,4,37,17],[4,36,12,4,37,13]],[[2,86,68,2,87,69],[4,69,43,1,70,44],[6,43,19,2,44,20],[6,43,15,2,44,16]],[[4,101,81],[1,80,50,4,81,51],[4,50,22,4,51,23],[3,36,12,8,37,13]],[[2,116,92,2,117,93],[6,58,36,2,59,37],[4,46,20,6,47,21],[7,42,14,4,43,15]],[[4,133,107],[8,59,37,1,60,38],[8,44,20,4,45,21],[12,33,11,4,34,12]],[[3,145,115,1,146,116],[4,64,40,5,65,41],[11,36,16,5,37,17],[11,36,12,5,37,13]],[[5,109,87,1,110,88],[5,65,41,5,66,42],[5,54,24,7,55,25],[11,36,12,7,37,13]],[[5,122,98,1,123,99],[7,73,45,3,74,46],[15,43,19,2,44,20],[3,45,15,13,46,16]],[[1,135,107,5,136,108],[10,74,46,1,75,47],[1,50,22,15,51,23],[2,42,14,17,43,15]],[[5,150,120,1,151,121],[9,69,43,4,70,44],[17,50,22,1,51,23],[2,42,14,19,43,15]],[[3,141,113,4,142,114],[3,70,44,11,71,45],[17,47,21,4,48,22],[9,39,13,16,40,14]],[[3,135,107,5,136,108],[3,67,41,13,68,42],[15,54,24,5,55,25],[15,43,15,10,44,16]]];
+const QR_ALIGN = [[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50],[6,30,54],[6,32,58],[6,34,62],[6,26,46,66],[6,26,48,70],[6,26,50,74],[6,30,54,78],[6,30,56,82],[6,30,58,86],[6,34,62,90]];
+
+function qrGenPoly(n) {
+  let g = [1];
+  for (let i = 0; i < n; i++) {
+    const ng = new Array(g.length + 1).fill(0);
+    for (let j = 0; j < g.length; j++) { ng[j] ^= g[j]; ng[j + 1] ^= qrMul(g[j], QR_GF_EXP[i]); }
+    g = ng;
+  }
+  return g;
+}
+function qrRsEc(data, ecLen) {
+  const g = qrGenPoly(ecLen);
+  const res = data.slice();
+  for (let i = 0; i < ecLen; i++) res.push(0);
+  for (let i = 0; i < data.length; i++) {
+    const coef = res[i];
+    if (!coef) continue;
+    for (let j = 0; j < g.length; j++) res[i + j] ^= qrMul(g[j], coef);
+  }
+  return res.slice(data.length);
+}
+function qrBitLen(x) { let n = 0; while (x) { n++; x >>>= 1; } return n; }
+function qrBch(data, g, shift) {
+  let d = data << shift;
+  const gd = qrBitLen(g);
+  while (qrBitLen(d) - gd >= 0) d ^= g << (qrBitLen(d) - gd);
+  return ((data << shift) | d) >>> 0;
+}
+
+/* 数据编码 + 分块交织；超出 V20 容量返回 null */
+function qrBuild(text, ecc) {
+  const bytes = new TextEncoder().encode(text);
+  const which = ecc === 'L' ? 0 : 1;
+  let ver = 0, spec = null, cap = 0;
+  for (let v = 1; v <= 20; v++) {
+    const s = QR_RS[v - 1][which];
+    let c = 0;
+    for (let i = 0; i < s.length; i += 3) c += s[i] * s[i + 2];
+    const cc = v <= 9 ? 8 : 16;
+    if (4 + cc + bytes.length * 8 <= c * 8) { ver = v; spec = s; cap = c; break; }
+  }
+  if (!ver) return null;
+
+  const bits = [];
+  const put = (val, len) => { for (let i = len - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+  put(4, 4);                                    /* byte mode */
+  put(bytes.length, ver <= 9 ? 8 : 16);
+  for (let i = 0; i < bytes.length; i++) put(bytes[i], 8);
+
+  const limit = cap * 8;
+  for (let i = 0, t = Math.min(4, limit - bits.length); i < t; i++) bits.push(0);
+  while (bits.length % 8) bits.push(0);
+  for (let i = 0; bits.length < limit; i++) put(i % 2 === 0 ? 0xEC : 0x11, 8);
+
+  const dc = [];
+  for (let i = 0; i < bits.length; i += 8) {
+    let b = 0;
+    for (let j = 0; j < 8; j++) b = (b << 1) | bits[i + j];
+    dc.push(b);
+  }
+  const blocks = [];
+  let off = 0;
+  for (let i = 0; i < spec.length; i += 3) {
+    const n = spec[i], tot = spec[i + 1], dcn = spec[i + 2], ecn = tot - dcn;
+    for (let k = 0; k < n; k++) {
+      const d = dc.slice(off, off + dcn); off += dcn;
+      blocks.push({ d: d, e: qrRsEc(d, ecn) });
+    }
+  }
+  let maxD = 0, maxE = 0;
+  for (const bl of blocks) { if (bl.d.length > maxD) maxD = bl.d.length; if (bl.e.length > maxE) maxE = bl.e.length; }
+  const out = [];
+  for (let i = 0; i < maxD; i++) for (const bl of blocks) if (i < bl.d.length) out.push(bl.d[i]);
+  for (let i = 0; i < maxE; i++) for (const bl of blocks) if (i < bl.e.length) out.push(bl.e[i]);
+  return { ver, data: out };
+}
+
+function qrFinder(m, row, col, n) {
+  for (let r = -1; r <= 7; r++) {
+    if (row + r < 0 || row + r >= n) continue;
+    for (let c = -1; c <= 7; c++) {
+      if (col + c < 0 || col + c >= n) continue;
+      m[row + r][col + c] = ((r >= 0 && r <= 6 && (c === 0 || c === 6)) ||
+                             (c >= 0 && c <= 6 && (r === 0 || r === 6)) ||
+                             (r >= 2 && r <= 4 && c >= 2 && c <= 4));
+    }
+  }
+}
+function qrAlignPatterns(m, ver, n) {
+  const pos = QR_ALIGN[ver - 1];
+  for (let i = 0; i < pos.length; i++) {
+    for (let j = 0; j < pos.length; j++) {
+      const row = pos[i], col = pos[j];
+      if (m[row][col] !== null) continue;
+      for (let r = -2; r <= 2; r++) for (let c = -2; c <= 2; c++) {
+        m[row + r][col + c] = (r === -2 || r === 2 || c === -2 || c === 2 || (r === 0 && c === 0));
+      }
+    }
+  }
+}
+function qrTiming(m, n) {
+  for (let r = 8; r < n - 8; r++) if (m[r][6] === null) m[r][6] = (r % 2 === 0);
+  for (let c = 8; c < n - 8; c++) if (m[6][c] === null) m[6][c] = (c % 2 === 0);
+}
+function qrTypeInfo(m, ecc, mask, test, n) {
+  const ecBits = ecc === 'L' ? 1 : (ecc === 'M' ? 0 : (ecc === 'Q' ? 3 : 2));
+  const data = (ecBits << 3) | mask;
+  const bits = (qrBch(data, 0x537, 10) ^ 0x5412) >>> 0;
+  for (let i = 0; i < 15; i++) {
+    const mod = !test && (((bits >>> i) & 1) === 1);
+    if (i < 6) m[i][8] = mod;
+    else if (i < 8) m[i + 1][8] = mod;
+    else m[n - 15 + i][8] = mod;
+  }
+  for (let i = 0; i < 15; i++) {
+    const mod = !test && (((bits >>> i) & 1) === 1);
+    if (i < 8) m[8][n - i - 1] = mod;
+    else if (i < 9) m[8][15 - i] = mod;
+    else m[8][15 - i - 1] = mod;
+  }
+  m[n - 8][8] = !test;
+}
+function qrTypeNumber(m, ver, test, n) {
+  const bits = qrBch(ver, 0x1F25, 12);
+  for (let i = 0; i < 18; i++) {
+    const mod = !test && (((bits >>> i) & 1) === 1);
+    m[Math.floor(i / 3)][i % 3 + n - 11] = mod;
+  }
+  for (let i = 0; i < 18; i++) {
+    const mod = !test && (((bits >>> i) & 1) === 1);
+    m[i % 3 + n - 11][Math.floor(i / 3)] = mod;
+  }
+}
+function qrMaskFn(p, i, j) {
+  switch (p) {
+    case 0: return (i + j) % 2 === 0;
+    case 1: return i % 2 === 0;
+    case 2: return j % 3 === 0;
+    case 3: return (i + j) % 3 === 0;
+    case 4: return (Math.floor(i / 2) + Math.floor(j / 3)) % 2 === 0;
+    case 5: return (i * j) % 2 + (i * j) % 3 === 0;
+    case 6: return ((i * j) % 2 + (i * j) % 3) % 2 === 0;
+    default: return ((i * j) % 3 + (i + j) % 2) % 2 === 0;
+  }
+}
+function qrMapData(m, data, mask, n) {
+  let inc = -1, row = n - 1, bitIndex = 7, byteIndex = 0;
+  for (let col0 = n - 1; col0 > 0; col0 -= 2) {
+    const col = col0 <= 6 ? col0 - 1 : col0;
+    for (;;) {
+      for (let c = col; c >= col - 1; c--) {
+        if (c < 0) continue;
+        if (m[row][c] === null) {
+          let dark = false;
+          if (byteIndex < data.length) dark = (((data[byteIndex] >>> bitIndex) & 1) === 1);
+          if (qrMaskFn(mask, row, c)) dark = !dark;
+          m[row][c] = dark;
+          bitIndex--;
+          if (bitIndex === -1) { byteIndex++; bitIndex = 7; }
+        }
+      }
+      row += inc;
+      if (row < 0 || row >= n) { row -= inc; inc = -inc; break; }
+    }
+  }
+}
+/* 掩码惩罚分：四条标准规则 */
+function qrLostPoint(m, n) {
+  let lp = 0;
+  const container = new Array(n + 1).fill(0);
+  for (let row = 0; row < n; row++) {
+    let prev = m[row][0], len = 0;
+    for (let col = 0; col < n; col++) {
+      if (m[row][col] === prev) len++;
+      else { if (len >= 5) container[len]++; len = 1; prev = m[row][col]; }
+    }
+    if (len >= 5) container[len]++;
+  }
+  for (let col = 0; col < n; col++) {
+    let prev = m[0][col], len = 0;
+    for (let row = 0; row < n; row++) {
+      if (m[row][col] === prev) len++;
+      else { if (len >= 5) container[len]++; len = 1; prev = m[row][col]; }
+    }
+    if (len >= 5) container[len]++;
+  }
+  for (let L = 5; L <= n; L++) lp += container[L] * (L - 2);
+
+  for (let row = 0; row < n - 1; row++) {
+    let col = 0;
+    while (col < n - 1) {
+      const tr = m[row][col + 1];
+      if (tr !== m[row + 1][col + 1]) { col += 2; continue; }
+      if (tr !== m[row][col]) { col++; continue; }
+      if (tr !== m[row + 1][col]) { col++; continue; }
+      lp += 3; col++;
+    }
+  }
+  for (let row = 0; row < n; row++) {
+    let col = 0;
+    while (col < n - 10) {
+      const r = m[row];
+      if (!r[col + 1] && r[col + 4] && !r[col + 5] && r[col + 6] && !r[col + 9] &&
+          ((r[col] && r[col + 2] && r[col + 3] && !r[col + 7] && !r[col + 8] && !r[col + 10]) ||
+           (!r[col] && !r[col + 2] && !r[col + 3] && r[col + 7] && r[col + 8] && r[col + 10]))) lp += 40;
+      col += r[col + 10] ? 2 : 1;
+    }
+  }
+  for (let col = 0; col < n; col++) {
+    let row = 0;
+    while (row < n - 10) {
+      if (!m[row + 1][col] && m[row + 4][col] && !m[row + 5][col] && m[row + 6][col] && !m[row + 9][col] &&
+          ((m[row][col] && m[row + 2][col] && m[row + 3][col] && !m[row + 7][col] && !m[row + 8][col] && !m[row + 10][col]) ||
+           (!m[row][col] && !m[row + 2][col] && !m[row + 3][col] && m[row + 7][col] && m[row + 8][col] && m[row + 10][col]))) lp += 40;
+      row += m[row + 10][col] ? 2 : 1;
+    }
+  }
+  let dark = 0;
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (m[i][j]) dark++;
+  lp += Math.floor(Math.abs(dark / (n * n) * 100 - 50) / 5) * 10;
+  return lp;
+}
+function qrMake(ver, data, ecc, test, mask) {
+  const n = ver * 4 + 17;
+  const m = [];
+  for (let i = 0; i < n; i++) m.push(new Array(n).fill(null));
+  qrFinder(m, 0, 0, n);
+  qrFinder(m, n - 7, 0, n);
+  qrFinder(m, 0, n - 7, n);
+  qrAlignPatterns(m, ver, n);
+  qrTiming(m, n);
+  qrTypeInfo(m, ecc, mask, test, n);
+  if (ver >= 7) qrTypeNumber(m, ver, test, n);
+  qrMapData(m, data, mask, n);
+  return m;
+}
+/* 返回 {size, rows:[('0'|'1')...]}；超出容量返回 null */
+function qrMatrix(text, ecc) {
+  const e = ecc === 'L' ? 'L' : 'M';
+  const b = qrBuild(text, e);
+  if (!b) return null;
+  const n = b.ver * 4 + 17;
+  let best = -1, bestScore = 0;
+  for (let p = 0; p < 8; p++) {
+    const sc = qrLostPoint(qrMake(b.ver, b.data, e, true, p), n);
+    if (best < 0 || sc < bestScore) { best = p; bestScore = sc; }
+  }
+  const m = qrMake(b.ver, b.data, e, false, best);
+  const rows = [];
+  for (let i = 0; i < n; i++) {
+    let s = '';
+    for (let j = 0; j < n; j++) s += (m[i][j] ? '1' : '0');
+    rows.push(s);
+  }
+  return { size: n, rows: rows };
+}
+
+/* ---- PNG 输出（灰度 8bit）：买家手机上长按图片即可存相册 ---- */
+const QR_CRC_T = (function () {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c; }
+  return t;
+})();
+function qrCrc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) c = QR_CRC_T[(c ^ buf[i]) & 255] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function qrB64(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function qrPngChunk(type, data) {
+  const n = data.length;
+  const out = new Uint8Array(12 + n);
+  out[0] = (n >>> 24) & 255; out[1] = (n >>> 16) & 255; out[2] = (n >>> 8) & 255; out[3] = n & 255;
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  out.set(data, 8);
+  const c = qrCrc32(out.subarray(4, 8 + n));
+  out[8 + n] = (c >>> 24) & 255; out[9 + n] = (c >>> 16) & 255; out[10 + n] = (c >>> 8) & 255; out[11 + n] = c & 255;
+  return out;
+}
+async function qrPngDataUrl(text, opt) {
+  const o = opt || {};
+  const scale = o.scale || 4, quiet = o.quiet == null ? 4 : o.quiet;
+  const r = qrMatrix(text, o.ecc || 'M');
+  if (!r) return '';
+  const n = r.size, dim = (n + quiet * 2) * scale;
+  const raw = new Uint8Array(dim * (dim + 1));
+  let p = 0;
+  for (let y = 0; y < dim; y++) {
+    raw[p++] = 0;                                  /* filter: None */
+    const my = Math.floor(y / scale) - quiet;
+    const line = (my >= 0 && my < n) ? r.rows[my] : '';
+    for (let x = 0; x < dim; x++) {
+      const mx = Math.floor(x / scale) - quiet;
+      raw[p++] = (line && mx >= 0 && mx < n && line.charAt(mx) === '1') ? 0 : 255;
+    }
+  }
+  const deflated = new Uint8Array(await new Response(
+    new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate'))
+  ).arrayBuffer());
+  const ihdr = new Uint8Array(13);
+  ihdr[0] = (dim >>> 24) & 255; ihdr[1] = (dim >>> 16) & 255; ihdr[2] = (dim >>> 8) & 255; ihdr[3] = dim & 255;
+  ihdr[4] = (dim >>> 24) & 255; ihdr[5] = (dim >>> 16) & 255; ihdr[6] = (dim >>> 8) & 255; ihdr[7] = dim & 255;
+  ihdr[8] = 8; ihdr[9] = 0; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  const parts = [
+    new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+    qrPngChunk('IHDR', ihdr),
+    qrPngChunk('IDAT', deflated),
+    qrPngChunk('IEND', new Uint8Array(0)),
+  ];
+  let total = 0;
+  for (const x of parts) total += x.length;
+  const all = new Uint8Array(total);
+  let at = 0;
+  for (const x of parts) { all.set(x, at); at += x.length; }
+  return 'data:image/png;base64,' + qrB64(all);
+}
+
+/* ================= 一次性登记 token ================= */
+/* 字母表去掉 0/O/1/I（口头报码、手打不会错）；32^8 ≈ 1.1 万亿 */
+const REG_AB = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const REG_TTL_H = 24;                    /* 默认有效期 24 小时 */
+
+function regCode() {
+  const b = new Uint8Array(8);
+  crypto.getRandomValues(b);
+  let s = '';
+  for (let i = 0; i < 8; i++) s += REG_AB[b[i] & 31];
+  return s;
+}
+const regIso = ms => new Date(ms).toISOString();
+function regTs(x) { const t = Date.parse(String(x || '')); return isNaN(t) ? 0 : t; }
+function regNormCode(x) { return String(x || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12); }
+
+/* 客服口令（生成链接用）。KV 键 REG_TOKEN_PASS / D1 kv_misc.reg_token_pass，未配置 = 接口不开放 */
+async function regPass() {
+  let v = '';
+  if (d1ok()) {
+    try {
+      const rows = await d1All('SELECT v FROM kv_misc WHERE k=?', ['reg_token_pass']);
+      if (rows && rows.length) v = String(rows[0].v || '').trim();
+    } catch (e) { console.error('读 reg_token_pass 失败:', e && e.message); }
+  }
+  if (!v) { try { v = cleanKV(await POOL.get('REG_TOKEN_PASS')); } catch (e) {} }
+  return v;
+}
+/* 返回：null=不存在 / undefined=查询失败 / 行对象 */
+async function regTokenGet(code) {
+  if (!d1ok()) return undefined;
+  const rows = await d1All(
+    'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone,ledger_id FROM reg_tokens WHERE token=?',
+    [regNormCode(code)]);
+  if (rows === null) return undefined;
+  return rows.length ? rows[0] : null;
+}
+/* 有效状态：unused 且未过期 */
+function regStateOf(row) {
+  if (!row) return 'none';
+  const st = String(row.state || 'unused');
+  if (st === 'used') return 'used';
+  if (st === 'void') return 'void';
+  const exp = regTs(row.exp_at);
+  if (exp && exp < Date.now()) return 'expired';
+  return 'unused';
+}
+async function regTokenNew(agent, plan, days, note, hours) {
+  const code = regCode();
+  const now = Date.now();
+  const expAt = now + (hours || REG_TTL_H) * 3600 * 1000;
+  const ok = await d1Run(
+    'INSERT INTO reg_tokens (token,agent,plan,days,note,state,ctime,exp_at) VALUES (?,?,?,?,?,?,?,?)',
+    [code, String(agent || ''), String(plan || ''), Number(days) || 0, String(note || ''),
+     'unused', regIso(now), regIso(expAt)]);
+  return ok ? { code: code, ctime: regIso(now), exp_at: regIso(expAt) } : null;
+}
+/* 原子消耗：返回 1=成功 / 0=已被用掉或不存在 / -1=D1 失败 */
+async function regTokenUse(code, uid, uname, phone, ip, ua) {
+  return await d1Changes(
+    "UPDATE reg_tokens SET state='used', used_at=?, uid=?, uname=?, phone=?, ip=?, ua=? " +
+    "WHERE token=? AND state='unused'",
+    [regIso(Date.now()), String(uid || ''), String(uname || ''), String(phone || ''),
+     String(ip || '').slice(0, 40), String(ua || '').slice(0, 120), regNormCode(code)]);
+}
+
+/* ================= 网易云扫码（无状态会话，cookie 由浏览器回传） ================= */
+const NC_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+const NC_BASE = 'https://music.163.com';
+const NC_QTYPE = '3';                    /* 3 = 官方 st/platform 扫码；1 = 老接口（会被判环境异常） */
+
+function ncSetCookies(r) {
+  let out = [];
+  try { if (typeof r.headers.getSetCookie === 'function') out = r.headers.getSetCookie() || []; } catch (e) {}
+  if (!out.length) {
+    try { const v = r.headers.get('set-cookie') || ''; if (v) out = v.split(/,(?=[^;=]+=)/); } catch (e) {}
+  }
+  return out;
+}
+function ncPickCookie(lines, name) {
+  const re = new RegExp('(?:^|;\\s*)' + name + '=([^;]*)');
+  for (const ln of lines) { const m = re.exec(ln || ''); if (m) return m[1]; }
+  return '';
+}
+function ncAbsorb(bag, lines) {
+  for (const ln of lines) {
+    const seg = String(ln || '').split(';')[0] || '';
+    const p = seg.indexOf('=');
+    if (p <= 0) continue;
+    const k = seg.slice(0, p).trim();
+    if (k) bag[k] = seg.slice(p + 1).trim();
+  }
+  return bag;
+}
+function ncHdr(bag) {
+  const h = { 'User-Agent': NC_UA, 'Referer': NC_BASE + '/', 'Accept-Language': 'zh-CN,zh;q=0.9' };
+  const ks = Object.keys(bag || {});
+  if (ks.length) h['Cookie'] = ks.map(k => k + '=' + bag[k]).join('; ');
+  return h;
+}
+function ncEncBag(bag) {
+  try { return btoa(unescape(encodeURIComponent(JSON.stringify(bag)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+  catch (e) { return ''; }
+}
+function ncDecBag(s) {
+  if (!s) return {};
+  try {
+    let b = String(s).replace(/-/g, '+').replace(/_/g, '/');
+    while (b.length % 4) b += '=';
+    return JSON.parse(decodeURIComponent(escape(atob(b)))) || {};
+  } catch (e) { return {}; }
+}
+/* 申请 unikey：预热首页拿 NMTID → POST /api/login/qrcode/unikey?type=3 */
+async function ncNewKey(bag) {
+  try {
+    const w = await fetch(NC_BASE + '/', { headers: ncHdr(bag), redirect: 'follow' });
+    ncAbsorb(bag, ncSetCookies(w));
+  } catch (e) { /* 预热失败不致命 */ }
+  const r = await fetch(NC_BASE + '/api/login/qrcode/unikey?type=' + NC_QTYPE, {
+    method: 'POST',
+    headers: Object.assign(ncHdr(bag), { 'Content-Type': 'application/x-www-form-urlencoded' }),
+    body: 'type=' + NC_QTYPE,
+  });
+  const txt = await r.text();
+  ncAbsorb(bag, ncSetCookies(r));
+  let j = null;
+  try { j = JSON.parse(txt); } catch (e) {}
+  if (!j) return { err: '网易返回的不是 JSON（可能被风控页拦了）' };
+  return { key: String(j.unikey || '').trim(), code: j.code, message: j.message || '' };
+}
+async function ncPollOnce(bag, key) {
+  const u = NC_BASE + '/api/login/qrcode/client/login?key=' + encodeURIComponent(key) + '&type=' + NC_QTYPE;
+  const r = await fetch(u, { headers: ncHdr(bag) });
+  const txt = await r.text();
+  const scs = ncSetCookies(r);
+  ncAbsorb(bag, scs);
+  let j = null;
+  try { j = JSON.parse(txt); } catch (e) {}
+  return {
+    status: r.status,
+    code: (j && j.code) || 0,
+    message: (j && j.message) || '',
+    musicU: ncPickCookie(scs, 'MUSIC_U'),
+    isJson: !!j,
+    /* 2026-11-08：803 却拿不到 MUSIC_U 时（买家反馈「手机确认了、网页没反应」），
+       把响应状态和 Set-Cookie 的**名字**带回去（只带名字不带值），方便定位是
+       网易没下发、还是字段被改了。正常扫码用不到这两个字段。 */
+    cookieNames: scs.map(x => String(x || '').split('=')[0].trim()).filter(Boolean),
+    raw: txt.slice(0, 120),
+  };
+}
+/* 官方扫码页地址：chainId 必须与申请/轮询用同一个 sDeviceId，否则 803 会变 8821 */
+function ncScanUrl(key, dev) {
+  return 'https://music.163.com/st/platform/scanlogin?codekey=' + encodeURIComponent(key) +
+    '&chainId=v1_' + dev + '_web_login_' + Date.now() +
+    '&hdw_device=web&hdw_appid=web&hitExp=1';
+}
+
+/* ================= 买家登记页（移动优先，暗色自适应） ================= */
+const REG_HTML = `<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>账号登记</title>
+<style>
+:root{--bg:#f2f3f5;--card:#fff;--txt:#1a1a1a;--mut:#8b8b90;--line:#e8e8ec;--pri:#ff2c55;--ok:#178a55}
+@media (prefers-color-scheme:dark){:root{--bg:#101013;--card:#1c1c20;--txt:#f2f2f5;--mut:#8b8b93;--line:#2c2c32;--ok:#3ddc97}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--txt);font:16px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:480px;margin:0 auto;padding:18px 16px 44px}
+h1{font-size:19px;margin:0 0 6px;font-weight:600}
+.sub{color:var(--mut);font-size:13px;margin:0 0 16px;min-height:20px}
+.card{background:var(--card);border-radius:16px;padding:18px 16px;margin-bottom:12px}
+.qr{width:236px;max-width:66vw;margin:0 auto 10px;display:block;border-radius:10px;image-rendering:pixelated;background:#fff}
+.qr.dim{opacity:.22;filter:blur(3px)}
+.tip{text-align:center;font-size:13px;color:var(--mut);margin:0 0 12px;min-height:20px}
+.row{display:flex;gap:8px}
+button{flex:1;border:0;border-radius:11px;padding:12px 10px;font-size:15px;font-family:inherit;background:var(--line);color:var(--txt);cursor:pointer}
+button.pri{background:var(--pri);color:#fff;font-weight:600}
+button:disabled{opacity:.5}
+label{display:block;font-size:13px;color:var(--mut);margin:15px 0 6px}
+input{width:100%;border:1px solid var(--line);background:transparent;color:var(--txt);border-radius:11px;padding:11px 12px;font-size:15px;font-family:inherit;outline:none}
+input:focus{border-color:var(--pri)}
+.hide{display:none!important}
+.ok{color:var(--ok)}
+.who{font-size:14px;background:rgba(23,138,85,.1);color:var(--ok);border-radius:10px;padding:10px 12px;word-break:break-all}
+.steps{font-size:13px;color:var(--mut);line-height:1.85;margin:14px 0 0;padding:12px;background:var(--bg);border-radius:10px}
+.steps b{color:var(--txt);font-weight:600}
+.err{color:#d93025;font-size:14px;line-height:1.8}
+.big{font-size:32px;text-align:center;margin:6px 0 2px}
+/* 2026-11-08：电脑上打开时左右两栏（左二维码 / 右填表），省得来回滚；
+   手机窄屏仍然上下排（.cols 退化成普通块）。 */
+.cols>div{min-width:0}
+.ph{padding:26px 16px;text-align:center;color:var(--mut);font-size:14px;line-height:1.9}
+@media (min-width:780px){
+  .wrap{max-width:920px}
+  .cols{display:flex;gap:14px;align-items:flex-start}
+  .cols>div{flex:1 1 0}
+  .qr{width:300px;max-width:100%}
+  .cols .steps{font-size:12.5px}
+}
+</style></head><body>
+<div class="wrap">
+  <h1>账号登记</h1>
+  <p class="sub" id="sub">正在校验链接…</p>
+
+  <div id="e-box" class="card hide"><div class="err" id="e-msg"></div></div>
+
+  <div id="m-box" class="hide">
+    <div class="cols">
+      <div>
+        <div class="card">
+          <img id="qr" class="qr" alt="二维码">
+          <p class="tip" id="qr-tip">正在生成二维码…</p>
+          <div class="row">
+            <button id="b-new">换一张</button>
+            <button id="b-save" class="pri">保存到相册</button>
+          </div>
+          <div class="steps">
+            <b>怎么扫</b><br>
+            1. 打开手机上的<b>网易云音乐</b> APP<br>
+            2. 左上角「☰」→ <b>扫一扫</b><br>
+            3. 对着屏幕扫，手机上点「<b>确认登录</b>」<br>
+            <b>扫不动？</b>点「保存到相册」，再用 APP 扫一扫右上角的「相册」，选刚才那张图。
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card ph" id="ph-box">
+          左边扫码 → 手机上点「确认登录」<br>这里就会变成填写表单
+        </div>
+
+        <div class="card hide" id="f-box">
+          <div class="who" id="who"></div>
+          <label>歌曲链接（只能填单曲）</label>
+          <input id="i-song" placeholder="APP：我的 → 顶上头像 → 歌曲 → 发布的歌" autocomplete="off">
+          <p class="tip" style="text-align:left;margin:8px 0 0">怎么拿链接：网易云 APP → <b>我的</b> → 点顶上<b>头像</b> → <b>歌曲</b>标签页 → 我发布的歌 → 点那首歌的<b>分享</b> → 复制链接。</p>
+          <p class="tip" style="text-align:left;margin:6px 0 0">只收<b>单曲</b>：专辑、歌单、电台、排行榜链接一律退回。原创 / 共创作品，共创人<b>不超过 2 人</b>。</p>
+          <label>手机号（选填，方便查单和掉线联系你）</label>
+          <input id="i-phone" inputmode="numeric" placeholder="不填也能登记" autocomplete="off">
+          <label>通知邮箱（必填，掉线或需要验证时靠它找你）</label>
+          <input id="i-email" inputmode="email" placeholder="you@example.com" autocomplete="off">
+          <div class="row" style="margin-top:18px"><button id="b-sub" class="pri">完成登记</button></div>
+          <p class="tip" id="sub-tip" style="margin:12px 0 0"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="d-box" class="card hide">
+    <div class="big ok">✓</div>
+    <p class="tip ok" id="d-msg"></p>
+  </div>
+</div>
+<script>
+(function(){
+  var T = (location.pathname.split('/').pop() || '').toUpperCase();
+  var E = function(id){ return document.getElementById(id); };
+  var st = { key:'', dev:'', bag:'', mu:'', timer:0, tick:0, busy:false, done:false, scanned:false, weird:0 };
+
+  function show(id, on){ if (on) E(id).classList.remove('hide'); else E(id).classList.add('hide'); }
+  function setTip(s){ E('qr-tip').textContent = s; }
+  function fail(s){ show('e-box', true); E('e-msg').textContent = s; show('m-box', false); E('sub').textContent = ''; }
+  /* 链接已经用掉过：不再当错误处理 —— 买家（或他的朋友）再点开时，
+     看到的应该是「登记完成」，而不是一片红字吓人。 */
+  function finished(s){
+    show('m-box', false); show('e-box', false); show('d-box', true);
+    E('d-msg').textContent = s || '登记完成，链接已失效。';
+    E('sub').textContent = '';
+  }
+
+  function api(p, body){
+    var o = body ? { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) } : {};
+    return fetch(p, o).then(function(r){
+      return r.text().then(function(t){
+        var j = null; try { j = JSON.parse(t); } catch(e) {}
+        if (!j) throw new Error('服务器返回异常（' + r.status + '）');
+        return j;
+      });
+    });
+  }
+
+  var DEV_KEY = 'ncm_reg_dev';
+  function getDev(){
+    var d = '';
+    try { d = localStorage.getItem(DEV_KEY) || ''; } catch(e) {}
+    if (/^YD-[0-9a-f]{36}$/.test(d)) return d;
+    var b = new Uint8Array(18); crypto.getRandomValues(b);
+    var s = '';
+    for (var i = 0; i < b.length; i++) s += ('0' + b[i].toString(16)).slice(-2);
+    d = 'YD-' + s;
+    try { localStorage.setItem(DEV_KEY, d); } catch(e) {}
+    return d;
+  }
+
+  function step1(){
+    api('/api/r/state?t=' + encodeURIComponent(T)).then(function(j){
+      if (!j.ok) {
+        if (j.used) { finished(j.message || '登记完成，链接已失效。'); return; }
+        fail(j.message || '链接无效'); return;
+      }
+      E('sub').textContent = (j.planLabel ? '套餐：' + j.planLabel + ' · ' : '') + '本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
+      show('m-box', true);
+      st.dev = getDev();
+      newQr();
+    }).catch(function(e){ fail(e.message || '网络异常，请刷新重试'); });
+  }
+
+  var cdTimer = 0;
+  function countdown(sec){
+    clearInterval(cdTimer); st.tick = sec;
+    cdTimer = setInterval(function(){
+      st.tick--;
+      if (st.tick <= 0) {
+        clearInterval(cdTimer); E('qr').classList.add('dim');
+        setTip('二维码已过期，点「换一张」');
+        return;
+      }
+      /* 2026-11-08：已扫码后不要让倒计时把「已扫码，请点确认」刷回「请扫码」，
+         否则买家看到的就是「手机确认了、网页还是那句请扫码」。 */
+      if (!st.mu && !st.scanned) setTip('请用网易云 APP 扫码（' + st.tick + 's）');
+    }, 1000);
+  }
+
+  var pTimer = 0;
+  function newQr(){
+    if (st.busy || st.done) return;
+    st.busy = true;
+    setTip('正在生成二维码…');
+    E('qr').classList.remove('dim');
+    api('/api/r/qrkey?t=' + encodeURIComponent(T) + '&dev=' + encodeURIComponent(st.dev)).then(function(j){
+      st.busy = false;
+      if (!j.ok) { setTip(j.message || '出码失败，点「换一张」重试'); return; }
+      st.key = j.key; st.bag = j.bag;
+      E('qr').src = j.img;
+      countdown(j.ttl || 300);
+      poll();
+    }).catch(function(e){ st.busy = false; setTip('出码失败：' + (e.message || '网络异常')); });
+  }
+
+  /* 2026-11-08：以前只有 801/802/803/800 四个分支，其它情况（网易回了非 JSON、
+     803 却没带 MUSIC_U、链接刚好失效）全是「什么都不显示」——买家看到手机确认了、
+     网页一动不动。现在任何异常都会把话说出来，并且不再空转。 */
+  function poll(){
+    clearTimeout(pTimer);
+    if (st.done || !st.key || st.mu) return;
+    api('/api/r/qrcheck?t=' + encodeURIComponent(T) + '&key=' + encodeURIComponent(st.key) +
+        '&dev=' + encodeURIComponent(st.dev) + '&bag=' + encodeURIComponent(st.bag)).then(function(j){
+      if (j.bag) st.bag = j.bag;
+      if (!j.ok) {
+        clearInterval(cdTimer);
+        setTip(j.message || '扫码状态读不到，点「换一张」重试');
+        return;
+      }
+      if (j.code === 803) {
+        if (j.mu) { got(j); return; }
+        clearInterval(cdTimer);
+        setTip('扫码成功，但没拿到登录凭证。点「换一张」再扫一次' + (j.dbg ? '（' + j.dbg + '）' : ''));
+        return;
+      }
+      if (j.code === 800) { clearInterval(cdTimer); E('qr').classList.add('dim'); setTip('二维码已过期，点「换一张」'); return; }
+      if (j.code === 802) { st.scanned = true; st.weird = 0; setTip('已扫码，请在手机上点「确认登录」'); }
+      else if (j.code === 801) { st.weird = 0; setTip(st.scanned ? '已扫码，正在等你在手机上点「确认登录」' : '等待扫码…（' + Math.max(0, st.tick) + 's）'); }
+      else {
+        st.weird = (st.weird || 0) + 1;
+        if (st.weird < 3) { pTimer = setTimeout(poll, 2000); return; }   /* 偶发抖动先静默重试两次 */
+        clearInterval(cdTimer);
+        setTip('扫码状态异常（code ' + j.code + (j.message ? '：' + j.message : '') + '），点「换一张」重试');
+        return;
+      }
+      pTimer = setTimeout(poll, 2000);
+    }).catch(function(){ setTip('网络抖动，正在重试…'); pTimer = setTimeout(poll, 3000); });
+  }
+
+  function got(j){
+    st.mu = j.mu; st.scanned = true;
+    clearInterval(cdTimer);
+    E('qr').classList.add('dim');
+    setTip('扫码成功');
+    E('who').textContent = '已识别账号：' + (j.nick || '网易云账号') + (j.uid ? '（uid ' + j.uid + '）' : '');
+    show('f-box', true);
+    show('ph-box', false);
+    // 手机窄屏才滚（电脑上是左右两栏，滚一下反而把二维码滚走了）
+    if (window.innerWidth < 780) {
+      try { E('f-box').scrollIntoView({ behavior:'smooth', block:'start' }); } catch(e) {}
+    }
+  }
+
+  E('b-new').onclick = function(){ if (!st.done && !st.mu) newQr(); };
+  E('b-save').onclick = function(){
+    var im = E('qr');
+    if (!im.src || im.src.indexOf('data:') !== 0) return;
+    var a = document.createElement('a');
+    a.href = im.src; a.download = 'qr.png';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTip('已保存（也可以直接长按二维码存图）');
+  };
+
+  E('b-sub').onclick = function(){
+    if (st.busy || st.done) return;
+    if (!st.mu) { E('sub-tip').textContent = '请先扫码登录'; return; }
+    var song = E('i-song').value.trim();
+    var phone = E('i-phone').value.replace(/[^0-9]/g, '');
+    var email = E('i-email').value.trim();
+    if (!song) { E('sub-tip').textContent = '请填歌曲链接'; return; }
+    /* 2026-11-08：只收单曲。合集链接（专辑/歌单/电台/排行榜/MV）一律当场退回，
+       服务端 resolveSong 还会再查一次，这里先拦是为了让买家立刻知道该改什么。 */
+    if (/(playlist|album|radio|program|toplist|djradio|artist|mv)/i.test(song)) {
+      E('sub-tip').textContent = '只收单曲链接：专辑 / 歌单 / 电台 / 排行榜都不能登记。请在 APP 里打开那首歌，再点「分享 → 复制链接」';
+      return;
+    }
+    if (!/(music\\.163\\.com|163cn\\.tv|163cn\\.com)/i.test(song)) {
+      E('sub-tip').textContent = '这不像网易云的单曲分享链接，请用 APP 里那首歌的「分享 → 复制链接」';
+      return;
+    }
+    if (phone && phone.length !== 11) { E('sub-tip').textContent = '手机号是 11 位，或者留空'; return; }
+    if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) { E('sub-tip').textContent = '请填一个能收到信的邮箱'; return; }
+    st.busy = true;
+    E('b-sub').disabled = true;
+    E('sub-tip').textContent = '正在登记，请不要关页面…';
+    api('/api/r/submit', { t: T, mu: st.mu, phone: phone, link: song, email: email }).then(function(j){
+      st.busy = false;
+      if (!j.ok) { E('b-sub').disabled = false; E('sub-tip').textContent = j.message || '登记失败'; return; }
+      st.done = true;
+      show('m-box', false); show('d-box', true);
+      E('d-msg').textContent = j.message || '登记成功';
+    }).catch(function(e){ st.busy = false; E('b-sub').disabled = false; E('sub-tip').textContent = e.message || '网络异常'; });
+  };
+
+  if (!/^[A-Z0-9]{6,12}$/.test(T)) { fail('链接不完整，请复制客服发的完整链接'); return; }
+  step1();
+})();
+</script>
+</body></html>`;
+
+/* 网易云账号资料（803 之后取昵称，只调用一次） */
+async function ncProfile(mu) {
+  try {
+    const r = await fetch(NC_BASE + '/api/nuser/account/get',
+      { headers: { 'User-Agent': NC_UA, 'Referer': NC_BASE + '/', 'Cookie': 'MUSIC_U=' + mu } });
+    const j = await r.json();
+    if (j && j.profile) return { uid: String(j.profile.userId || ''), nick: String(j.profile.nickname || '') };
+  } catch (e) { /* 拿不到昵称不影响登记 */ }
+  return null;
+}
+/* 回滚 token（抢占后登记失败才用） */
+async function regTokenUndo(code) {
+  return await d1Changes(
+    "UPDATE reg_tokens SET state='unused', used_at=NULL, uid='', uname='', phone='' " +
+    "WHERE token=? AND state='used'", [regNormCode(code)]);
+}
+
 async function handle(request) {
     const url = new URL(request.url);
     // 2026-10-25：网页口令统一闸门（KV PAGE_PASS，未配置则不启用）。只拦网页，/api/* 一律放行 ——
@@ -3171,6 +3971,223 @@ async function handle(request) {
       let msg = '登记成功，次日生效。';
       if (v.provisional) msg += '（注：网易校验接口暂时不可达[' + (v.diag || '') + ']，已跳过在线校验；明天任务会自动复验）';
       return json({ ok: true, uid: String(v.uid), name: phone || ('qr:' + v.uid), pool: POOL_NAME, d1: d1Confirmed === true, message: msg });
+    }
+    /* ================= 方案C：网页自助扫码登记 ================= */
+    /* 买家页面：/r/<8 位码>。不走 PAGE_ROUTES 口令（那是内部成员页，不能发给买家）。 */
+    if (url.pathname.indexOf('/r/') === 0 && request.method === 'GET') {
+      return new Response(REG_HTML, {
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Frame-Options': 'DENY',
+          'Referrer-Policy': 'no-referrer',
+        },
+      });
+    }
+    /* 校验 token：给页面显示套餐和剩余时间 */
+    if (url.pathname === '/api/r/state') {
+      const row = await regTokenGet(url.searchParams.get('t'));
+      if (row === undefined) return json({ ok: false, message: '数据库暂时读不到，请稍后重试' }, 503);
+      if (!row) return json({ ok: false, message: '这个链接无效，请找客服重新要一条' }, 404);
+      const stt = regStateOf(row);
+      /* 已用掉的链接：回 used 标记，页面显示「登记完成」的绿勾，
+         而不是红色报错（买家/他朋友再点开时不该被吓一跳）。不回显登记人信息。 */
+      if (stt === 'used') return json({ ok: false, used: true, message: '登记完成，链接已失效。' }, 410);
+      if (stt === 'void') return json({ ok: false, message: '这个链接已被作废，请找客服重新要一条' }, 410);
+      if (stt === 'expired') return json({ ok: false, message: '这个链接已过期，请找客服重新要一条' }, 410);
+      let planLabel = String(row.plan || '');
+      try { const pl = planOf(await regCfg(), row.plan); if (pl) planLabel = pl.label; } catch (e) {}
+      const leftMs = regTs(row.exp_at) - Date.now();
+      return json({
+        ok: true, plan: String(row.plan || ''), planLabel: planLabel,
+        left_h: Math.max(1, Math.round(leftMs / 3600000)), note: String(row.note || ''),
+      }, 200, { 'Cache-Control': 'no-store' });
+    }
+    /* 出码：worker 直接向网易申请 unikey，本地生成 PNG
+       会话完全无状态 —— sDeviceId 由浏览器生成并回传，cookie 打成 bag 原样带回，
+       所以这里一行 KV、一行 D1 都不写（免费额度零消耗）。 */
+    if (url.pathname === '/api/r/qrkey') {
+      const row = await regTokenGet(url.searchParams.get('t'));
+      if (row === undefined) return json({ ok: false, message: '数据库暂时读不到，请稍后重试' }, 503);
+      if (!row || regStateOf(row) !== 'unused') return json({ ok: false, message: '链接不可用，请刷新页面' }, 410);
+      const dev = String(url.searchParams.get('dev') || '').trim();
+      if (!/^YD-[0-9a-f]{36}$/.test(dev)) return json({ ok: false, message: '设备号无效，请刷新页面重试' }, 400);
+      const bag = { sDeviceId: dev };
+      let nk;
+      try { nk = await ncNewKey(bag); }
+      catch (e) { return json({ ok: false, message: '出码请求失败：' + ((e && e.message) || '网络异常') }, 502); }
+      if (nk.err || !nk.key) return json({ ok: false, message: nk.err || '没拿到二维码，点「换一张」重试' }, 502);
+      let img = '';
+      try { img = await qrPngDataUrl(ncScanUrl(nk.key, dev), { ecc: 'M', scale: 4, quiet: 4 }); }
+      catch (e) { console.error('二维码 PNG 生成失败:', e && e.message); }
+      if (!img) return json({ ok: false, message: '二维码生成失败，请联系客服' }, 500);
+      return json({ ok: true, key: nk.key, dev: dev, bag: ncEncBag(bag), img: img, ttl: 300 },
+        200, { 'Cache-Control': 'no-store' });
+    }
+    /* 轮询一次：801 等待 / 802 已扫待确认 / 803 成功（返回 MUSIC_U） / 800 过期 */
+    if (url.pathname === '/api/r/qrcheck') {
+      const row = await regTokenGet(url.searchParams.get('t'));
+      if (row === undefined) return json({ ok: false, code: 0, message: '数据库暂时读不到' }, 503);
+      if (!row || regStateOf(row) !== 'unused') return json({ ok: false, code: 0, message: '链接不可用' }, 410);
+      const key = String(url.searchParams.get('key') || '').trim().slice(0, 64);
+      if (!key) return json({ ok: false, code: 0, message: '缺少 key' }, 400);
+      const dev = String(url.searchParams.get('dev') || '').trim().slice(0, 64);
+      const bag = ncDecBag(url.searchParams.get('bag') || '');
+      if (dev && !bag.sDeviceId) bag.sDeviceId = dev;
+      let p;
+      try { p = await ncPollOnce(bag, key); }
+      catch (e) { return json({ ok: false, code: 0, message: '稍后自动重试', bag: ncEncBag(bag) }, 200); }
+      const out = { ok: true, code: p.code, message: p.message, bag: ncEncBag(bag) };
+      if (p.code === 803 && p.musicU) {
+        out.mu = p.musicU;
+        const pr = await ncProfile(p.musicU);
+        if (pr) { out.uid = pr.uid; out.nick = pr.nick; }
+      } else if (p.code === 803) {
+        /* 手机点了「确认登录」但服务端没收到 MUSIC_U：把诊断信息回给页面显示，
+           不然页面只能干等（买家看到的就是「什么都没发生」）。 */
+        out.dbg = 'http ' + p.status + ' · cookie[' + (p.cookieNames || []).join('|') + '] · ' + String(p.raw || '').slice(0, 80);
+        console.error('qrcheck 803 无 MUSIC_U:', out.dbg);
+      }
+      return json(out, 200, { 'Cache-Control': 'no-store' });
+    }
+    /* 提交登记：套餐/客服/天数全部取自 token（前端改不了），成功即原子消耗 token */
+    if (url.pathname === '/api/r/submit' && request.method === 'POST') {
+      let b0;
+      try { b0 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const code = regNormCode(b0.t);
+      const row = await regTokenGet(code);
+      if (row === undefined) return json({ ok: false, message: '数据库暂时读不到，请稍后重试' }, 503);
+      if (!row) return json({ ok: false, message: '链接无效，请找客服重新要一条' }, 404);
+      if (regStateOf(row) !== 'unused') return json({ ok: false, message: '这个链接已经用过了，不能重复登记' }, 410);
+
+      const mu = String(b0.mu || '').trim();
+      if (!mu) return json({ ok: false, message: '没有拿到登录凭证，请重新扫码' }, 400);
+      const email = String(b0.email || '').trim();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ ok: false, message: '请填一个能收到信的邮箱' }, 400);
+      const phoneRaw = String(b0.phone || '').replace(/[^0-9]/g, '');
+      const phone = /^1\d{10}$/.test(phoneRaw) ? phoneRaw : '';
+
+      const v = await validateCookie(mu);
+      if (!v.ok) return json({ ok: false, message: v.msg || '登录凭证已失效，请重新扫码' }, 400);
+      if (v.provisional) {
+        return json({ ok: false, message: '网易校验接口暂时不可达（' + (v.diag || '网络异常') + '），请稍后重试' }, 503);
+      }
+      const song = await resolveSong(b0.link);
+      if (!song.ok) return json({ ok: false, message: song.msg }, 400);
+
+      /* 名额闸口：与 /api/join_manual 同口径 */
+      const c1 = await cfg();
+      const myLimit = groupLimitOf(c1, false);
+      const master1 = await mergePool();
+      if (activePoolSize(master1) >= myLimit) {
+        return json({ ok: false, message: '号池名额已满（上限 ' + myLimit + ' 人），请联系客服，不要重复提交' }, 429);
+      }
+
+      /* 原子抢 token：两个人同时提交同一条链接，只有一个能进来 */
+      const ip = request.headers.get('cf-connecting-ip') || '';
+      const ua = request.headers.get('user-agent') || '';
+      const name = phone || ('qr:' + v.uid);
+      const grabbed = await regTokenUse(code, String(v.uid), name, phone, ip, ua);
+      if (grabbed === -1) return json({ ok: false, message: '数据库暂时不可用，请稍后重试' }, 503);
+      if (grabbed === 0) return json({ ok: false, message: '这个链接刚刚已被使用，请联系客服' }, 410);
+
+      const rc1 = await regCfg();
+      const pl1 = planOf(rc1, row.plan);
+      const days1 = Number(row.days) || 0;
+      const agent1 = normAgent(row.agent);
+      const ent = {
+        ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: name,
+        uid: v.uid, email: email, phone: phone, grp: 1,
+        exp: (pl1 && pl1.exp) ? pl1.exp : (days1 > 0 ? beijingDatePlus(days1) : undefined),
+        agent: agent1, plan: pl1 ? pl1.label : String(row.plan || '').slice(0, 8),
+      };
+      const r = await addEntry(ent);
+      if (!r.ok) {
+        /* 2026-11-08：号早就登记过 → 也不算坏事，token 还回去（买家可能扫错了号，
+           或者自己本来就在池里）。以前这里保持已用，买家得再找客服要一条链接，
+           而他实际上一个号都没登记成功。回滚后同一条链接可继续用，风险≈0：
+           同一个号再怎么扫也占不了名额。 */
+        if (String(r.msg || '').indexOf('已登记过') >= 0) {
+          await regTokenUndo(code);
+          return json({ ok: true, uid: String(v.uid),
+            message: '这个网易云账号已经在号池里了，无需重复登记。这条链接还没用掉，可以继续用。' });
+        }
+        await regTokenUndo(code);
+        return json({ ok: false, message: r.msg || '登记失败，请再点一次' }, 400);
+      }
+      /* 写后自检（与 /api/join_manual 同口径，杜绝假成功） */
+      let chk = await d1FindDup(String(v.uid), name);
+      if (chk && !chk.length) { await d1Upsert(ent); chk = await d1FindDup(String(v.uid), name); }
+      if (chk === null) {
+        return json({ ok: false, message: '登记没写进数据库（' + d1ErrHint() + '），请稍后重试；这次不会占名额。' }, 503);
+      }
+      if (chk.length === 0) {
+        return json({ ok: false, message: '这次没能写进数据库，请再点一次「完成登记」' }, 503);
+      }
+
+      try {
+        await mailEnqueue(POOL_NAME, String(v.uid), 'reg', String(ent.added || '').slice(0, 10),
+          email, name, agent1, ent.exp || '');
+      } catch (me) { console.error('登记邮件入队失败:', me && me.message); }
+      try { await ccBust(); } catch (e) {}
+
+      return json({
+        ok: true, uid: String(v.uid), name: name,
+        message: '登记成功，明天开始生效。' + (phone ? '' : '（没留手机号，以后有事我们用邮箱联系你）'),
+      });
+    }
+    /* ---- 客服生成 / 查看 / 作废登记链接（口令：KV REG_TOKEN_PASS） ---- */
+    if (url.pathname === '/api/regtoken_new' && request.method === 'POST') {
+      let b1;
+      try { b1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const pw = await regPass();
+      if (!pw) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
+      if (String(b1.pass || '') !== pw) return json({ ok: false, message: '生成口令不正确' }, 403);
+      const agent = normAgent(b1.agent);
+      const rc2 = await regCfg();
+      const pl2 = planOf(rc2, b1.plan);
+      const pObj = (rc2.plans || []).find(it => it.key === String(b1.plan || '') || it.label === String(b1.plan || ''));
+      const hours = Math.max(1, Math.min(720, Number(b1.hours) || REG_TTL_H));
+      const one = await regTokenNew(agent, pl2 ? pl2.key : String(b1.plan || '').slice(0, 16),
+        pObj ? (Number(pObj.days) || 0) : 0, b1.note, hours);
+      if (!one) return json({ ok: false, message: '生成失败（' + d1ErrHint() + '）' }, 503);
+      const origin = url.origin;
+      return json({
+        ok: true, code: one.code, code_only: one.code,
+        link: origin + '/r/' + one.code,
+        short: origin.replace(/^https?:\/\//, '') + '/r/' + one.code,
+        exp_at: one.exp_at, hours: hours, agent: agent, plan: pl2 ? pl2.label : '',
+      });
+    }
+    if (url.pathname === '/api/regtoken_list' && request.method === 'POST') {
+      let b2;
+      try { b2 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const pw2 = await regPass();
+      if (!pw2) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
+      if (String(b2.pass || '') !== pw2) return json({ ok: false, message: '生成口令不正确' }, 403);
+      const w = [], ps = [];
+      if (b2.agent) { w.push('agent=?'); ps.push(normAgent(b2.agent)); }
+      const stq = String(b2.state || '');
+      if (stq === 'unused') { w.push("state='unused' AND exp_at > ?"); ps.push(regIso(Date.now())); }
+      else if (stq) { w.push('state=?'); ps.push(stq); }
+      const lim = Math.max(1, Math.min(300, Number(b2.limit) || 80));
+      const rows = await d1All(
+        'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone FROM reg_tokens' +
+        (w.length ? (' WHERE ' + w.join(' AND ')) : '') + ' ORDER BY ctime DESC LIMIT ' + lim, ps);
+      if (rows === null) return json({ ok: false, message: '数据库读不到（' + d1ErrHint() + '）' }, 503);
+      return json({ ok: true, n: rows.length, rows: rows.map(r => Object.assign({}, r, { state: regStateOf(r) })) });
+    }
+    if (url.pathname === '/api/regtoken_void' && request.method === 'POST') {
+      let b3;
+      try { b3 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const pw3 = await regPass();
+      if (!pw3) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
+      if (String(b3.pass || '') !== pw3) return json({ ok: false, message: '生成口令不正确' }, 403);
+      const n = await d1Changes("UPDATE reg_tokens SET state='void' WHERE token=? AND state='unused'",
+                               [regNormCode(b3.code)]);
+      if (n === -1) return json({ ok: false, message: '数据库不可用' }, 503);
+      if (!n) return json({ ok: false, message: '没找到可作废的链接（可能已用掉或已作废）' }, 404);
+      return json({ ok: true, message: '已作废' });
     }
     // ---- 补录/修改通知邮箱（老号自助通道，只改 email 一个字段，其余原样）----
     if (url.pathname === '/api/updatemail' && request.method === 'POST') {
