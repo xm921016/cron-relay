@@ -45,22 +45,25 @@ def _cred():
 # 单通道扛不住补发/高峰；第二个通道（EMAIL_FROM2/EMAIL_AUTH_CODE2）可选配置，未配置时行为不变。
 # 轮发策略：每成功发一封就把指针移到下一个通道（流量对半摊）；某通道失败当场用下一个通道重试一次，
 # 全失败才算失败（失败件照旧退回队列，下一班重试时会轮到另一个通道）。
+# 2026-11-09：通道数不再写死到 4，改为按序扫描 EMAIL_FROM / EMAIL_FROM2..EMAIL_FROM20，
+# 只认「地址+授权码都有」的项（中间有空号也不影响后面的），新增邮箱只要配 Secret 即可生效。
+_MAX_CH = 20
 _ACCTS = []
 _ACCT_AT = [0]
 
 
+def _acct(i):
+    sfx = "" if i == 1 else str(i)
+    return (
+        (os.environ.get("EMAIL_FROM" + sfx, "") or "").strip(),
+        (os.environ.get("EMAIL_AUTH_CODE" + sfx, "") or "").strip(),
+    )
+
+
 def _accts():
     if not _ACCTS:
-        pairs = [
-            _cred(),
-            ((os.environ.get("EMAIL_FROM2", "") or "").strip(),
-             (os.environ.get("EMAIL_AUTH_CODE2", "") or "").strip()),
-            ((os.environ.get("EMAIL_FROM3", "") or "").strip(),
-             (os.environ.get("EMAIL_AUTH_CODE3", "") or "").strip()),
-            ((os.environ.get("EMAIL_FROM4", "") or "").strip(),
-             (os.environ.get("EMAIL_AUTH_CODE4", "") or "").strip()),
-        ]
-        for f, a in pairs:
+        for i in range(1, _MAX_CH + 1):
+            f, a = _acct(i)
             if f and a:
                 _ACCTS.append((f, a))
     return _ACCTS

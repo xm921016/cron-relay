@@ -48,6 +48,11 @@ jobs:
       # 2026-11-06 晚：第四发信通道（四通道轮发 ≈ 2000 封/日余量）
       EMAIL_FROM4: ${{ secrets.EMAIL_FROM4 }}
       EMAIL_AUTH_CODE4: ${{ secrets.EMAIL_AUTH_CODE4 }}
+      # 2026-11-09：第五/第六发信通道（六通道轮发 ≈ 3000 封/日余量，单号日均发信量更抗频控）
+      EMAIL_FROM5: ${{ secrets.EMAIL_FROM5 }}
+      EMAIL_AUTH_CODE5: ${{ secrets.EMAIL_AUTH_CODE5 }}
+      EMAIL_FROM6: ${{ secrets.EMAIL_FROM6 }}
+      EMAIL_AUTH_CODE6: ${{ secrets.EMAIL_AUTH_CODE6 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
