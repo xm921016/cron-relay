@@ -2574,27 +2574,41 @@ async function d1FindDup(uidKey, name) {
 
 // D1 行 → KV entry 结构（保持字段名完全一致，上层代码无需改动）
 // ====================================================================
-// B 方案（2026-11-03）：删号前最后一道闸 —— 用活号 CK 查网易用户主页
-// 背景：11-03 14:51 主群 13123456789 被判 cookie 失效删除，9 分钟后 notes.py 用同一份
-//   CK 登录成功（昵称「晶哥困了」）并发布笔记 —— 判死那一刻号其实是活的。
-//   A 方案（复核间隔拉到 30s/60s + 多链路）在客户端治本；这里在服务端再问网易一次：
-//   /api/v1/user/detail/<uid> 回 code=200 且带 profile → 账号仍在 → 不删，只打 suspect_at。
-// 实测（2026-11-03，用池内活号 CK）：不存在/已注销 uid 回 {"code":404}；正常号回 code=200。
-// 返回 true=账号还在 / false=账号已不存在 / null=查不了（网络、风控、无可用 CK）
-// 注意：null 一律按「保留」处理 —— 宁可少删一个，也不能再误杀一个。
-// --------------------------------------------------------------------
-async function neteaseUserAlive(uid, ck) {
-  if (!uid || !ck) return null;
+// 2026-11-09：原「B 方案」neteaseUserAlive（用活号查 /api/v1/user/detail/<uid>，
+// 账号还在就不删）已删除 —— 它只能证明「账号存在」，证明不了「这个 CK 还能用」，
+// 于是「CK 死了、账号还在」（换设备/被顶号）的号被无限保留（11-09 手工清了 6 个，最短挂 5 天）。
+// 现由下方 ckAlive（验号自己的 CK）取代。保留本段说明，避免以后有人重新引入同一逻辑。
+
+/* ============================================================================
+   2026-11-09：CK 有效性自检（删号前的确定性证据，替代「查账号是否还存在」）
+   ----------------------------------------------------------------------------
+   旧 B 方案（上面的 neteaseUserAlive）用别的活号查 /api/v1/user/detail/<uid>，
+   它只能证明「账号还在网易」，证明不了「这个号的 CK 还能用」。而最常见的失效场景
+   恰恰是「CK 死了、账号还在」（号主换设备 / 被顶号）—— 旧逻辑一律保留 + 发信等重登，
+   号主一不理就无限挂着（11-09 手工清了 6 个，最短也挂了 5 天）。
+   用户口径（2026-11-09）：**反复确认 CK 失效就立即删号 + 立刻发信，不拖。**
+   所以改用「号自己的 CK」调 /api/nuser/account/get，三态返回：
+     true  = account 带 id ⇒ CK 有效（客户端误判 / 落在风控窗口）⇒ 保留，下轮再判
+     false = code=200 且 account 为空 ⇒ 确认未登录，CK 已死 ⇒ 立刻删
+     null  = -462 / 301 / HTML 风控页 / 网络异常 ⇒ 判不了 ⇒ 保留，下轮再判
+   null 一律保留（宁可少删一个，也不误杀）—— 与 neteaseUserAlive 同一原则。
+   实测正负例：2026-11-09 用 6 个已确认失效的号全部返回 {code:200,account:null}，
+   同批健康号（dz 92360774）返回 account.id，判据双向成立。
+   ============================================================================ */
+async function ckAlive(ck) {
+  const s = String(ck || '').trim();
+  if (!s) return false;                                   // 连 CK 都没有 = 一定不能用
+  const cookie = /MUSIC_U=/.test(s) ? s : ('MUSIC_U=' + s);
   try {
     const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), 15000);
+    const tid = setTimeout(() => ctrl.abort(), 12000);
     let r;
     try {
-      r = await fetch('https://music.163.com/api/v1/user/detail/' + encodeURIComponent(String(uid)), {
+      r = await fetch('https://music.163.com/api/nuser/account/get', {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Referer': 'https://music.163.com',
-          'Cookie': String(ck),
+          'Cookie': cookie,
         },
         signal: ctrl.signal,
       });
@@ -2602,9 +2616,12 @@ async function neteaseUserAlive(uid, ck) {
       clearTimeout(tid);
     }
     if (!r || !r.ok) return null;
-    const j = await r.json();
-    if (j && j.code === 200 && j.profile) return true;
-    if (j && j.code === 404) return false;
+    const txt = await r.text();
+    let j = null;
+    try { j = JSON.parse(txt); } catch (_e) { return null; }   // 风控页返回 HTML，解析不了
+    const acc = j && j.account;
+    if (acc && acc.id != null) return true;
+    if (j && j.code === 200 && !acc) return false;
     return null;
   } catch (_e) {
     return null;
@@ -4933,13 +4950,13 @@ async function handle(request) {
       // 不带 confirm 的旧客户端仍走原来的 suspect_at 双重确认，向后兼容。
       const forceConfirm = body.confirm === true;
       // 2026-11-04：forceConfirm 也照常查一遍（多一次全池 SELECT，578 行 <1ms）。
-      // 原有「18~36 小时二次确认」口径不变；新增 relMap 用来判断这批号是否已通知过号主重登。
+      // 原有「18~36 小时二次确认」口径不变，susMap 给不带 confirm 的老客户端用。
+      // 2026-11-09：不再需要 relMap（「保留 + 等号主重登」这条支路已取消，改为验 CK 后立即删）。
       let susRows = null;
-      try { susRows = await d1All('SELECT uid,suspect_at,relogin_at FROM accounts WHERE pool=?', [POOL_NAME]); } catch (_e) { susRows = null; }
-      const susMap = {}, relMap = {};
+      try { susRows = await d1All('SELECT uid,suspect_at FROM accounts WHERE pool=?', [POOL_NAME]); } catch (_e) { susRows = null; }
+      const susMap = {};
       if (susRows) for (const r of susRows) {
         susMap[String(r.uid)] = String(r.suspect_at || '');
-        relMap[String(r.uid)] = String(r.relogin_at || '');
       }
       const nowMs = Date.now();
       const suspects = [], confirmed = [];
@@ -4962,54 +4979,51 @@ async function handle(request) {
       // 外层 try/catch 什么也拦不到，deleted 依旧原样返回全部名单。结果：D1 那行还在
       //（下一次 mergePool 会从 D1 把它读回来、继续播放），号主却已收到「账号信息过期」。
       // 现在顺序反过来：先删 D1，只有真删成功的才删 KV 键 / 进墓碑 / 计进 deleted / 发信。
-      // ---- B 方案（2026-11-03）：删号前用活号 CK 查一次网易主页，账号还在就不删 ----
-      // 为什么服务端还要再查一遍：客户端复核（30s/60s）可能整段落在同一个风控窗口里，
-      //   11-03 的误杀就是三次复核全回 301、但同一个 CK 9 分钟后还能发帖。
-      //   这里换一条完全独立的证据链（查账号主页），风控通常不会把主页一起藏掉。
-      // 口径：code=200 → 保留 + suspect_at（下一轮再判）；code=404 → 真没了，照删；
-      //      查不到（网络/风控/无可用 CK）→ 保留，下一轮再看。
-      // 无 uid 的历史条目无法用主页核验，维持原行为（照删）。
+      // ---- 2026-11-09 改版：删号前只验「这个 CK 还能不能用」 ----
+      // 旧口径（B 方案，2026-11-03）用别的活号查账号主页：code=200 就认为「账号还在 → 不能删」，
+      // 于是「CK 死了、账号还在」（换设备/被顶号，最常见）被无限保留 —— 11-09 手工清的那 6 个
+      // 最短也挂了 5 天。用户 2026-11-09 口径：反复确认 CK 失效就立即删 + 立刻发信，不拖。
+      // 新口径：客户端已反复复核（3 次里至少 2 次明确失效）+ confirm=true 上报，服务端再用
+      // 号自己的 CK 验一次 /api/nuser/account/get：
+      //   false（code=200 且 account 为空 ⇒ 确认未登录）→ 立刻删 + 立刻直邮「请重新登记」
+      //   true（account 带 id ⇒ CK 居然还有效）→ 客户端误判/撞上风控窗口 → 保留，下轮再判
+      //   null（-462/301/风控页/网络）→ 判不了 → 保留，下轮再判（宁可少删，不可误杀）
       let keptAlive = 0, keptUnknown = 0;
       const keptNames = [];
-      // 2026-11-04：判死加固 B 保留的号 = 「CK 确认失效、账号还在」。以前这条支路一发信
-      // 都没有 —— 发信只挂在 deleted 上，而它恰恰不删，于是号主永远不知道 CK 挂了，
-      // 号就一直躺在「待复核」里每天占应跑名额（11-04 定制群 7 个就是这么卡的）。
-      // 现在：relogin_at 为空（没通知过）就回给 run.py 去直邮，发信成功后回调
-      // /api/relogin_mailed 写 relogin_at —— 只发一封，不重复。
-      const reloginNotify = [];
+      const reloginNotify = [];   // 新口径不再产生「保留+重登提醒」；字段留着只为兼容 run.py 的解析
       if (confirmed.length) {
-        const aliveCk = ((master.find(e => e && e.ck && String(e.ck).length > 60
-          && !deadSet.has(String(e.name)) && !deadSet.has(String(e.uid))) || {}).ck) || '';
-        for (let i = confirmed.length - 1; i >= 0; i--) {
-          const e = confirmed[i];
-          const st = e.uid ? await neteaseUserAlive(e.uid, aliveCk) : false;
-          if (st === false) continue;      // 网易确认账号已不存在 → 留在 confirmed，照常删
-          if (st === true) keptAlive++; else keptUnknown++;
-          keptNames.push(e.name || String(e.uid));
-          if (!relMap[String(e.uid)]) {
-            // 有邮箱 → 交给客户端直邮，发信成功才写 relogin_at（失败下一轮重试，不会漏）。
-            // 没邮箱 → 没人可通知，直接在这里写 relogin_at 把它摘出听众环，否则它会
-            // 永远占着应跑名额、每天验活失败、永远等不到人来处理。
-            if (String(e.email || '').trim()) {
-              reloginNotify.push(e.name || String(e.uid));
-            } else {
-              try {
-                await d1Run('UPDATE accounts SET relogin_at=? WHERE pool=? AND (name=? OR uid=?)',
-                            [stamp, POOL_NAME, String(e.name || ''), String(e.uid || '')]);
-              } catch (_e) {}
-            }
-          }
-          if (e.uid) {
-            try { await d1Run('UPDATE accounts SET suspect_at=? WHERE pool=? AND uid=?', [stamp, POOL_NAME, String(e.uid)]); } catch (_e) {}
-          }
-          confirmed.splice(i, 1);
+        // 单请求子请求数有限（CF Workers 免费 50 个），一次最多验 30 个号；
+        // 超出的不动（留在池里）等下一轮，绝不因为超限就整批失败或盲删。
+        const CK_MAX = 30;
+        if (confirmed.length > CK_MAX) {
+          const over = confirmed.splice(CK_MAX);
+          keptUnknown += over.length;
+          for (const e of over) keptNames.push(e.name || String(e.uid));
+        }
+        const sts = await Promise.all(confirmed.map(e => ckAlive(e && e.ck)));
+        const keep = [];
+        for (let i = 0; i < confirmed.length; i++) {
+          if (sts[i] === false) continue;          // 确认 CK 已死 → 留在 confirmed，下面立刻删
+          if (sts[i] === true) keptAlive++; else keptUnknown++;
+          keep.push(confirmed[i]);
+        }
+        for (const e of keep) keptNames.push(e.name || String(e.uid));
+        // 保留的号从待删名单里剔掉（从后往前剪，避免索引错位）
+        for (let i = confirmed.length - 1; i >= 0; i--) if (keep.indexOf(confirmed[i]) >= 0) confirmed.splice(i, 1);
+        // 保留的号打一次 suspect_at（一条 SQL 批量写，不再逐号 await、也不逐号打 D1）
+        const keepUids = keep.map(e => String((e && e.uid) || '')).filter(Boolean);
+        if (keepUids.length) {
+          try {
+            await d1Run('UPDATE accounts SET suspect_at=? WHERE pool=? AND uid IN ('
+              + keepUids.map(() => '?').join(',') + ')', [stamp, POOL_NAME].concat(keepUids));
+          } catch (_e) {}
         }
         if (keptNames.length) {
-          console.log('删号前复核保留 ' + keptNames.length + ' 个（账号仍在 ' + keptAlive + ' / 无法判定 ' + keptUnknown + '）: ' + keptNames.join('、'));
+          console.log('删号前复核保留 ' + keptNames.length + ' 个（CK 仍有效 ' + keptAlive + ' / 无法判定 ' + keptUnknown + '）: ' + keptNames.join('、'));
         }
       }
       const keepNote = keptNames.length
-        ? '；' + keptNames.length + ' 个命中删号前复核已保留（未删未发信，下轮再判）：' + keptNames.join('、')
+        ? '；' + keptNames.length + ' 个复核后保留（CK 仍有效或无法判定，未删未发信，下轮再判）：' + keptNames.join('、')
         : '';
       const hasD1 = d1ok();
       const delRes = await Promise.all(confirmed.map(async e => {
