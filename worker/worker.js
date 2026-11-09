@@ -1811,6 +1811,86 @@ async function pruneExpired() {
   try { await refreshPoolSnap(); } catch (e) {}
   return { master: master, count: dead.length };
 }
+
+/* ============================================================================
+   2026-11-09：CK 失效「超时自动清理」（用户要求）
+   ----------------------------------------------------------------------------
+   要解决的问题：/api/report_dead 的「删号前复核」（B 方案：用活号 CK 查网易主页）
+   碰到「CK 死了、但网易账号还在」时只打 relogin_at + 发一封「请重新登记」，号留在库里。
+   而 buildPlanFrom 里 `r.relogin → idle` 把它摘出听众环 ⇒ 客户端从此不再上报它
+   ⇒ report_dead 永远收不到它 ⇒ 逻辑上没有任何路径会再处理它。这就是「号主不理就永远挂着」。
+   （11-09 手工清掉的那 6 个 dz 号，从 11-04 收到通知一直挂到 11-09，正是卡在这一步。）
+
+   口径（用户 2026-11-09 定）：relogin_at 非空（= 已经通知过号主）且距今 ≥ RELOGIN_TTL_DAYS
+   （KV 键 RELOGIN_TTL_DAYS 可配，默认 7 天）→ 直接删号 + 入 dead_notice 队列发信。
+
+   删除链路严格照抄 report_dead 的成功路径（铁律 3：先删 D1，删成功才动 KV / 墓碑 / 队列 / 流水）：
+     d1Delete 成功 → 删 entry 键 → 写墓碑 dead_log → dead_notice 入队 → dead_log 记流水
+     → pushPool(剩余) → refreshPoolSnap
+   为什么挂在 CF 每日 cron 而不是请求路径：这些号已不在 plan 里，没有任何请求会顺便触发它，
+   只有定时器靠得住。hz 主 cron 顺带通过 /api/relogin_sweep 让对端（dz，无 scheduled）也跑一遍。
+   ============================================================================ */
+async function reloginTtlDays() {
+  // 不做成常量：想改天数直接往 KV 加 RELOGIN_TTL_DAYS 即可，不用改代码重部署。
+  try {
+    const v = Number(cleanKV(await POOL.get('RELOGIN_TTL_DAYS')));
+    if (v > 0) return v;
+  } catch (_e) {}
+  return 7;
+}
+
+async function pruneStaleRelogin(days) {
+  if (!d1ok()) return { ok: false, msg: 'D1 未绑定' };
+  const ttl = Number(days) > 0 ? Number(days) : await reloginTtlDays();
+  const cutoff = Date.now() - ttl * 86400000;
+  // 只拉「已通知过」的行：通常个位数，全池扫一趟也就 700 行/天。
+  // 读失败必须当失败（铁律 3c）—— 否则会被当成「没有超时号」而静默永不清理。
+  const rows = await d1All("SELECT uid,name,email,relogin_at FROM accounts WHERE pool=? AND relogin_at IS NOT NULL AND relogin_at<>''",
+    [POOL_NAME]);
+  if (!rows) return { ok: false, msg: 'D1 查询失败（accounts 读不到）' };
+  const stale = rows.filter(r => {
+    const t = Date.parse(String(r.relogin_at || ''));
+    return !isNaN(t) && t <= cutoff;
+  });
+  if (!stale.length) return { ok: true, ttl: ttl, checked: rows.length, removed: 0, names: [] };
+
+  const master = await mergePool();
+  const gone = [], fail = [];
+  for (const r of stale) {
+    // 优先用池里的完整条目（entryKeyOf / pushPool 过滤都要它），找不到才退化到最小对象
+    const full = master.find(e => String(e.uid || '') === String(r.uid || '')
+                                  && (!r.name || String(e.name || '') === String(r.name)))
+                 || { uid: r.uid, name: r.name, email: r.email };
+    let ok = false;
+    try { ok = (await d1Delete(full)) === true; } catch (_e) { ok = false; }
+    (ok ? gone : fail).push(full);
+  }
+  await Promise.all(gone.map(async e => { try { await POOL.delete(entryKeyOf(e)); } catch (_e) {} }));
+  const ekeys = gone.map(entryKeyOf);
+  if (ekeys.length) {
+    try {
+      const log = new Set(await getDeadLog());
+      for (const k of ekeys) log.add(k);
+      await POOL.put('dead_log', JSON.stringify([...log].slice(-500)));
+    } catch (_e) {}
+  }
+  // kind 单独记 relogin_timeout：控制台「删号记录」能区分「7 天没理自动清」和「当场判死」。
+  let queued = 0;
+  for (const e of gone) { try { if (await d1QueueNotice(e, 'relogin_timeout')) queued++; } catch (_e) {} }
+  await d1LogDead(gone, 'cookie_invalid');   // 删号原因口径仍只有 cookie_invalid / manual 两种
+  const gs = new Set(ekeys);
+  try { await pushPool(master.filter(e => !gs.has(entryKeyOf(e)))); } catch (_e) {}
+  try { await refreshPoolSnap(); } catch (_e) {}
+  const nmOf = e => e.name || String(e.uid || '');
+  const names = gone.map(nmOf), failed = fail.map(nmOf);
+  if (names.length || failed.length) {
+    console.log('relogin 超时清理（TTL ' + ttl + ' 天）：检查 ' + rows.length + ' 个已通知号，删除 ' + names.length
+      + (names.length ? '（' + names.join('、') + '）' : '')
+      + (failed.length ? '，删除失败 ' + failed.length + ' 个下轮重试（' + failed.join('、') + '）' : ''));
+  }
+  return { ok: true, ttl: ttl, checked: rows.length, removed: names.length, queued: queued,
+           names: names, failed: failed };
+}
 async function gzipU8(u8) {
   // 2026-10-22：分片 JSON 先 gzip 再 base64。此前直接 base64 JSON，分片 45000 字符
   // 封装后约 1.78 倍膨胀到 ~80KB，超过 GitHub Secret 48KB 上限 → 最大那片恒被 422
@@ -5006,6 +5086,20 @@ async function handle(request) {
         } catch (_e) {}
       }
       return json({ ok: true, wrote: wrote });
+    }
+    // ---- 2026-11-09：CK 失效超时清理的手动/对端触发入口 ----
+    // 正常由 CF 每日 cron 自动跑（scheduled 主路径），这里只给两种场景用：
+    //   ① 对端 dz 没有 scheduled handler，由 hz 主 cron 用对穿口令调它；
+    //   ② 人工排障：POST {pass: 管理口令 或 对穿口令} 立刻扫一遍。
+    // 认证同时接受 peerKey（跨群）与 adminPass（管理），都不配则拒绝。
+    if (url.pathname === '/api/relogin_sweep' && request.method === 'POST') {
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
+      const c = await cfg();
+      const byPeer = await peerPassOk(body.pass);
+      if (!byPeer && !adminPassOk(c, body.pass)) return json({ message: '口令错误' }, 403);
+      const r = await pruneStaleRelogin(body.days);
+      return json(r, r.ok === false ? 503 : 200);
     }
     // ====================================================================
     // 手动删号的「通知号主」判定队列（2026-10-26 新增，纯新增路由）
@@ -8479,6 +8573,32 @@ export default {
         const r = await pruneExpired();
         if (r && r.count) console.log('scheduled 已到期降级公益号 ' + r.count + ' 个（不再删除）');
       } catch (e) { console.error('scheduled 到期降级失败:', (e && e.message) || e); }
+    })());
+    // 2026-11-09：CK 失效超时清理（relogin_at 非空且超过 RELOGIN_TTL_DAYS，默认 7 天）。
+    // 这些号早已被摘出听众环、不会再被任何请求上报，只能靠定时器收尾。
+    // 放在主 cron（北京 10:00）：两轮之间，不碰当天 plan_snap，也不影响 11:40 的表快照采集。
+    ctx.waitUntil((async () => {
+      try {
+        const r = await pruneStaleRelogin();
+        if (r && r.removed) console.log('scheduled relogin 超时清理删除 ' + r.removed + ' 个：' + (r.names || []).join('、'));
+      } catch (e) { console.error('scheduled relogin 超时清理失败:', (e && e.message) || e); }
+    })());
+    // 对端（定制群 dz）没有 scheduled handler，定时全靠 GitHub —— 这里用对穿口令让它在自己池里跑一遍。
+    // 失败只记日志，绝不影响本群流程；对端没配 PEER_KEY 就直接跳过。
+    ctx.waitUntil((async () => {
+      try {
+        const pk = await peerKey();
+        if (!pk) return;
+        const purl = (cleanKV(await POOL.get('PEER_URL')) || PEER_DEFAULT).replace(/\/+$/, '');
+        const r = await fetch(purl + '/api/relogin_sweep', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'User-Agent': 'cron-relay-worker' },
+          body: JSON.stringify({ pass: pk }),
+        });
+        const d = await r.json().catch(() => null);
+        if (d && d.ok && d.removed) console.log('对端 relogin 超时清理删除 ' + d.removed + ' 个：' + (d.names || []).join('、'));
+        else if (d && d.ok === false) console.log('对端 relogin 超时清理返回失败：' + (d.msg || d.message || ''));
+      } catch (e) { console.log('对端 relogin 超时清理调用失败（忽略）:', (e && e.message) || e); }
     })());
     // 2026-10-25：每天顺手补一批歌曲/账号元数据（控制台「共创歌曲 / 绑错歌」标签的数据源）。
     // 本地 IP 被网易限流，只能靠 Worker 出口；每天 30 个号 + 12 首歌，新号基本当天就能补上。
