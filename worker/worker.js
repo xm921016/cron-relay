@@ -1346,6 +1346,14 @@ async function resolveSong(link) {
   // 容错：成员经常把 APP 分享的整段文字（带歌名/emoji/@）直接粘进来，先提取出里面的第一个 URL
   const picked = link.match(/https?:\/\/[^\s"'《》<>，,）)】]+/);
   let url = (picked ? picked[0] : link).trim();
+  // 2026-11-09：域名白名单。原来对用户给的任意 URL 直接 fetch（含跟随重定向），
+  // 买家可以把这里当成「我方出口 IP 的开放 GET 代理 / SSRF 跳板」，去打任意站点。
+  // 只放行网易云自家分享域（music.163.com / y.music.163.com / 163cn.tv 短链）。
+  const songHostOk = h => /(^|\.)(163\.com|163cn\.tv|163cn\.com)$/i.test(String(h || ''));
+  const hostOf = u => { try { return new URL(u).hostname; } catch (e) { return ''; } };
+  if (!/^https?:\/\//i.test(url) || !songHostOk(hostOf(url))) {
+    return { ok: false, msg: '只支持网易云官方链接（music.163.com 或 163cn.tv 开头的）。请在网易云 APP 里打开那首歌 → 分享 → 复制链接' };
+  }
   // 先在【原链接】上提取 id：网易云 APP 分享出来的单曲链接是 SPA 格式
   // music.163.com/#/song?id=xxx，井号后是 URL fragment，HTTP 请求不发送 fragment，
   // fetch 之后的 r.url 会把 id 一起丢掉，所以必须在 fetch 之前匹配
@@ -1358,6 +1366,10 @@ async function resolveSong(link) {
   }
   try {
     const r = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': UA } });
+    // 短链跳转后仍必须是网易自家域名，否则说明这个「163cn.tv」指到了外面的站点
+    if (!songHostOk(hostOf(r.url))) {
+      return { ok: false, msg: '这个链接跳到了非网易云的站点，已拒绝。请在 APP 里重新分享那首歌的链接' };
+    }
     url = r.url;
   } catch (e) {}
   if (COLLECT.test(url)) {
@@ -2071,7 +2083,10 @@ async function addEntry(entry) {
       // 旧号池管理工具上），等于到期之后号主无论怎么操作都无法再用这个号。
       // 2026-11-08：dup 现在可能有两条（uid 一条 / name 一条），只要**任意一条**还有效就拒绝；
       // 全部过期才算续费覆盖。原来只看 dup[0]，两条都命中时结果取决于扫到哪条。
-      if (dup.length && dup.some(x => !isExpiredExp(x && x.exp))) {
+      // 2026-11-09：到期降公益的号（pub=1）必须允许重新登记 = 续费。
+      // pruneExpired 把它写成 exp='forever'，而 forever 不算「过期」，只按 exp 判会把每一个
+      // 到期想续费的号主都挡在门外（token 还被回滚、页面提示"可继续用"）—— 实测这条必然触发。
+      if (dup.length && dup.some(x => !(x && x.pub) && !isExpiredExp(x && x.exp))) {
         return { ok: false, msg: '该账号已登记过（每个账号限登记一首歌），无需重复登记。' };
       }
       if (dup.length) {
@@ -2082,13 +2097,13 @@ async function addEntry(entry) {
           if (!k) continue;
           try { await POOL.delete(k); } catch (e) {}
         }
-        if (uidKey) {
-          try { await d1Run('DELETE FROM accounts WHERE pool=? AND (uid=? OR name=?)',
-                            [POOL_NAME, uidKey, String(entry.name || '')]); } catch (e) {}
-        } else {
-          try { await d1Run('DELETE FROM accounts WHERE pool=? AND name=?',
-                            [POOL_NAME, String(entry.name || '')]); } catch (e) {}
-        }
+        // 2026-11-09：DELETE 不再用 (uid=? OR name=?) —— OR 会让 (pool,uid) 和 (pool,name)
+        // 两个索引同时失效，每次续费都要全池扫一遍。拆成两条单条件，各走自己的索引。
+        try {
+          if (uidKey) await d1Run('DELETE FROM accounts WHERE pool=? AND uid=?', [POOL_NAME, uidKey]);
+          if (String(entry.name || '')) await d1Run('DELETE FROM accounts WHERE pool=? AND name=?',
+                                                    [POOL_NAME, String(entry.name || '')]);
+        } catch (e) {}
         console.log('到期号重新登记（续费）:', String(entry.name || uidKey));
       }
       // KV 仍写一份：D1 万一回滚，KV 里必须是完整数据
@@ -2120,9 +2135,11 @@ async function addEntry(entry) {
   // 2026-10-29：与 D1 路径同口径 —— 已过有效期的旧登记不算「已登记过」，允许覆盖。
   const kvOld = await POOL.get(ekey);
   if (kvOld) {
-    let oldExp = '';
-    try { oldExp = (JSON.parse(kvOld) || {}).exp || ''; } catch (e) {}
-    if (!isExpiredExp(oldExp)) {
+    let _old = {};
+    try { _old = JSON.parse(kvOld) || {}; } catch (e) {}
+    // 2026-11-09：公益号（到期降级留下的 pub=1 / exp=forever）必须允许重新登记 = 续费。
+    // 只判 exp 的话 forever 不算过期，到期想续费的人会被永远挡住（与 D1 路径同一个坑）。
+    if (!_old.pub && !isExpiredExp(_old.exp)) {
       return { ok: false, msg: '该账号已登记过（每个账号限登记一首歌），无需重复登记。' };
     }
     try { await POOL.delete(ekey); } catch (e) {}
@@ -2134,7 +2151,8 @@ async function addEntry(entry) {
     if (deadLog.has(entryKeyOf(e))) continue;   // 墓碑内的是缓存残留（刚被清理），不算已登记
     const same = (uidKey && e.uid != null && String(e.uid) === uidKey)
       || (entry.name && e.name === entry.name);
-    if (same && isExpiredExp(e && e.exp)) { staleKeys.push(entryKeyOf(e)); continue; }
+    // 2026-11-09：pub=1 的公益号（到期降级）视同「旧登记」，允许覆盖 = 续费。
+    if (same && (e.pub || isExpiredExp(e && e.exp))) { staleKeys.push(entryKeyOf(e)); continue; }
     if (uidKey && e.uid != null && String(e.uid) === uidKey) {
       return { ok: false, msg: '该账号已登记过（每个账号限登记一首歌），无需重复登记。' };
     }
@@ -2558,10 +2576,14 @@ function d1PoolCmp(a, b) {
 // 只要有一条有效就拒绝（与 KV 回退路径的口径一致）。
 // 返回：命中行数组（可能为空）；任一查询失败返回 null（= 查不了，交给上层回退 KV，绝不当作"没查到"）
 async function d1FindDup(uidKey, name) {
+  // 2026-11-09：额度闸门。返回 null = 查不了 → addEntry 走 KV 回退查重（那里是精确的 entry: 键，不是近似）。
+  if (await d1ReadBlocked()) { console.log('D1 读额度 ≥' + QGATE_HOT + '%，查重改走 KV'); return null; }
   const nm = String(name || '');
   const qs = [];
-  if (uidKey) qs.push(d1All('SELECT uid,exp FROM accounts WHERE pool=? AND uid=? LIMIT 1', [POOL_NAME, uidKey]));
-  if (nm) qs.push(d1All('SELECT uid,exp FROM accounts WHERE pool=? AND name=? LIMIT 1', [POOL_NAME, nm]));
+  // 2026-11-09：带 pub —— 到期号被 pruneExpired 改成 pub=1/exp='forever'，
+  // 'forever' 不算过期，只看 exp 会把「到期降公益号」判成「已登记过」，买家永远续不上费。
+  if (uidKey) qs.push(d1All('SELECT uid,exp,pub FROM accounts WHERE pool=? AND uid=? LIMIT 1', [POOL_NAME, uidKey]));
+  if (nm) qs.push(d1All('SELECT uid,exp,pub FROM accounts WHERE pool=? AND name=? LIMIT 1', [POOL_NAME, nm]));
   if (!qs.length) return [];
   const rs = await Promise.all(qs);
   const out = [];
@@ -2614,6 +2636,8 @@ function d1RowToEntry(r) {
 // 返回 null = D1 不可用/查询失败/表为空（调用方回退 KV）；返回数组 = 正常
 async function d1Pool() {
   if (!d1ok()) return null;
+  // 2026-11-09：额度闸门 —— ≥95% 时主动让路，返回 null 让 mergePool 用 KV 快照（682 行不烧了）。
+  if (await d1ReadBlocked()) return null;
   // 2026-11-08：ORDER BY 去掉（改 JS 排，见 d1PoolCmp），每次全池读省一半读行数。
   const rows = await d1All('SELECT ' + D1_COLS + ' FROM accounts WHERE pool=?', [POOL_NAME]);
   if (!rows) return null;
@@ -2743,8 +2767,83 @@ async function d1Hit(kind, key) {
 // 它不承担权威职责（entry: 键才是），只是为了「D1 不可用时这一轮还能跑起来」，偶尔落后无妨。
 const poolSnapKey = () => 'pool:' + POOL_NAME;
 
+// ====================================================================
+// 2026-11-09：D1 读额度闸门（用户口径：自主登记优先吃 D1，≥95% 才退 KV）
+// 背景：D1 免费 500 万行读/天（UTC 日）。11-08 事故把额度打满后所有 SELECT 回 7500，
+//   登记全链路只能靠 KV 镜像活着 —— 而那时 KV 也已经写穿，等于两条腿同时断。
+// 做法：scheduled 每 30 分钟用 CF GraphQL 探一次当日 rows_read，写 KV `qgt:d1`
+//   （{p: 百分比, t: 探测时间}）。读路径取这个水位：
+//   p ≥ 95 且数据新鲜（≤90 分钟）→ 主动跳过一次 D1 读，先走 KV；
+//   未知 / 过期 / 未配 token → 一律按现状走 D1（闸门自己坏掉不能影响功能）。
+// 只拦「读」：D1 写额度 10 万行/天，单日业务量 <1000，写永远不跳。
+const D1_READ_LIMIT = 5000000;
+const QGATE_KEY = 'qgt:d1';
+const QGATE_HOT = 95;            // ≥95% 视为「该让路」
+let _qgPct = -2, _qgAt = 0;      // -2 = 本次 invocation 还没读过
+async function d1QuotaPct() {
+  if (_qgPct !== -2 && Date.now() - _qgAt < 60000) return _qgPct;
+  let p = -1, t = 0;
+  try {
+    const raw = await POOL.get(QGATE_KEY);
+    if (raw) { const o = JSON.parse(raw) || {}; p = Number(o.p); t = Number(o.t) || 0; }
+  } catch (e) {}
+  if (!(p >= 0) || Date.now() - t > 5400000) p = -1;     // 90 分钟没更新 → 当未知，走 D1
+  _qgPct = p; _qgAt = Date.now();
+  return p;
+}
+async function d1ReadBlocked() { return (await d1QuotaPct()) >= QGATE_HOT; }
+
+// GraphQL 探针（scheduled / /api/assign 里调；需要 KV 里配 CFQ_TOKEN + CFQ_ACCOUNT）
+// force=true 跳过节流（手动 /api/quota_report 用）。
+async function d1QuotaProbe(force) {
+  if (!d1ok()) return { skip: 'no_d1' };
+  let tok = '', acc = '', last = 0;
+  try {
+    // 优先 Worker Secret（env，加密存储、读不回），KV 只作为手动备用。
+    tok = cleanKV((typeof globalThis.CFQ_TOKEN === 'string' && globalThis.CFQ_TOKEN) || await POOL.get('CFQ_TOKEN'));
+    acc = cleanKV((typeof globalThis.CFQ_ACCOUNT === 'string' && globalThis.CFQ_ACCOUNT) || await POOL.get('CFQ_ACCOUNT'));
+    if (!force) {
+      const raw = await POOL.get(QGATE_KEY);
+      if (raw) last = Number((JSON.parse(raw) || {}).t) || 0;
+    }
+  } catch (e) {}
+  if (!tok || !acc) return { skip: 'no_token' };
+  if (!force && last && Date.now() - last < 600000) return { skip: 'fresh', at: last };  // 10 分钟节流
+  const today = new Date().toISOString().slice(0, 10);
+  const q = 'query{viewer{accounts(filter:{accountTag:"' + acc + '"}){d1AnalyticsAdaptiveGroups(' +
+    'limit:1,orderBy:[date_DESC],filter:{date_geq:"' + today + '",date_leq:"' + today + '"})' +
+    '{dimensions{date}sum{rowsRead rowsWritten}}}}}';
+  try {
+    const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q }),
+    });
+    const j = await r.json();
+    const arr = j && j.data && j.data.viewer && j.data.viewer.accounts &&
+      j.data.viewer.accounts[0] && j.data.viewer.accounts[0].d1AnalyticsAdaptiveGroups;
+    if (!Array.isArray(arr)) {
+      return { skip: 'bad_query', err: (j && j.errors) ? String(JSON.stringify(j.errors)).slice(0, 200) : '' };
+    }
+    const read = arr[0] ? Number(arr[0].sum.rowsRead || 0) : 0;
+    const written = arr[0] ? Number(arr[0].sum.rowsWritten || 0) : 0;
+    const p = Math.round(read * 1000 / D1_READ_LIMIT) / 10;   // 一位小数的百分比
+    try {
+      await POOL.put(QGATE_KEY, JSON.stringify({ p: p, t: Date.now(), read: read, w: written }),
+                     { expirationTtl: 7200 });
+    } catch (e) {}
+    _qgPct = p; _qgAt = Date.now();
+    return { pct: p, read: read };
+  } catch (e) {
+    console.error('D1 额度探针失败:', e && e.message);
+    return { skip: 'fetch_failed' };
+  }
+}
+
 async function refreshPoolSnap() {
   if (!d1ok()) return false;
+  // 2026-11-09：额度闸门 —— 这一步本身要全池读 682 行（只为写 1 次 KV），≥95% 时跳过。
+  if (await d1ReadBlocked()) return false;
   // 2026-11-08：同样去掉 ORDER BY（改 JS 排，见 d1PoolCmp），省一半读行数；快照内容顺序不变。
   const rows = await d1All('SELECT ' + D1_COLS + ' FROM accounts WHERE pool=?', [POOL_NAME]);
   if (!rows || !rows.length) return false;
@@ -3140,23 +3239,34 @@ async function buildPlan(dayStr) {
   // 两群共用一个 D1：歌环与听众环都按「全池」计算，本 worker 只投递自己群的那批号。
   // 这样跨群互听继续有效（主群的号也会听到定制群的歌），且两边算出的计划完全一致。
   // 注意 SELECT 里那个 hasck：只回 0/1，用来判断「这条能不能播」，比把 ck 整列拉回来省 200 倍传输。
+  // 2026-10-22：D1 不可用时用 KV 逐号备份兜底（以前直接返回失败 → run.py 回退到冻结的
+  // Secrets 分片，1500 号时那一晚只有 212 个号在跑，而且 job 还是绿的）。
+  // KV 里只有本群的号，跨群互听会退化成「只听本群」，但绝不会变成 0 个号。
+  const planKvFallback = async () => {
+    try {
+      const kv = await mergePoolKV();
+      if (kv && kv.length) {
+        const plan = buildPlanFrom(kv.map(planRow), today);   // KV 行自带 ck，planRow 会判空
+        plan.src = 'kv';
+        return plan;
+      }
+    } catch (e) { console.error('buildPlan 的 KV 兜底也失败:', e && e.message); }
+    return null;
+  };
+  // 2026-11-09：额度闸门 —— ≥95% 时这一条（全表 + ORDER BY，每片一次）不要再打 D1，
+  // 直接走 KV 逐号备份：跨群互听退化为只听本群，但号一个都不会少、整班不会归零。
+  if (await d1ReadBlocked()) {
+    console.log('D1 读额度 ≥' + QGATE_HOT + '%，buildPlan 走 KV 备份');
+    const pk = await planKvFallback();
+    if (pk) return pk;
+  }
   const rows = await d1All("SELECT pool,uid,name,song,no_listen,pub,added,exp,relogin_at,"
     + "(CASE WHEN ck IS NULL OR TRIM(ck)='' THEN 0 ELSE 1 END) AS hasck "
     + "FROM accounts ORDER BY pool, uid");
   if (rows) return buildPlanFrom(rows.map(planRow), today);
-  // 2026-10-22：D1 不可用时用 KV 逐号备份兜底（以前直接返回失败 → run.py 回退到冻结的
-  // Secrets 分片，1500 号时那一晚只有 212 个号在跑，而且 job 还是绿的）。
-  // KV 里只有本群的号，跨群互听会退化成「只听本群」，但绝不会变成 0 个号。
   console.error('D1 查询失败，buildPlan 回退 KV 逐号备份');
-  try {
-    const kv = await mergePoolKV();
-    if (kv && kv.length) {
-      const plan = buildPlanFrom(kv.map(planRow), today);   // KV 行自带 ck，planRow 会判空
-      plan.src = 'kv';
-      return plan;
-    }
-  } catch (e) { console.error('buildPlan 的 KV 兜底也失败:', e && e.message); }
-  return { ok: false, msg: 'D1 未绑定或查询失败，且 KV 兜底无数据' };
+  const pk2 = await planKvFallback();
+  return pk2 || { ok: false, msg: 'D1 未绑定或查询失败，且 KV 兜底无数据' };
 }
 
 /* ============================================================================
@@ -3620,6 +3730,15 @@ async function regPass() {
 async function regTokenGet(code) {
   if (!d1ok()) return undefined;
   const c = regNormCode(code);
+  /* 2026-11-09：额度闸门 —— ≥95% 时先读 KV 镜像（1 次 KV 读，0 行 D1）。
+     KV 里没有这条（老 token / 镜像当时没写上）仍要回 D1：宁可多烧几行，
+     也不能让「链接明明有效却打不开」变成死路。 */
+  if (await d1ReadBlocked()) {
+    try {
+      const kv = await POOL.get('regtok:' + c);
+      if (kv) return JSON.parse(kv);
+    } catch (e) { console.error('regtok 闸门读 KV 失败:', e && e.message); }
+  }
   const rows = await d1All(
     'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone,ledger_id FROM reg_tokens WHERE token=?',
     [c]);
@@ -4224,6 +4343,30 @@ async function handle(request) {
       if ((url.searchParams.get('pass') || '') !== c0.assignPass) return json({ message: '口令错误' }, 403);
       return json(await dispatchSnap650(url.searchParams.get('pool') || 'all'));
     }
+    // ---- D1 额度水位（2026-11-09）----
+    // 闸门读的是 KV qgt:d1（{p:百分比, t:探测时间}）。平时由 scheduled / /api/assign 的探针刷新；
+    // 这个入口用于：①本地跑完 tmp/cf_quota.py 后立刻把水位写进去 ②怀疑探针哑了时手工核对。
+    // 不传 p 就跑一次真探针（force，跳过节流）；传了 p 直接落值（自己算好百分比时用）。
+    if (url.pathname === '/api/quota_report') {
+      const cq = await cfg();
+      if (!cq.assignPass) return json({ message: '尚未配置 ASSIGN_PASS，该接口不开放' }, 503);
+      if (request.method !== 'POST') return json({ message: '请用 POST' }, 405);
+      if ((url.searchParams.get('pass') || '') !== cq.assignPass) return json({ message: '口令错误' }, 403);
+      let bq = null;
+      try { bq = await request.json(); } catch (e) {}
+      const pIn = (bq && bq.p != null) ? Number(bq.p) : NaN;
+      if (isFinite(pIn)) {
+        const p = Math.max(0, Math.min(999, pIn));
+        try {
+          await POOL.put(QGATE_KEY, JSON.stringify({ p: p, t: Date.now(), src: 'manual' }),
+                         { expirationTtl: 7200 });
+        } catch (e) {}
+        _qgPct = p; _qgAt = Date.now();
+        return json({ ok: true, pct: p, src: 'manual', hot: p >= QGATE_HOT });
+      }
+      const rq = await d1QuotaProbe(true);
+      return json(Object.assign({ ok: !rq.skip, hot: Number(rq.pct) >= QGATE_HOT }, rq));
+    }
     // 本地后台网页（号池管理网页.html）跨域调用本接口：放开 CORS 并处理预检
     // ---- 客服名单 + 套餐档位（2026-10-27 新增）----
     // APK / EXE 每次登记前拉一次；名单改在控制台「客服名单」里，改完客户端下次拉就变，不用重发软件。
@@ -4315,6 +4458,11 @@ async function handle(request) {
       if (!okPass && !okAdmin) return json({ ok: false, message: '口令错误' }, 403);
       if (!d1ok()) return json({ ok: false, message: 'D1 未绑定' }, 503);
       const t0 = Date.now();
+      // 2026-11-09：relay 每片开工都会过这里 → 顺手探一次 D1 额度水位（10 分钟节流，失败静默）。
+      // 只有这里能拿到「一轮中间」的水位；仅靠 scheduled（每小时）事故期间来不及降级。
+      try {
+        if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(d1QuotaProbe().catch(() => {}));
+      } catch (e) {}
       if (url.pathname === '/api/pool_stat') {
         const plan = await buildPlan(url.searchParams.get('day'));
         if (!plan.ok) return json({ ok: false, message: plan.msg }, 503);
@@ -4558,6 +4706,10 @@ async function handle(request) {
        会话完全无状态 —— sDeviceId 由浏览器生成并回传，cookie 打成 bag 原样带回，
        所以这里一行 KV、一行 D1 都不写（免费额度零消耗）。 */
     if (url.pathname === '/api/r/qrkey') {
+      /* 2026-11-09 频控：出码要拿我方出口 IP 去网易申请 unikey，原来完全不限次数（可被刷成风控样本）。 */
+      const qkIp = request.headers.get('cf-connecting-ip') || '0';
+      const qkN = await d1Hit('rqk', qkIp + ':' + beijingDate());
+      if (qkN !== null && qkN > 60) return json({ ok: false, message: '今天出码次数太多，请明天再试，或联系客服' }, 429);
       const row = await regTokenGet(url.searchParams.get('t'));
       if (row === undefined) return json({ ok: false, message: '系统正在忙（数据库限流），请 1 分钟后再刷新；多次不行就把这句话发给客服' }, 503);
       if (!row || regStateOf(row) !== 'unused') return json({ ok: false, message: '链接不可用，请刷新页面' }, 410);
@@ -4580,6 +4732,12 @@ async function handle(request) {
       const row = await regTokenGet(url.searchParams.get('t'));
       if (row === undefined) return json({ ok: false, code: 0, message: '系统正在忙，请稍后刷新重试' }, 503);
       if (!row || regStateOf(row) !== 'unused') return json({ ok: false, code: 0, message: '链接不可用' }, 410);
+      /* 2026-11-09 频控：页面每 2 秒轮询一次，正常一次扫码 ≤150 次；600 足够「换几张码」。
+         没有上限时一个恶意页面可以一直轮询到链接过期，把我方 IP 一直挂在网易的扫码接口上。 */
+      const qcN = await d1Hit('rqc', regNormCode(url.searchParams.get('t')) + ':' + beijingDate());
+      if (qcN !== null && qcN > 600) {
+        return json({ ok: false, code: 0, message: '这条链接尝试次数过多，请找客服重新要一条' }, 429);
+      }
       const key = String(url.searchParams.get('key') || '').trim().slice(0, 64);
       if (!key) return json({ ok: false, code: 0, message: '缺少 key' }, 400);
       const dev = String(url.searchParams.get('dev') || '').trim().slice(0, 64);
@@ -4606,6 +4764,22 @@ async function handle(request) {
       let b0;
       try { b0 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
       const code = regNormCode(b0.t);
+      /* 2026-11-09 频控（P0）：这条路径原来没有任何次数限制，一条合法 token 可以无限重试，
+         每次 ≈686 行 D1 读 + 3 次网易出站 —— 10 次/秒 ≈ 12 分钟就能烧穿当日 500 万行读，
+         同时把我方出口 IP 反复送进网易风控（与 11-08 事故同一条路径）。
+         计数不可用（D1 挂了/额度尽）时一律放行：可用性优先，那种时候也烧不了几行。 */
+      const ip0 = request.headers.get('cf-connecting-ip') || '0';
+      const day0 = beijingDate();
+      const hitIp = await d1Hit('rsub', ip0 + ':' + day0);
+      if (hitIp !== null && hitIp > 80) {
+        return json({ ok: false, message: '今天提交次数太多了，请明天再试，或联系客服' }, 429);
+      }
+      if (code) {
+        const hitTk = await d1Hit('rtok', code + ':' + day0);
+        if (hitTk !== null && hitTk > 15) {
+          return json({ ok: false, message: '这条链接失败次数太多，请找客服重新要一条' }, 429);
+        }
+      }
       const row = await regTokenGet(code);
       if (row === undefined) return json({ ok: false, message: '系统正在忙（数据库限流），请 1 分钟后再刷新；多次不行就把这句话发给客服' }, 503);
       if (!row) return json({ ok: false, message: '链接无效，请找客服重新要一条' }, 404);
@@ -4713,7 +4887,18 @@ async function handle(request) {
       const rc2 = await regCfg();
       const pl2 = planOf(rc2, b1.plan);
       const pObj = (rc2.plans || []).find(it => it.key === String(b1.plan || '') || it.label === String(b1.plan || ''));
-      const hours = Math.max(1, Math.min(720, Number(b1.hours) || REG_TTL_H));
+      /* 2026-11-09：链接有效期只留两档（24 小时 / 3 天）。原来接受 1~720 任意值，
+         EXE 里还多一档 7 天 —— 链接在群里转手后存活太久，等于把入口长期挂着。 */
+      const hours = (Number(b1.hours) === 72) ? 72 : 24;
+      /* 2026-11-09：每客服每日生成配额（KV REG_TOKEN_DAILY_MAX，默认 60）。
+         EXE 里的生成口令是硬编码的，EXE 一旦外流就等于谁都能造链接；配额把最坏情况
+         压成「每天 60 条」，且异常量在 rate_limit 里一眼看得出来。计数不可用则放行。 */
+      let cap = 60;
+      try { cap = parseInt(cleanKV(await POOL.get('REG_TOKEN_DAILY_MAX')), 10) || 60; } catch (e) {}
+      const genN = await d1Hit('rtn', String(agent || '-') + ':' + beijingDate());
+      if (genN !== null && genN > cap) {
+        return json({ ok: false, message: '今天生成链接已达上限（' + cap + ' 条/天），需要更多请联系管理员' }, 429);
+      }
       const one = await regTokenNew(agent, pl2 ? pl2.key : String(b1.plan || '').slice(0, 16),
         pObj ? (Number(pObj.days) || 0) : 0, b1.note, hours);
       if (!one) return json({ ok: false, message: '生成失败（' + d1ErrHint() + '）' }, 503);
@@ -8479,6 +8664,10 @@ export default {
     globalThis.GH_OWNER = env.GH_OWNER;
     globalThis.GH_REPO = env.GH_REPO;
     if (env.DB) globalThis.DB = env.DB;
+    // 2026-11-09：D1 额度探针要用的 CF 只读凭据（Account Analytics: Read）。
+    // 用 Secret 存（加密、读不回），不写 KV；两者都支持，Secret 优先。
+    if (env.CFQ_TOKEN) globalThis.CFQ_TOKEN = env.CFQ_TOKEN;
+    if (env.CFQ_ACCOUNT) globalThis.CFQ_ACCOUNT = env.CFQ_ACCOUNT;
     // 2026-10-25：handle(request) 拿不到 ctx（签名只有 request），想用 waitUntil 做后台任务
     // 必须挂到全局。不挂的话路由里引用 ctx 会抛 ReferenceError，被 try/catch 吞掉 → 后台任务静默不执行。
     if (ctx) globalThis.CTX = ctx;
@@ -8497,6 +8686,8 @@ export default {
     globalThis.GH_OWNER = env.GH_OWNER;
     globalThis.GH_REPO = env.GH_REPO;
     if (env.DB) globalThis.DB = env.DB;
+    if (env.CFQ_TOKEN) globalThis.CFQ_TOKEN = env.CFQ_TOKEN;
+    if (env.CFQ_ACCOUNT) globalThis.CFQ_ACCOUNT = env.CFQ_ACCOUNT;
     // 2026-11-05：按 event.cron 分流。新加的 3 个时刻只负责「备份发令」，
     // 不能顺带把 snap650 / 到期清理 / 元数据补全都再跑一遍（那会变成一天 4 次快照采集）。
     // 老时刻（10 2 * * *）以及取不到 cron 的情况一律走原来的全量路径，行为不变。
@@ -8508,9 +8699,14 @@ export default {
     // 2026-11-06：邮件队列发令腿（北京每小时 :05/:35），只发令不干别的，跑完即 return。
     if (MAIL_CRONS.indexOf(_cron) >= 0) {
       ctx.waitUntil(dispatchMailQueue().catch(() => {}));
+      // 2026-11-09：每小时顺带探一次 D1 额度水位（relay 停跑时也能刷新，
+      // 否则闸门数据超过 90 分钟就判「未知」，等于白做）。
+      ctx.waitUntil(d1QuotaProbe().catch(() => {}));
       return;
     }
     ctx.waitUntil(dispatchSnap650('all').catch(() => {}));
+    // 2026-11-09：主 cron 也刷新一次额度水位（每天 1 次，兜住 scheduled 分支变动）。
+    ctx.waitUntil(d1QuotaProbe(true).catch(() => {}));
     // 2026-10-29：到期号清理挪进每日 cron。
     // 以前 pruneExpired 全项目只有 /api/pool（旧「号池管理后台」页面）一个调用点 ——
     // 谁打开那个工具谁才清。后果三连：到期号一直挂在池里（只是不播放）；号主收不到
