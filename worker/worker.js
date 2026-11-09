@@ -3106,6 +3106,71 @@ async function buildPlan(dayStr) {
 }
 
 /* ============================================================================
+   2026-11-09：当轮 plan 名单快照（D1 表 plan_snap）
+   ----------------------------------------------------------------------------
+   要解决的问题：/api/coverage 的 expected 原来用「当下实时 buildPlan」算、ran 用「当天 runs 表」，
+   两边根本不是同一时刻的集合。白天池子一动（删号 / 新登记 / 到期降公益 / CK 失效摘出环），就会：
+     ① 假报缺号：号早上还在 expected 里，昨晚那轮压根没它（11-09 报的「缺 13」有 4 个属于这类）；
+     ② 漏掉真缺号：号昨晚该跑没跑、今天上午被删 → 从 expected 里消失，缺口神隐。
+   改法：每轮 plan job 第一次调 /api/pool_stat 时，把本池应跑名单落一行快照；
+   之后全天的补跑、控制台、/api/coverage 都对齐这份快照。**首轮 winner，补跑不覆盖**——
+   同一轮任务的「应跑名单」只能有一个版本，否则补跑越多口径越乱。
+   为什么存 D1 不存 KV：两群共用同一张库，而控制台一屏要同时显示 hz/dz 两池口径，
+   存 KV 的话本 worker 读不到对端那份。
+   成本：一行（JSON 数组约 8KB），每池每天写 1 次、读 1 次。D1 读失败时返回 null，
+   调用方回退实时 buildPlan（行为和改之前一致），绝不把「读不到」当成「没有快照」。
+   ============================================================================ */
+async function planSnapGet(day, pool) {
+  if (!d1ok()) return null;
+  try {
+    const rows = await d1All('SELECT uids,n,src,at FROM plan_snap WHERE day=? AND pool=?',
+                             [String(day), String(pool)]);
+    if (!rows || !rows.length) return null;          // null = 读失败，[] = 真没有
+    let uids = [];
+    try { uids = JSON.parse(rows[0].uids) || []; } catch (e) { return null; }
+    if (!Array.isArray(uids) || !uids.length) return null;
+    return { pool: String(pool), uids: uids.map(String), n: Number(rows[0].n) || uids.length,
+             src: String(rows[0].src || ''), at: String(rows[0].at || '') };
+  } catch (e) { return null; }
+}
+
+// 一次取回当天所有池的快照（控制台首屏用，最多 2 行）
+async function planSnapAll(day) {
+  if (!d1ok()) return null;
+  try {
+    const rows = await d1All('SELECT pool,uids,n,src,at FROM plan_snap WHERE day=?', [String(day)]);
+    if (!rows) return null;
+    const out = {};
+    for (const r of rows) {
+      try {
+        const u = JSON.parse(r.uids);
+        if (Array.isArray(u) && u.length) {
+          out[r.pool] = { uids: u.map(String), n: Number(r.n) || u.length,
+                          src: String(r.src || ''), at: String(r.at || '') };
+        }
+      } catch (e) {}
+    }
+    return out;
+  } catch (e) { return null; }
+}
+
+async function planSnapPut(day, pool, uids, src) {
+  if (!d1ok() || !uids || !uids.length) return false;
+  try {
+    // 先看这一池今天有没有落过：null=读失败（不写，免得覆盖已有快照）/ 非空=补跑，不覆盖
+    const ex = await d1All('SELECT day FROM plan_snap WHERE day=? AND pool=?',
+                           [String(day), String(pool)]);
+    if (ex === null || ex.length) return false;
+    const arr = uids.map(String);
+    return await d1Run('INSERT OR IGNORE INTO plan_snap (day,pool,uids,n,src,at) VALUES (?,?,?,?,?,?)',
+      [String(day), String(pool), JSON.stringify(arr), arr.length, String(src || 'd1'), bjStamp()]);
+  } catch (e) {
+    console.error('plan_snap 写入失败（coverage 自动回退实时口径）:', e && e.message);
+    return false;
+  }
+}
+
+/* ============================================================================
    方案C（2026-11-08）：网页自助扫码登记
    ----------------------------------------------------------------------------
    买家拿到一次性链接 /r/<8 位码>：打开 → 网页自己出二维码 → 网易云 APP 扫码确认
@@ -4199,13 +4264,20 @@ async function handle(request) {
       if (url.pathname === '/api/pool_stat') {
         const plan = await buildPlan(url.searchParams.get('day'));
         if (!plan.ok) return json({ ok: false, message: plan.msg }, 503);
-        const mine = plan.plans.filter(x => x.pool === POOL_NAME).length;
+        const own = plan.plans.filter(x => x.pool === POOL_NAME);
+        const mine = own.length;
         const idleN = (plan.idle || []).filter(x => x.pool === POOL_NAME).length;
+        // 2026-11-09：落「当轮应跑名单」快照，供 /api/coverage 与控制台按同一口径比对。
+        // plan job 每轮调一次本接口 → 首轮写、之后的补跑不覆盖（见 planSnapPut）。
+        let snapWrote = 0;
+        try {
+          snapWrote = (await planSnapPut(plan.day, POOL_NAME, own.map(x => String(x.uid)), plan.src || 'd1')) ? 1 : 0;
+        } catch (e) {}
         // 2026-11-09：带上 accel（slots/perDay/per/max/capped）。原来只回 m/l/p，
         // 文档让「进度不对就查 capped」根本查不到 —— 派单是否被 PER_CAP 等比稀释只能靠猜。
         return json({ ok: true, pool: POOL_NAME, day: plan.day, m: plan.m, l: plan.l,
                       p: plan.p, m_pool: mine, idle: idleN, src: plan.src || 'd1',
-                      accel: plan.accel || null, ms: Date.now() - t0 });
+                      accel: plan.accel || null, snap: snapWrote, ms: Date.now() - t0 });
       }
       const job = Math.max(0, parseInt(url.searchParams.get('job') || '0', 10) || 0);
       const jobs = Math.max(1, parseInt(url.searchParams.get('jobs') || '1', 10) || 1);
@@ -5343,9 +5415,18 @@ async function handle(request) {
       const day = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('day') || '')
         ? url.searchParams.get('day') : beijingDate();
       const poolQ = url.searchParams.get('pool') || POOL_NAME;
-      const plan = await buildPlan(day);
-      if (!plan.ok) return json({ ok: false, message: plan.msg }, 503);
-      const expected = plan.plans.filter(x => x.pool === poolQ).map(x => String(x.uid));
+      // 2026-11-09：expected 优先取「当轮 plan 快照」（首轮 plan 时落地，见 planSnapPut）。
+      // 没有快照（本改动之前的日子 / D1 读不到）才回退实时 buildPlan —— 回退口径与改之前完全一致。
+      let expected = null, expSrc = '', snapAt = '';
+      const snap = await planSnapGet(day, poolQ);
+      if (snap) {
+        expected = snap.uids; expSrc = 'snap'; snapAt = snap.at;
+      } else {
+        const plan = await buildPlan(day);
+        if (!plan.ok) return json({ ok: false, message: plan.msg }, 503);
+        expected = plan.plans.filter(x => x.pool === poolQ).map(x => String(x.uid));
+        expSrc = 'live';
+      }
       const rows = await d1All('SELECT uid FROM runs WHERE day=? AND pool=?', [day, poolQ]);
       // 2026-11-06：读失败不能当成「一个都没跑」——那会发出「覆盖率 0%」的假告警，
       // 且缺口名单是全部号，等于把故障指向错误的方向。直接报错。
@@ -5356,7 +5437,7 @@ async function handle(request) {
       const extra = [...ranSet].filter(u => !expSet.has(u));
       return json({ ok: true, day: day, pool: poolQ, expected: expected.length, ran: ranSet.size,
                     missing_n: missing.length, missing: missing.slice(0, 80), extra_n: extra.length,
-                    extra: extra.slice(0, 80),
+                    extra: extra.slice(0, 80), expected_src: expSrc, snap_at: snapAt,
                     pct: expected.length ? Math.round(ranSet.size * 1000 / expected.length) / 10 : 0 });
     }
     // ---- 断点续跑（2026-11-02 新增）----
@@ -5489,7 +5570,7 @@ async function handle(request) {
       // 原来每次首屏各全表扫一遍（815 + 795 = 1,610 行），而这两张表一天才变一两次。
       // 必须在 Promise.all 之前建好这个 promise，否则下面两个位置会各查一次 D1（缓存也救不了）。
       const _metaP = d1ok() ? metaDicts() : Promise.resolve(null);
-      const [master, c2, cur, prev, old, dr, peerUrlRaw, plan, ranRows, deadRows, suspectRows, freshRows, actions, streakRows, songRows, accRows, noticeRows, deadTodayRows, regCfgNow] = await Promise.all([
+      const [master, c2, cur, prev, old, dr, peerUrlRaw, plan, ranRows, deadRows, suspectRows, freshRows, actions, streakRows, songRows, accRows, noticeRows, deadTodayRows, regCfgNow, planSnaps] = await Promise.all([
         mergePool(),
         cfg(),
         readSnapDay(date),
@@ -5528,6 +5609,8 @@ async function handle(request) {
         // 2026-10-27：客服名单 + 套餐档位（控制台据此生成筛选下拉、套餐汇总与编辑弹窗选项）。
         // 与上面几段一起并发发出，不额外增加一次串行 rtt。
         regCfg().catch(() => REG_CFG_DEFAULT),
+        // 2026-11-09：当轮 plan 名单快照（两池各一行），coverage 口径用，见 planSnapPut。
+        planSnapAll(date).catch(() => null),
       ]);
       const disp = e => ({
         name: e.name || '', uid: e.uid != null ? String(e.uid) : '',
@@ -5580,21 +5663,30 @@ async function handle(request) {
       let periods = null;
       try { periods = JSON.parse(await POOL.get('console:period') || 'null'); } catch (e) { periods = null; }
       // ---- 2026-10-23 组装运行状态数据（纯加法：全部是新键，不影响 hz/dz/durs/snap）----
-      // coverage：应跑 vs 实跑。口径与 /api/coverage 逐字一致（expected=plans 里本池 uid，ran=runs 表）。
+      // coverage：应跑 vs 实跑。
+      // 2026-11-09：口径改成「当轮 plan 快照」优先 —— expected 取本轮首轮 plan 落地的名单，
+      // 与 /api/coverage 完全一致；没有快照（老日期 / D1 读不到）时回退实时 buildPlan。
       const cov = {};
-      if (plan && plan.ok && Array.isArray(plan.plans)) {
+      if (Array.isArray(ranRows) || (plan && plan.ok && Array.isArray(plan.plans))) {
         const ranByPool = {};
         for (const r of (ranRows || [])) {
           const p = r.pool === 'dz' ? 'dz' : 'hz';
           (ranByPool[p] = ranByPool[p] || new Set()).add(String(r.uid));
         }
         for (const p of ['hz', 'dz']) {
-          const exp = plan.plans.filter(x => x.pool === p).map(x => String(x.uid));
+          const sn = (planSnaps && planSnaps[p]) || null;
+          let exp = null, srcp = '';
+          if (sn) { exp = sn.uids; srcp = 'snap'; }
+          else if (plan && plan.ok && Array.isArray(plan.plans)) {
+            exp = plan.plans.filter(x => x.pool === p).map(x => String(x.uid)); srcp = 'live';
+          }
+          if (!exp || !exp.length) continue;
           const ranSet = ranByPool[p] || new Set();
           const missing = exp.filter(u => !ranSet.has(u));
           cov[p] = { expected: exp.length, ran: exp.length - missing.length,
                      missing_n: missing.length,
                      missing: missing.slice(0, 80),
+                     src: srcp, snap_at: sn ? sn.at : '',
                      pct: exp.length ? Math.round((exp.length - missing.length) * 1000 / exp.length) / 10 : 0 };
         }
       }
