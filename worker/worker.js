@@ -2591,7 +2591,12 @@ async function d1SnapWrite(day, pool, clean) {
         // 必须原样覆盖（那正是补采的目的：用结算后的值替换凌晨的旧值）。
         'ON CONFLICT(day,pool,uid) DO UPDATE SET rate=excluded.rate, rpc30=excluded.rpc30, ' +
         'cnt=COALESCE(excluded.cnt, snapshots.cnt), missions=excluded.missions, ' +
-        'dur=COALESCE(excluded.dur, snapshots.dur), at=excluded.at'
+        'dur=COALESCE(excluded.dur, snapshots.dur), at=excluded.at ' +
+        // 2026-11-09：真正实现「rpc30 大者胜」。原来是无条件 DO UPDATE = 最后写入者胜，
+        // 而读侧的 prev 因主键 (day,pool,uid) 永远是单行、prev 恒为空，那段比较是死代码。
+        // 于是任何晚到的旧值（早班补采、被取消的片重试）都能把已结算好的数据静默改小。
+        // COALESCE 兜住没有 650 数据的号：NULL 比较结果为 NULL 会直接跳过写入，等于永远写不进去。
+        'WHERE COALESCE(excluded.rpc30, -1) >= COALESCE(snapshots.rpc30, -1)'
       ).bind(day, pool, String(uid), clean[uid].rate, clean[uid].rpc30, clean[uid].cnt,
              JSON.stringify(clean[uid].mis || {}), clean[uid].dur, now));
       await DB.batch(stmts);
@@ -3462,6 +3467,24 @@ const regIso = ms => new Date(ms).toISOString();
 function regTs(x) { const t = Date.parse(String(x || '')); return isNaN(t) ? 0 : t; }
 function regNormCode(x) { return String(x || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12); }
 
+/* 2026-11-09：邮箱校验（登记 / 买家自助 / 改邮箱 / 后台编辑共用一套）。
+   原来四处都只做 /^[^\s@]+@[^\s@]+\.[^\s@]+$/，实测池里躺着 5 个 @qq.con、@qq.cpm，
+   还有 1 个 @qq,com（逗号）—— 格式校验全放过，SMTP 必然失败，队列却照样标 sent，
+   号主一封提醒都收不到、我们也不知道。返回空串 = 合法，否则返回直接给用户看的中文原因。 */
+const EMAIL_TLD_TYPO = { con: 'com', cpm: 'com', ocm: 'com', comn: 'com', comm: 'com', cmo: 'com', cim: 'com', nte: 'net', ntei: 'net', orgg: 'org' };
+function emailBad(x) {
+  const s = String(x == null ? '' : x).trim();
+  if (!s) return '请填写常用邮箱';
+  if (s.length > 120) return '邮箱太长了，请检查一下';
+  if (/[\s,，;；、]/.test(s)) return '邮箱里有多余的空格或逗号，请只填 name@example.com 这一串';
+  const m = s.match(/^([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+)\.([A-Za-z]{2,8})$/);
+  if (!m) return '邮箱格式不对，请填成 name@example.com 这样';
+  if ((m[2] + '.' + m[3]).indexOf('..') >= 0) return '邮箱域名里有连续的句点，请检查一下';
+  const tld = m[3].toLowerCase();
+  if (EMAIL_TLD_TYPO[tld]) return '邮箱后缀好像写错了（' + tld + ' → ' + EMAIL_TLD_TYPO[tld] + '？），请确认后再提交';
+  return '';
+}
+
 /* 客服口令（生成链接用）。KV 键 REG_TOKEN_PASS / D1 kv_misc.reg_token_pass，未配置 = 接口不开放 */
 async function regPass() {
   let v = '';
@@ -3496,8 +3519,17 @@ async function regTokenGet(code) {
     return undefined;
   }
   if (!rows.length) return null;
-  /* 顺手回填镜像：D1 真正读挂的那一刻，KV 里必须已经有这条 token。 */
-  try { await POOL.put('regtok:' + c, JSON.stringify(rows[0]), { expirationTtl: 259200 }); } catch (e) {}
+  /* 顺手回填镜像：D1 真正读挂的那一刻，KV 里必须已经有这条 token。
+     2026-11-09 修复：原来这里【每次读】都无条件 put，而买家登记页的 qrcheck 每 2 秒轮询一次
+     /api/r/state —— 一次扫码 ≈ 60 次 KV 写。KV 免费档「写」只有 1000/天（与删/列共用），
+     十几单登记就能打穿；打穿后 pool:hz 应急快照和 regtok: 镜像会一起写不进去，
+     而 D1 读额度打满时买家链接正是靠这两样活着（11-08 事故的兜底就是它们）。
+     改为「KV 里没有这个键才回填」：生成链接 regTokenNew、用掉 regTokenUse、作废
+     regtoken_void 都已经写过镜像，读路径本来就是兜底，不需要每次读都重写一遍。 */
+  try {
+    const kv = await POOL.get('regtok:' + c);
+    if (!kv) await POOL.put('regtok:' + c, JSON.stringify(rows[0]), { expirationTtl: 259200 });
+  } catch (e) {}
   return rows[0];
 }
 /* reg_tokens 的 KV 镜像写（读路径见 regTokenGet）。写失败只告警，D1 仍是权威。 */
@@ -4100,8 +4132,11 @@ async function handle(request) {
       const c = await cfg();
       if (!c.adminPass) return json({ message: '尚未设置管理密码：请在 Cloudflare KV 中添加 ADMIN_PASS 键（任意长随机字符串）' }, 503, CORS);
       if (!body.pass || body.pass !== c.adminPass) return json({ message: '管理密码错误' }, 403, CORS);
-      const pr = await pruneExpired();
-      const master = pr.master;
+      /* 2026-11-09：原来每次刷新管理页都跑一遍 pruneExpired()（重建全池 + 到期号逐个写 KV +
+         可能刷一次 pool 快照）。而「到期降级公益号」早已挪进每日 cron（scheduled 里
+         ctx.waitUntil(pruneExpired())，2026-10-29 的事），这里再跑等于每刷新一次多一份写副作用。
+         改成纯读：管理后台怎么刷都不再产生任何写入。 */
+      const master = await mergePool();
       // 只回展示字段，绝不下发 ck（cookie）等敏感数据
       const entries = master.map(e => ({
         name: e.name || '', uid: e.uid != null ? String(e.uid) : '',
@@ -4283,7 +4318,8 @@ async function handle(request) {
       const mu = (body.musicU || '').trim();
       if (!mu) return json({ message: '请填写 MUSIC_U' }, 400);
       const email = (body.email || '').trim();
-      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ message: '请填写常用邮箱' }, 400);
+      const ebMail = emailBad(email);
+      if (ebMail) return json({ message: ebMail }, 400);
       const v = await validateCookie(mu);
       if (!v.ok) return json({ message: v.msg }, 400);
       // 2026-10-26 修复：网易接口连续不可达时 validateCookie 会用 blake2b「编造」一个 uid 放行
@@ -4452,7 +4488,8 @@ async function handle(request) {
       const mu = String(b0.mu || '').trim();
       if (!mu) return json({ ok: false, message: '没有拿到登录凭证，请重新扫码' }, 400);
       const email = String(b0.email || '').trim();
-      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ ok: false, message: '请填一个能收到信的邮箱' }, 400);
+      const ebMail = emailBad(email);
+      if (ebMail) return json({ ok: false, message: ebMail }, 400);
       const phoneRaw = String(b0.phone || '').replace(/[^0-9]/g, '');
       const phone = /^1\d{10}$/.test(phoneRaw) ? phoneRaw : '';
 
@@ -4620,7 +4657,8 @@ async function handle(request) {
       }
       if (hits > 20) return json({ message: '今天修改邮箱的次数过多，请明天再试或联系群主。' }, 429);
       const email = (body.email || '').trim();
-      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ message: '请填写常用邮箱' }, 400);
+      const ebMail = emailBad(email);
+      if (ebMail) return json({ message: ebMail }, 400);
       const phone = (body.phone || '').replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 65248)).replace(/[^0-9]/g, '');
       const mu = (body.mu || '').trim();
       if (!phone && !mu) return json({ message: '请填写手机号或 MUSIC_U（至少填一个）' }, 400);
@@ -6494,7 +6532,8 @@ async function applyEntryEdit(body) {
     }
     if (body.email != null && String(body.email).trim() !== '') {
       const em = String(body.email).trim();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) return json({ message: '邮箱格式不对' }, 400, CORS);
+      const ebMail = emailBad(em);
+      if (ebMail) return json({ message: ebMail }, 400, CORS);
       target.email = em;
       changes.push('邮箱');
     }
