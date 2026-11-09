@@ -1810,7 +1810,11 @@ async function pruneExpired() {
     // 设 forever 后必须配 activePoolSize 的「pub 不占名额」，否则到期号会永久白占额度。
     e.exp = 'forever';
     e.email = '';
-    await POOL.put(entryKeyOf(e), JSON.stringify(e));
+    /* 2026-11-10：KV 写必须容错。KV 免费写额度只有 1000/天，写满时 POOL.put 抛异常 ——
+       原来这里没有 try，一个号写失败就把整批 Promise.all 打断（后面的到期号既不降级也不写 D1），
+       表现为「到期号一直挂在池里、号主收不到任何通知」。D1 才是权威，KV 失败不影响降级。 */
+    try { await POOL.put(entryKeyOf(e), JSON.stringify(e)); }
+    catch (er) { console.error('KV 写到公益号失败（继续走 D1）:', e && (e.name || e.uid)); }
     if (!(await d1Upsert(e))) console.error('D1 到期降级公益号失败:', e && (e.name || e.uid));
   }));
   // 审计留档：dead_log 里记一条 expired_pub（不是删除，控制台「删号记录」里能看出是到期降级）
@@ -2107,9 +2111,29 @@ async function addEntry(entry) {
         console.log('到期号重新登记（续费）:', String(entry.name || uidKey));
       }
       // KV 仍写一份：D1 万一回滚，KV 里必须是完整数据
-      await POOL.put(ekey, JSON.stringify(entry));
+      // 2026-11-10：KV 写必须容错 —— 免费额度只有 1000 写/天，写满后 POOL.put 直接抛异常。
+      //   原来这一行没有 try/catch，KV 打满时「D1 明明写得进」却给买家报 500，
+      //   买家重试又被判「已登记过」，等于卡死。D1 才是权威库，KV 写失败不该影响结果。
+      let kvOk = true;
+      try { await POOL.put(ekey, JSON.stringify(entry)); }
+      catch (e) { kvOk = false; console.error('KV 写 entry 失败（继续走 D1）:', e && e.message); }
       if (!(await d1Upsert(entry))) {
-        console.error('D1 登记镜像失败（KV 已写入，可用 /api/resync 补齐）');
+        console.error('D1 登记镜像失败（KV ' + (kvOk ? '已写入' : '也写失败') + '）');
+        /* 2026-11-10：D1 的 upsert 是「ON CONFLICT DO UPDATE」，冲突检查要读索引 ——
+           D1 读额度打满（code 7500）时它跟着失败，而买家页面上已经显示「登记成功」，
+           后台（读 D1）却查不到这个号。用 INSERT-only 的补偿表记下来，cron 重放补齐
+           （INSERT 在额度打满时仍然可写，不消耗读）。 */
+        if (kvOk) {
+          try {
+            await d1Run('INSERT OR IGNORE INTO acct_fixups (pool,uid,name,added,state,ctime) ' +
+                        'VALUES (?,?,?,?,?,?)',
+              [POOL_NAME, String(uidKey || ''), String(entry.name || ''),
+               String(entry.added || ''), 'pending', bjStamp()]);
+          } catch (e) {}
+        } else {
+          // KV 和 D1 都没写成：这时绝不能回「成功」，否则号彻底丢了
+          return { ok: false, msg: '数据库暂时繁忙，登记没有完成（这次不占名额），请 3 分钟后再点一次' };
+        }
       }
       // 2026-11-05：落一笔记账流水（成交台账）。写失败只告警 —— 记账出错不能反过来让登记失败。
       try { await ledgerAdd(entry); } catch (e) { console.error('记账流水写入失败:', e && e.message); }
@@ -2163,9 +2187,21 @@ async function addEntry(entry) {
   for (const k of staleKeys) { try { await POOL.delete(k); } catch (e) {} }
   if (staleKeys.length) console.log('到期号重新登记（续费，KV 路径）:', String(entry.name || uidKey));
   // 权威写入：只写自己的独立键，永远不会覆盖别人的登记
-  await POOL.put(ekey, JSON.stringify(entry));
+  // 2026-11-10：这条分支的 KV 写是唯一权威（D1 读已经不可用），写失败必须如实报错，
+  //   不能再像以前那样抛出去被外层吞成 500 —— 买家分不清「没写进去」和「服务器抽风」。
+  try { await POOL.put(ekey, JSON.stringify(entry)); }
+  catch (e) {
+    console.error('KV 写 entry 失败（KV 兜底路径）:', e && e.message);
+    return { ok: false, msg: '数据库暂时繁忙，登记没有完成（这次不占名额），请 3 分钟后再点一次' };
+  }
   // D1 影子库同步（2026-10-22）：失败只记日志，绝不影响登记结果
-  try { await d1Upsert(entry); } catch (e) { console.error('D1 镜像失败:', e && e.message); }
+  try {
+    if (!(await d1Upsert(entry))) {
+      await d1Run('INSERT OR IGNORE INTO acct_fixups (pool,uid,name,added,state,ctime) VALUES (?,?,?,?,?,?)',
+        [POOL_NAME, String(uidKey || ''), String(entry.name || ''),
+         String(entry.added || ''), 'pending', bjStamp()]);
+    }
+  } catch (e) { console.error('D1 镜像失败:', e && e.message); }
   // 2026-11-05：记账流水（与 D1 路径同口径）。D1 已经不可用时这里也会是 no-op。
   try { await ledgerAdd(entry); } catch (e) { console.error('记账流水写入失败:', e && e.message); }
   // 重新登记成功 → 清掉墓碑（dead_log 里移除本账号的 uid 键与 name 键两种形态）
@@ -2426,6 +2462,51 @@ async function d1Upsert(e, opt) {
      String(e.agent || ''), String(e.plan || ''), e.pub ? 1 : 0,
      String(e.note || ''), e.rb ? 1 : 0, Number(e.rbFrom) || 0, String(e.rbStart || '')]
   );
+}
+// 2026-11-10：登记补偿重放（配 acct_fixups 表，建表见 tmp/d1_acct_fixups_1110.py）。
+// 为什么需要它：addEntry 的 D1 写入是 upsert（ON CONFLICT DO UPDATE），冲突检查要读索引，
+//   D1 读额度打满（错误码 7500）时它会失败；而买家页面此时已经回了「登记成功」，
+//   后台读 D1 却查不到号（用户反馈的原话：显示登记成功，号池里找不到号）。
+//   INSERT 在额度打满时仍可执行，所以用只增的 acct_fixups 记账，等额度恢复后重放 upsert。
+// 触发点：/api/assign、/api/pool_stat（播放轮每片开工必过）、邮件 cron（每小时）。
+// 节流：同 isolate 5 分钟一次；表空时那条 SELECT 扫 0 行，成本≈0。
+let _fxAt = 0;
+async function replayFixups() {
+  if (!d1ok()) return 0;
+  if (Date.now() - _fxAt < 300000) return 0;
+  _fxAt = Date.now();
+  const rows = await d1All("SELECT pool,uid,name,added FROM acct_fixups WHERE state='pending' " +
+                           'ORDER BY ctime LIMIT 20', []);
+  if (!rows || !rows.length) return 0;      // null = 读失败，下轮再来
+  let n = 0;
+  for (const r of rows) {
+    const uid = String(r.uid || '');
+    const nm = String(r.name || '');
+    const k = uid ? 'entry:u' + uid : (nm ? 'entry:n' + encodeURIComponent(nm) : '');
+    if (!k) continue;
+    let ent = null;
+    try {
+      const raw = await POOL.get(k);
+      if (raw) ent = JSON.parse(raw);
+    } catch (e) { continue; }                // KV 读失败：留着下次
+    if (!ent) {
+      /* KV 里也没有（KV 写当时也失败了，或已被删除）：转人工。保留行，控制台能看到。 */
+      await d1Run("UPDATE acct_fixups SET state='orphan',done_at=? WHERE pool=? AND uid=? AND added=?",
+        [bjStamp(), String(r.pool || ''), uid, String(r.added || '')]);
+      console.error('补偿重放：KV 也找不到该号，转人工:', (nm || uid));
+      continue;
+    }
+    if (await d1Upsert(ent)) {
+      await d1Run("UPDATE acct_fixups SET state='done',done_at=? WHERE pool=? AND uid=? AND added=?",
+        [bjStamp(), String(r.pool || ''), uid, String(r.added || '')]);
+      n++;
+      console.log('补偿重放成功:', (ent.name || uid));
+    }
+  }
+  /* 补进来的号要立刻在控制台可见：ccBust 是 handle 内部函数，这里够不到，
+     直接落版本号（与 ccBust 同一语义）。KV 写失败无所谓，控制台缓存 5 分钟也会过期。 */
+  if (n) { try { await POOL.put('cc:ver', String(Date.now())); } catch (e) {} }
+  return n;
 }
 // 2026-11-09 修复「D1 没删掉、KV 侧当删成功」：
 // 旧实现走 d1Run，只要 SQL 不抛异常就 return true —— `DELETE ... WHERE pool=? AND uid=?`
@@ -2768,6 +2849,35 @@ async function d1Hit(kind, key) {
 const poolSnapKey = () => 'pool:' + POOL_NAME;
 
 // ====================================================================
+// 2026-11-10：Cache API 小工具（不占 KV 额度）
+// 背景：KV 免费额度只有 1000 写/天，而「控制台首屏缓存」和「Actions 状态缓存」
+//   都是短 TTL、按访问触发写入 —— 控制台开着的时候一天就能刷掉几百上千次，
+//   11-09 实测 KV 写被打到 100.0%（1000/1000），导致 entry 镜像、pool:hz 快照、
+//   dev: 设备镜像全部写不进去。这些纯缓存搬进 Cache API 后 KV 写瞬间降下来，
+//   而且 Cache API 不计入 KV 的任何额度。
+// 语义差异：Cache API 是「每个数据中心各存一份」，不像 KV 全球一致 ——
+//   对缓存来说完全够用（同一台机器反复刷新都落在同一个 colo）。
+// 任何异常都退化成「不缓存」，绝不影响主流程。
+// ====================================================================
+const _CA_HOST = 'https://ca-cache.xx1031.xyz/';
+function _caObj() { try { return (typeof caches !== 'undefined' && caches.default) ? caches.default : null; } catch (e) { return null; } }
+function _caReq(k) { return new Request(_CA_HOST + encodeURIComponent(String(k)), { method: 'GET' }); }
+async function caGet(k) {
+  const c = _caObj();
+  if (!c) return null;
+  try { const r = await c.match(_caReq(k)); return r ? await r.text() : null; } catch (e) { return null; }
+}
+async function caPut(k, body, ttl) {
+  const c = _caObj();
+  if (!c) return false;
+  try {
+    await c.put(_caReq(k), new Response(body, {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=' + (Number(ttl) || 300) } }));
+    return true;
+  } catch (e) { return false; }
+}
+
+// ====================================================================
 // 2026-11-09：D1 读额度闸门（用户口径：自主登记优先吃 D1，≥95% 才退 KV）
 // 背景：D1 免费 500 万行读/天（UTC 日）。11-08 事故把额度打满后所有 SELECT 回 7500，
 //   登记全链路只能靠 KV 镜像活着 —— 而那时 KV 也已经写穿，等于两条腿同时断。
@@ -2784,7 +2894,10 @@ async function d1QuotaPct() {
   if (_qgPct !== -2 && Date.now() - _qgAt < 60000) return _qgPct;
   let p = -1, t = 0;
   try {
-    const raw = await POOL.get(QGATE_KEY);
+    /* 2026-11-10：优先读 Cache API（自动探针写这里，不占 KV 写额度），
+       读不到再退 KV（兼容手动 /api/quota_report 落的全局值和上线前的旧值）。 */
+    let raw = await caGet(QGATE_KEY);
+    if (!raw) raw = await POOL.get(QGATE_KEY).catch(() => null);
     if (raw) { const o = JSON.parse(raw) || {}; p = Number(o.p); t = Number(o.t) || 0; }
   } catch (e) {}
   if (!(p >= 0) || Date.now() - t > 5400000) p = -1;     // 90 分钟没更新 → 当未知，走 D1
@@ -2803,7 +2916,10 @@ async function d1QuotaProbe(force) {
     tok = cleanKV((typeof globalThis.CFQ_TOKEN === 'string' && globalThis.CFQ_TOKEN) || await POOL.get('CFQ_TOKEN'));
     acc = cleanKV((typeof globalThis.CFQ_ACCOUNT === 'string' && globalThis.CFQ_ACCOUNT) || await POOL.get('CFQ_ACCOUNT'));
     if (!force) {
-      const raw = await POOL.get(QGATE_KEY);
+      /* 2026-11-10：节流判断改读 Cache API。原来读 KV 判断「10 分钟内探过没有」，
+         而 19 个分片并发时各自读到同一个旧时间戳 → 一起探、一起写 KV，
+         一小时能写上百次（KV 写免费额度只有 1000/天，这是第二大来源）。 */
+      const raw = await caGet(QGATE_KEY) || await POOL.get(QGATE_KEY).catch(() => null);
       if (raw) last = Number((JSON.parse(raw) || {}).t) || 0;
     }
   } catch (e) {}
@@ -2828,10 +2944,9 @@ async function d1QuotaProbe(force) {
     const read = arr[0] ? Number(arr[0].sum.rowsRead || 0) : 0;
     const written = arr[0] ? Number(arr[0].sum.rowsWritten || 0) : 0;
     const p = Math.round(read * 1000 / D1_READ_LIMIT) / 10;   // 一位小数的百分比
-    try {
-      await POOL.put(QGATE_KEY, JSON.stringify({ p: p, t: Date.now(), read: read, w: written }),
-                     { expirationTtl: 7200 });
-    } catch (e) {}
+    /* 2026-11-10：自动探针结果只落 Cache API（每 colo 一份，本 colo 的闸门据此判断）——
+       不占 KV 写额度。手动落值（/api/quota_report）仍写 KV，保证跨数据中心全局生效。 */
+    await caPut(QGATE_KEY, JSON.stringify({ p: p, t: Date.now(), read: read, w: written }), 7200);
     _qgPct = p; _qgAt = Date.now();
     return { pct: p, read: read };
   } catch (e) {
@@ -4441,10 +4556,12 @@ async function handle(request) {
       const pIn = (bq && bq.p != null) ? Number(bq.p) : NaN;
       if (isFinite(pIn)) {
         const p = Math.max(0, Math.min(999, pIn));
+        // 手动落值：KV（跨 colo 全局）+ Cache API（同 colo 立即可读）双写
         try {
           await POOL.put(QGATE_KEY, JSON.stringify({ p: p, t: Date.now(), src: 'manual' }),
                          { expirationTtl: 7200 });
         } catch (e) {}
+        await caPut(QGATE_KEY, JSON.stringify({ p: p, t: Date.now(), src: 'manual' }), 7200);
         _qgPct = p; _qgAt = Date.now();
         return json({ ok: true, pct: p, src: 'manual', hot: p >= QGATE_HOT });
       }
@@ -4544,8 +4661,12 @@ async function handle(request) {
       const t0 = Date.now();
       // 2026-11-09：relay 每片开工都会过这里 → 顺手探一次 D1 额度水位（10 分钟节流，失败静默）。
       // 只有这里能拿到「一轮中间」的水位；仅靠 scheduled（每小时）事故期间来不及降级。
+      // 2026-11-10：顺带重放「登记了但没写进 D1」的补偿队列（5 分钟节流，表空时几乎零成本）。
       try {
-        if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(d1QuotaProbe().catch(() => {}));
+        if (globalThis.CTX && globalThis.CTX.waitUntil) {
+          globalThis.CTX.waitUntil(d1QuotaProbe().catch(() => {}));
+          globalThis.CTX.waitUntil(replayFixups().catch(() => {}));
+        }
       } catch (e) {}
       if (url.pathname === '/api/pool_stat') {
         const plan = await buildPlan(url.searchParams.get('day'));
@@ -5830,14 +5951,11 @@ async function handle(request) {
       if (!d1ok()) return null;
       const isToday = (d === beijingDate());
       const k = 'ccst:' + d;
-      try {
-        const hit = await POOL.get(k);
-        if (hit) return JSON.parse(hit);
-      } catch (e) {}
+      // 2026-11-10：同样搬到 Cache API（KV 写额度太贵，这条 30 分钟写一次 = 96 次/天）
+      const hit = await caGet(k);
+      if (hit) { try { return JSON.parse(hit); } catch (e) {} }
       const rows = await d1All(snapStreakSQL(), [dateMinusN(d, 6), d]).catch(() => null);
-      if (rows) {
-        try { await POOL.put(k, JSON.stringify(rows), { expirationTtl: isToday ? 1800 : 86400 }); } catch (e) {}
-      }
+      if (rows) { await caPut(k, JSON.stringify(rows), isToday ? 1800 : 86400); }
       return rows;
     }
     if (url.pathname === '/api/console/data' && request.method === 'POST') {
@@ -5854,7 +5972,10 @@ async function handle(request) {
       const prevDate = /^\d{4}-\d{2}-\d{2}$/.test(body.prevDate || '')
         ? (body.prevDate < date ? body.prevDate : dateMinus1(date))
         : dateMinus1(date);
-      // 2026-11-06：先查 KV 缓存（命中 = 0 行 D1 读，直接回）。body.nocache=1 可强制回源。
+      // 2026-11-06：先查缓存（命中 = 0 行 D1 读，直接回）。body.nocache=1 可强制回源。
+      // 2026-11-10：缓存从 KV 搬到 Cache API —— KV 写只有 1000/天，而这里每 5 分钟就写一次，
+      //   控制台开着一天能刷掉几百次，是 11-09 KV 写打到 100% 的主要来源之一。
+      //   语义不变：命中 0 行 D1 读、版本号即时失效、TTL 按日期分档。
       let _ccSkip = false;
       try { _ccSkip = body.nocache === 1; } catch (e) {}
       let _ccKey = '';
@@ -5865,10 +5986,8 @@ async function handle(request) {
         // 2026-11-09：按结束日分档。查历史日期时那几天的快照/播放量早已定格，
         // 没必要每 5 分钟重查一遍（一次约 8,200 行）—— 缓存 1 小时。今天仍是 5 分钟。
         if (date !== beijingDate()) _ccTtl = 3600;
-        try {
-          const _ccHit = await POOL.get(_ccKey);
-          if (_ccHit) return new Response(_ccHit, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, { 'X-Cache': 'hit' }) });
-        } catch (e) {}
+        const _ccHit = await caGet(_ccKey);
+        if (_ccHit) return new Response(_ccHit, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, { 'X-Cache': 'hit' }) });
       }
       // 2026-10-22：控制台是高频只读接口，原来每刷新一次就跑 pruneExpired()（全量重建 +
       // 可能删键 + 写 204KB master + 推 12 个 Secret）。改为直接读 D1 全表（一条 SELECT）。
@@ -6103,11 +6222,10 @@ async function handle(request) {
                            slots: (plan.accel || {}).slots || 0 } : null,
                     role: role, cfg: regCfgNow };
       const _body = JSON.stringify(_out);
-      // 2026-11-06：首屏结果写入 KV 缓存（TTL 5 分钟）。命中时上面整段大查询都不会再跑。
+      // 2026-11-06：首屏结果写入缓存（TTL 5 分钟）。命中时上面整段大查询都不会再跑。
       // 2026-11-09：TTL 按日期分档（今天 300s / 历史 3600s），见上面 _ccTtl。
-      if (!_ccSkip && _ccKey) {
-        try { await POOL.put(_ccKey, _body, { expirationTtl: _ccTtl }); } catch (e) {}
-      }
+      // 2026-11-10：落 Cache API（不占 KV 写额度）；失败无妨，下一刷重建。
+      if (!_ccSkip && _ccKey) { await caPut(_ccKey, _body, _ccTtl); }
       return new Response(_body, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, { 'X-Cache': _ccSkip ? 'bypass' : 'miss' }) });
     }
     // 控制台编辑：hz 本地执行（与管理后台同一套逻辑）；dz 转发到对端 worker 的对等接口
@@ -6554,7 +6672,10 @@ async function fetchActionsStatus() {
   const c = await cfg();
   if (!c.ghToken) return [];
   try {
-    const hit = await POOL.get('actions:cache');
+    /* 2026-11-10：搬到 Cache API。原来走 KV，跑批时 TTL 只有 60 秒 ——
+       控制台开着就是每分钟写一次，一天 1400+ 次，直接把 KV 免费写额度（1000/天）烧穿。
+       这是「KV 写 100%」的头号来源，必须搬走。 */
+    const hit = await caGet('actions:cache');
     if (hit) { const arr = JSON.parse(hit); if (Array.isArray(arr)) return arr; }
   } catch (e) { /* 缓存读失败按没有处理 */ }
   const repos = [
@@ -6611,8 +6732,9 @@ async function fetchActionsStatus() {
   }));
   // 2026-11-04：有 run 在跑时缓存只留 60 秒（进度要看得见在动）；全部结束才用 5 分钟，
   // 避免控制台每刷一次就去打 2 个仓库 x (1 次 runs + 1~3 次 jobs) 的 GitHub 接口。
+  // 2026-11-10：落 Cache API（不占 KV 写额度）。跑批时 60 秒刷新依旧保留。
   const _live = out.some(x => x && x.ok && x.status && x.status !== 'completed');
-  try { await POOL.put('actions:cache', JSON.stringify(out), { expirationTtl: _live ? 60 : 300 }); } catch (e) { /* 缓存写失败不致命 */ }
+  await caPut('actions:cache', JSON.stringify(out), _live ? 60 : 300);
   return out;
 }
 // ---- 2026-10-24：Cloudflare Cron 定时触发 snap650（GitHub schedule 靠不住）----
@@ -8981,6 +9103,8 @@ export default {
       // 2026-11-09：每小时顺带探一次 D1 额度水位（relay 停跑时也能刷新，
       // 否则闸门数据超过 90 分钟就判「未知」，等于白做）。
       ctx.waitUntil(d1QuotaProbe().catch(() => {}));
+      // 2026-11-10：重放「登记成功但没写进 D1」的补偿队列（relay 停跑时也有兜底腿）
+      ctx.waitUntil(replayFixups().catch(() => {}));
       return;
     }
     ctx.waitUntil(dispatchSnap650('all').catch(() => {}));
