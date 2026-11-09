@@ -3793,6 +3793,90 @@ function regStateOf(row) {
   if (exp && exp < Date.now()) return 'expired';
   return 'unused';
 }
+/* ===== 2026-11-10：客服机器授权（reg_devices）=====
+   背景：EXE 里的生成口令 REG_TOKEN_PASS 是硬编码的，EXE 外流就等于谁都能造链接。
+   配额（200 条/天）只是止损。这里加一层「按机器授权」：
+     客服电脑算出一个机器码 → 首次用时自动登记为 pending（24 小时宽限）→
+     管理员在控制台放行（ok）→ 之后这台机器才继续能生成。
+   老版 EXE 不带机器码字段：默认放行（否则上线瞬间所有客服全停），
+   等新版都发出去、机器码都授权完，把 KV REG_REQUIRE_DEV 置 1 即可彻底关掉老版。 */
+const REG_DEV_GRACE_MS = 24 * 3600 * 1000;
+
+function regDevNorm(v) {
+  return String(v || '').toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 16);
+}
+
+/* 读一台机器的授权记录：D1 优先，读不到退 KV 镜像 dev:<码>。
+   返回 {row, src} / null（D1 与 KV 都没有）/ undefined（D1 失败且 KV 没镜像）。 */
+async function regDevGet(dev) {
+  if (d1ok()) {
+    const rows = await d1All(
+      'SELECT dev,agent,quota,state,ctime,last_at FROM reg_devices WHERE dev=? LIMIT 1', [dev]);
+    if (rows) return { row: rows[0] || null, src: 'd1' };
+  }
+  try {
+    const raw = await POOL.get('dev:' + dev);
+    if (raw) return { row: JSON.parse(raw), src: 'kv' };
+  } catch (e) {}
+  return undefined;
+}
+
+/* 返回 { ok, dev, quota, msg, legacy }。legacy=true 表示老版 EXE（不带机器码）。 */
+async function regDevCheck(devRaw, agent) {
+  const dev = regDevNorm(devRaw);
+  if (!dev) {
+    let need = '';
+    try { need = cleanKV(await POOL.get('REG_REQUIRE_DEV')); } catch (e) {}
+    if (need === '1') {
+      return { ok: false, dev: '', quota: 0,
+        msg: '这台电脑上的软件版本太旧，已停止生成链接。请找管理员要新版软件。' };
+    }
+    return { ok: true, dev: '', quota: 0, legacy: true };
+  }
+  const g = await regDevGet(dev);
+  if (g === undefined) {
+    /* D1 读失败且 KV 没镜像：授权是钱的事，但此刻连记录都读不到，
+       拒绝会让客服在额度打满时集体停摆。放行 + 留日志，等额度恢复再正常校验。 */
+    console.error('regDevCheck 无法读取设备记录，临时放行:', dev);
+    return { ok: true, dev: dev, quota: 0, degraded: true };
+  }
+  if (!g.row) {
+    /* 第一次见到这台机器：登记 pending，给 24 小时宽限（老板在这段时间里授权）。 */
+    const now = Date.now();
+    const row = { dev: dev, agent: String(agent || ''), quota: 200, state: 'pending',
+      note: '', ctime: regIso(now), last_at: regIso(now) };
+    try {
+      await d1Run('INSERT INTO reg_devices (dev,agent,quota,state,note,ctime,last_at) ' +
+                  'VALUES (?,?,?,?,?,?,?) ON CONFLICT(dev) DO NOTHING',
+                  [row.dev, row.agent, row.quota, row.state, row.note, row.ctime, row.last_at]);
+    } catch (e) { console.error('登记新设备失败:', e && e.message); }
+    try { await POOL.put('dev:' + dev, JSON.stringify(row)); } catch (e) {}
+    return { ok: true, dev: dev, quota: 200, pending: true };
+  }
+  const st = String(g.row.state || 'pending');
+  const quota = Math.max(1, Number(g.row.quota) || 200);
+  if (st === 'ok') return { ok: true, dev: dev, quota: quota };
+  if (st === 'hold') {
+    return { ok: false, dev: dev, quota: 0, msg: '这台电脑的生成权限已被管理员停用，请联系管理员。' };
+  }
+  /* pending：看宽限期 */
+  const born = regTs(g.row.ctime);
+  if (born && (Date.now() - born) < REG_DEV_GRACE_MS) {
+    return { ok: true, dev: dev, quota: quota, pending: true,
+      grace_left_h: Math.max(1, Math.round((REG_DEV_GRACE_MS - (Date.now() - born)) / 3600000)) };
+  }
+  return { ok: false, dev: dev, quota: 0,
+    msg: '这台电脑还没被授权。请把机器码 ' + dev + ' 发给管理员，授权后重启软件即可。' };
+}
+
+async function regDevTouch(dev, agent) {
+  if (!dev) return;
+  try {
+    await d1Run('UPDATE reg_devices SET last_at=?, agent=CASE WHEN agent=\'\' THEN ? ELSE agent END WHERE dev=?',
+                [regIso(Date.now()), String(agent || ''), dev]);
+  } catch (e) {}
+}
+
 async function regTokenNew(agent, plan, days, note, hours) {
   const code = regCode();
   const now = Date.now();
@@ -4890,14 +4974,21 @@ async function handle(request) {
       /* 2026-11-09：链接有效期只留两档（24 小时 / 3 天）。原来接受 1~720 任意值，
          EXE 里还多一档 7 天 —— 链接在群里转手后存活太久，等于把入口长期挂着。 */
       const hours = (Number(b1.hours) === 72) ? 72 : 24;
-      /* 2026-11-09：每客服每日生成配额（KV REG_TOKEN_DAILY_MAX，默认 200）。
+      /* 2026-11-09：每台机器/每客服 每日生成配额（默认 200；单机配额可在控制台「设备授权」里单独设）。
          EXE 里的生成口令是硬编码的，EXE 一旦外流就等于谁都能造链接；配额把最坏情况
          压成「每天 200 条」，且异常量在 rate_limit 里一眼看得出来。计数不可用则放行。
-         2026-11-10：60 → 200。实测单客服日峰值 24 单，但「生成 ≠ 成交」（买家不扫、
-         链接过期重发、EXE 网络重试都占次数），60 偏紧会误伤正常客服。 */
-      let cap = 200;
-      try { cap = parseInt(cleanKV(await POOL.get('REG_TOKEN_DAILY_MAX')), 10) || 200; } catch (e) {}
-      const genN = await d1Hit('rtn', String(agent || '-') + ':' + beijingDate());
+         2026-11-10：60 → 200（生成≠成交，重发重试都占次数）；同时接入机器授权校验。 */
+      const dchk = await regDevCheck(b1.dev, agent);
+      if (!dchk.ok) {
+        return json({ ok: false, need_auth: true, dev: dchk.dev || '', message: dchk.msg }, 403);
+      }
+      await regDevTouch(dchk.dev, agent);
+      let cap = dchk.quota || 200;
+      if (!dchk.quota) {
+        try { cap = parseInt(cleanKV(await POOL.get('REG_TOKEN_DAILY_MAX')), 10) || 200; } catch (e) {}
+      }
+      const genKey = dchk.dev ? ('d' + dchk.dev) : String(agent || '-');
+      const genN = await d1Hit('rtn', genKey + ':' + beijingDate());
       if (genN !== null && genN > cap) {
         return json({ ok: false, message: '今天生成链接已达上限（' + cap + ' 条/天），需要更多请联系管理员' }, 429);
       }
@@ -6086,6 +6177,75 @@ async function handle(request) {
       return json({ ok: true, d1: saved.ok, cfg: saved.cfg,
         message: '已保存：客服 ' + saved.cfg.agents.length + ' 人（' + withGrp + ' 人配了售后群）、套餐 ' + saved.cfg.plans.length + ' 档'
           + (saved.ok ? '' : '（⚠️ D1 写入失败，已写 KV 兜底，请稍后重试）') + hint }, 200, CORS);
+    }
+    /* ===== 2026-11-10：客服机器授权（控制台「设备授权」）=====
+       D1 reg_devices 是权威，KV dev:<机器码> 是兜底镜像（D1 读额度打满时用）。
+       只认满权限口令，只读口令进不来。 */
+    if (url.pathname === '/api/console/dev_list' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) {
+        const who = await consoleRole(body);
+        return json({ message: who === 'ro' ? '当前是只读口令，不能管理设备' : '账号或密码错误' }, 403, CORS);
+      }
+      const rows = await d1All('SELECT dev,agent,quota,state,note,ctime,last_at FROM reg_devices ' +
+                               'ORDER BY ctime DESC LIMIT 300');
+      if (rows === null) return json({ ok: false, message: '数据库读不到（' + d1ErrHint() + '）' }, 503, CORS);
+      return json({ ok: true, rows: rows }, 200, CORS);
+    }
+    if (url.pathname === '/api/console/dev_save' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) {
+        const who = await consoleRole(body);
+        return json({ message: who === 'ro' ? '当前是只读口令，不能管理设备' : '账号或密码错误' }, 403, CORS);
+      }
+      const dev = regDevNorm(body.dev);
+      if (dev.length < 6) return json({ message: '机器码格式不对（应该是 12 位字母数字，来自客服软件弹出的那串）' }, 400, CORS);
+      const stRaw = String(body.state || 'ok');
+      const state = (stRaw === 'hold' || stRaw === 'pending') ? stRaw : 'ok';
+      const quota = Math.max(1, Math.min(2000, Number(body.quota) || 200));
+      const agent = normAgent(body.agent);
+      const note = String(body.note || '').slice(0, 60);
+      const now = regIso(Date.now());
+      const ex = await d1All('SELECT dev,ctime FROM reg_devices WHERE dev=? LIMIT 1', [dev]);
+      if (ex === null) return json({ ok: false, message: '数据库读不到（' + d1ErrHint() + '）' }, 503, CORS);
+      let ok;
+      if (ex.length) {
+        ok = await d1Run('UPDATE reg_devices SET agent=?, quota=?, state=?, note=? WHERE dev=?',
+                         [agent, quota, state, note, dev]);
+      } else {
+        ok = await d1Run('INSERT INTO reg_devices (dev,agent,quota,state,note,ctime,last_at) VALUES (?,?,?,?,?,?,?)',
+                         [dev, agent, quota, state, note, now, '']);
+      }
+      if (!ok) return json({ ok: false, message: '保存失败（' + d1ErrHint() + '）' }, 503, CORS);
+      /* KV 镜像：非关键路径。写失败（额度满）只影响「D1 读满时还能不能校验这一台」，不影响本次保存。 */
+      let kvok = true;
+      try {
+        await POOL.put('dev:' + dev, JSON.stringify({
+          dev: dev, agent: agent, quota: quota, state: state, note: note,
+          ctime: (ex.length && ex[0] && ex[0].ctime) || now, last_at: '' }));
+      } catch (e) { kvok = false; }
+      return json({ ok: true, kv: kvok,
+        message: '已保存' + (kvok ? '' : '（⚠️ KV 镜像没写进去，可能是今日 KV 写额度满了；不影响现在生效，但 D1 读满时会退回到未授权）') },
+        200, CORS);
+    }
+    if (url.pathname === '/api/console/dev_del' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) {
+        const who = await consoleRole(body);
+        return json({ message: who === 'ro' ? '当前是只读口令，不能管理设备' : '账号或密码错误' }, 403, CORS);
+      }
+      const dev = regDevNorm(body.dev);
+      if (!dev) return json({ message: '机器码不能为空' }, 400, CORS);
+      const n = await d1Changes('DELETE FROM reg_devices WHERE dev=?', [dev]);
+      if (n < 0) return json({ ok: false, message: '删除失败（' + d1ErrHint() + '）' }, 503, CORS);
+      try { await POOL.delete('dev:' + dev); } catch (e) {}
+      return json({ ok: true, message: n ? '已删除这台设备的授权' : '没找到这台设备' }, 200, CORS);
     }
     // ================= 客服改名（2026-11-06 新增）=================
     // 需求：客服名在库里其实存了三份 —— reg_cfg.agents（登记下拉）、accounts.agent（每个号的归属）、
@@ -7359,6 +7519,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <button class="mini" id="btnRefresh">刷新</button>
     <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成">月度结算</button>
     <button class="mini gray" id="btnCfg" style="display:none">客服名单</button>
+    <button class="mini gray" id="btnDev" style="display:none" title="按客服电脑授权：未授权的机器码不能生成登记链接">设备授权</button>
     <button class="mini gray" id="btnOut">退出</button>
   </div>
   <div class="twrap"><table><thead><tr>
@@ -7472,6 +7633,24 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <p style="font-size:11.5px;color:#999;margin:6px 0 0">例：<code>1月=30=3</code> / <code>半年=180=10</code> / <code>1年=365=15</code> / <code>2年=730=20</code> / <code>永久=0=80</code>。<br>单价的第三段不写就等于「没定价」，月度结算里会把它单列成「待补价」，<b>不会当 0 元算进合计</b>。删掉某个套餐不影响已登记的号（它们的套餐名照旧显示）。</p>
   <div class="row2"><button id="cSave">保存</button><button class="gray" id="cCancel">关闭</button></div>
   <div class="msg" id="cm"></div>
+</div></div>
+<!-- ===== 2026-11-10：客服机器授权 ===== -->
+<div class="modal" id="devModal" hidden><div class="mbox" style="width:880px;max-height:90vh;overflow:auto">
+  <h3>设备授权（客服电脑）</h3>
+  <p style="font-size:12px;color:#888;margin:4px 0 0;line-height:1.75">新版客服软件第一次生成链接会报出自己的<b>机器码</b>，这里授权以后那台电脑才能继续生成。<br>
+  <b>待授权</b>的机器从第一次出现起有 <b>24 小时</b>宽限，超时没授权就会被拦住，并提示客服把机器码发给管理员。<br>
+  每台机器可以单独设每日上限（留空按 200）。<b>停用</b> = 立刻拦住但保留记录；<b>删除</b> = 彻底忘掉，下次再出现会重新变成待授权。<br>
+  ⚠ 机器码能挡住「软件被传到网上、陌生人下载就用」，<b>挡不住会逆向的人</b>（算法和口令都在软件里）。要彻底防白嫖得改成每个客服独立账号。</p>
+  <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:12px 0 6px;padding:10px 12px;background:#fffaf1;border:1px solid #f3e2c8;border-radius:9px">
+    <div><label style="margin-top:0">机器码</label><input id="dvCode" placeholder="如 A3F92K7Q8M1D" style="width:175px;font-family:ui-monospace,Consolas,monospace"></div>
+    <div><label style="margin-top:0">归哪个客服</label><select id="dvAgent" style="width:130px"></select></div>
+    <div><label style="margin-top:0">每日上限</label><input id="dvQuota" value="200" inputmode="numeric" style="width:88px"></div>
+    <button class="mini" id="dvAdd" style="margin-top:0;padding:9px 14px">添加 / 授权</button>
+    <button class="mini gray" id="dvReload" style="margin-top:0">刷新</button>
+  </div>
+  <div id="dvBody"></div>
+  <div class="row2"><button class="gray" id="dvClose">关闭</button></div>
+  <div class="msg" id="dvm"></div>
 </div></div>
 <!-- ===== 2026-11-05：月度结算 ===== -->
 <div class="modal" id="lgModal" hidden><div class="mbox" style="width:980px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
@@ -7629,6 +7808,7 @@ function applyRole(role){
   ROLE=(role==='full')?'full':'ro';
   var full=(ROLE==='full');
   $('btnCfg').style.display=full?'':'none';
+  $('btnDev').style.display=full?'':'none';
   // 2026-11-05：结算涉及金额，只有满权限能看到入口（服务端也拦）
   var bl=$('btnLedger');if(bl)bl.style.display=full?'':'none';
   var t=$('ptitle');
@@ -8528,6 +8708,103 @@ function suspectRename(oldList,newList){
   if(!gone.length||gone.length!==add.length)return null;
   return {gone:gone,add:add};
 }
+/* ===== 2026-11-10：设备授权（客服电脑）===== */
+function dvFmt(t){return t?String(t).slice(0,16).replace('T',' '):'-';}
+function dvTxt(s){return s==='ok'?'已授权':(s==='hold'?'已停用':'待授权');}
+function dvBadge(s){
+  var c=s==='ok'?'#2e7d32':(s==='hold'?'#8a8a8a':'#b26a00');
+  var b=s==='ok'?'#e8f5e9':(s==='hold'?'#f0f0f0':'#fff4e0');
+  return '<span style="padding:1px 7px;border-radius:9px;background:'+b+';color:'+c+';font-size:11.5px;white-space:nowrap">'+dvTxt(s)+'</span>';
+}
+function dvRender(rows){
+  var h='<table style="width:100%;border-collapse:collapse;font-size:12.5px">'
+    +'<tr style="background:#faf7f2;text-align:left">'
+    +'<th style="padding:7px 6px">机器码</th><th>客服</th><th>每日上限</th><th>状态</th>'
+    +'<th>首次出现</th><th>最近生成</th><th style="text-align:right">操作</th></tr>';
+  if(!(rows||[]).length){
+    h+='<tr><td colspan="7" style="padding:16px;color:#999;text-align:center">还没有任何设备。新版客服软件第一次生成链接后，这里就会出现。</td></tr>';
+  }
+  (rows||[]).forEach(function(r){
+    var dev=esc(r.dev||'');
+    var ag=esc(r.agent||'');
+    var qt=(Number(r.quota)||200);
+    h+='<tr style="border-top:1px solid #f0eae2">'
+      +'<td style="padding:6px;font-family:ui-monospace,Consolas,monospace;white-space:nowrap">'+dev+'</td>'
+      +'<td style="padding:0 6px">'+(ag||'-')+'</td>'
+      +'<td style="padding:0 6px">'+qt+'</td>'
+      +'<td style="padding:0 6px">'+dvBadge(String(r.state||'pending'))+'</td>'
+      +'<td style="padding:0 6px;white-space:nowrap">'+dvFmt(r.ctime)+'</td>'
+      +'<td style="padding:0 6px;white-space:nowrap">'+dvFmt(r.last_at)+'</td>'
+      +'<td style="text-align:right;white-space:nowrap;padding:4px 2px">'
+      +'<button class="mini" data-dv="ok" data-code="'+dev+'" data-agent="'+ag+'" data-quota="'+qt+'" style="margin:0 2px;padding:4px 8px">授权</button>'
+      +'<button class="mini gray" data-dv="hold" data-code="'+dev+'" data-agent="'+ag+'" data-quota="'+qt+'" style="margin:0 2px;padding:4px 8px">停用</button>'
+      +'<button class="mini gray" data-dv="del" data-code="'+dev+'" style="margin:0 2px;padding:4px 8px">删除</button>'
+      +'</td></tr>';
+  });
+  h+='</table>';
+  $('dvBody').innerHTML=h;
+}
+function dvLoad(){
+  var t=JSON.parse(TOKEN||'{}');
+  $('dvm').textContent='读取中…';$('dvm').className='msg';
+  api('/api/console/dev_list',{user:t.user,pass:t.pass}).then(function(r){
+    if(r.ok&&r.d&&r.d.ok){
+      dvRender(r.d.rows||[]);
+      $('dvm').textContent='共 '+(r.d.rows||[]).length+' 台设备（最多显示 300 台）';
+      $('dvm').className='msg ok';
+    }else{
+      $('dvm').textContent=(r.d&&r.d.message)||'读取失败';$('dvm').className='msg err';
+    }
+  }).catch(function(){$('dvm').textContent='网络错误，请重试';$('dvm').className='msg err';});
+}
+$('btnDev').onclick=function(){
+  var c=(DATA&&DATA.cfg)||{agents:[]};
+  $('dvAgent').innerHTML=(c.agents||[]).map(function(a){return '<option>'+esc(a)+'</option>';}).join('');
+  $('dvCode').value='';$('dvQuota').value='200';
+  $('dvm').textContent='';$('dvm').className='msg';
+  $('devModal').hidden=false;
+  dvLoad();
+};
+$('dvClose').onclick=function(){$('devModal').hidden=true;};
+$('dvReload').onclick=dvLoad;
+$('dvAdd').onclick=function(){
+  var t=JSON.parse(TOKEN||'{}');
+  var dev=($('dvCode').value||'').replace(/[^0-9A-Za-z]/g,'').toUpperCase();
+  if(dev.length<6){$('dvm').textContent='机器码长度不对（应该是客服软件里显示的那串字母数字）';$('dvm').className='msg err';return;}
+  $('dvAdd').disabled=true;$('dvm').textContent='保存中…';$('dvm').className='msg';
+  api('/api/console/dev_save',{user:t.user,pass:t.pass,dev:dev,agent:$('dvAgent').value||'',
+    quota:parseInt($('dvQuota').value,10)||200,state:'ok'}).then(function(r){
+    $('dvAdd').disabled=false;
+    if(r.ok&&r.d&&r.d.ok){
+      $('dvm').textContent=r.d.message||'已保存';$('dvm').className='msg ok';
+      $('dvCode').value='';dvLoad();
+    }else{
+      $('dvm').textContent=(r.d&&r.d.message)||'保存失败';$('dvm').className='msg err';
+    }
+  }).catch(function(){$('dvAdd').disabled=false;$('dvm').textContent='网络错误，请重试';$('dvm').className='msg err';});
+};
+$('dvBody').addEventListener('click',function(ev){
+  var el=ev.target;
+  while(el&&el!==$('dvBody')&&!(el.getAttribute&&el.getAttribute('data-dv')))el=el.parentNode;
+  if(!el||el===$('dvBody')||!el.getAttribute)return;
+  var act=el.getAttribute('data-dv'),code=el.getAttribute('data-code');
+  if(!code)return;
+  if(act==='del'&&!confirm('删除设备 '+code+' ？\\n\\n删除后这台电脑下次生成链接会重新变成「待授权」，24 小时后又会被拦住。'))return;
+  if(act==='hold'&&!confirm('停用设备 '+code+' ？\\n\\n停用后这台电脑立刻不能生成链接（记录保留，随时可以再授权）。'))return;
+  var t=JSON.parse(TOKEN||'{}');
+  $('dvm').textContent='处理中…';$('dvm').className='msg';
+  var body={user:t.user,pass:t.pass,dev:code};
+  var url='/api/console/dev_save';
+  if(act==='del'){url='/api/console/dev_del';}
+  else{body.state=act;body.agent=el.getAttribute('data-agent')||'';body.quota=parseInt(el.getAttribute('data-quota'),10)||200;}
+  api(url,body).then(function(r){
+    if(r.ok&&r.d&&r.d.ok){
+      $('dvm').textContent=r.d.message||'完成';$('dvm').className='msg ok';dvLoad();
+    }else{
+      $('dvm').textContent=(r.d&&r.d.message)||'操作失败';$('dvm').className='msg err';
+    }
+  }).catch(function(){$('dvm').textContent='网络错误，请重试';$('dvm').className='msg err';});
+});
 $('btnCfg').onclick=function(){
   var c=(DATA&&DATA.cfg)||{agents:[],plans:[]};
   // 2026-11-06：名单框支持「客服名|群号」；有群号的客服带竖线展示
