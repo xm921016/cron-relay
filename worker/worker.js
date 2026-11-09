@@ -3897,7 +3897,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
           <p class="tip" style="text-align:left;margin:10px 0 0">分享出来长这样，整段粘进来就行：</p>
           <p class="ex">分享任素汐的单曲《我要你》: https://163cn.tv/bkyZ4bVK (来自@网易云音乐)</p>
           <p class="tip" style="text-align:left;margin:8px 0 0">只收<b>单曲</b>：专辑、歌单、电台、排行榜链接一律退回。原创 / 共创作品，共创人<b>不超过 2 人</b>。</p>
-          <label>手机号（选填）</label>
+          <label>手机号（与网易音乐人绑定的手机号）</label>
           <input id="i-phone" inputmode="numeric" placeholder="18888888888" autocomplete="off">
           <label>通知邮箱（必填，掉线或需要验证时邮件通知）</label>
           <input id="i-email" inputmode="email" placeholder="123456@qq.com" autocomplete="off">
