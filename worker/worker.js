@@ -5420,6 +5420,25 @@ async function handle(request) {
     async function ccBust() {
       try { await POOL.put('cc:ver', String(Date.now())); } catch (e) {}
     }
+    // 2026-11-09：把「连续达标天数」单独拎出来缓存。它是首屏最贵的一条查询 ——
+    //   snapStreakSQL() 要扫 6 天快照再跑两个窗口函数，实测 4,000~5,600 行读取，
+    //   占首屏 D1 读的 50%~70%；可这个数字一天只在 11:40 快照写入后变一次。
+    // 缓存 30 分钟（今天）/ 24 小时（历史日期，那几天的快照不会再变）。
+    // 代价：新登记的号最多晚 30 分钟才出现在「连续天数」列（它本来也没有历史快照，显示的是 —）。
+    async function streakCached(d) {
+      if (!d1ok()) return null;
+      const isToday = (d === beijingDate());
+      const k = 'ccst:' + d;
+      try {
+        const hit = await POOL.get(k);
+        if (hit) return JSON.parse(hit);
+      } catch (e) {}
+      const rows = await d1All(snapStreakSQL(), [dateMinusN(d, 6), d]).catch(() => null);
+      if (rows) {
+        try { await POOL.put(k, JSON.stringify(rows), { expirationTtl: isToday ? 1800 : 86400 }); } catch (e) {}
+      }
+      return rows;
+    }
     if (url.pathname === '/api/console/data' && request.method === 'POST') {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let body;
@@ -5438,9 +5457,13 @@ async function handle(request) {
       let _ccSkip = false;
       try { _ccSkip = body.nocache === 1; } catch (e) {}
       let _ccKey = '';
+      let _ccTtl = 300;
       if (!_ccSkip) {
         const _ccVer = (await POOL.get('cc:ver').catch(function () { return null; })) || '0';
         _ccKey = 'cc:' + _ccVer + ':' + role + ':' + date + ':' + (prevDate || '');
+        // 2026-11-09：按结束日分档。查历史日期时那几天的快照/播放量早已定格，
+        // 没必要每 5 分钟重查一遍（一次约 8,200 行）—— 缓存 1 小时。今天仍是 5 分钟。
+        if (date !== beijingDate()) _ccTtl = 3600;
         try {
           const _ccHit = await POOL.get(_ccKey);
           if (_ccHit) return new Response(_ccHit, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, { 'X-Cache': 'hit' }) });
@@ -5487,7 +5510,8 @@ async function handle(request) {
         // 2026-11-06：改成在 SQL 里算，不再把 7 天快照整批拉回 JS。
         //   原来每次首屏拉 4,071 行回来只为了算出一个 {uid: 天数} 的小字典，现在最多回 704 行。
         //   口径与原 calcStreaks 逐条比对过（6 个日期 hz+dz 全量 + 8 组边界用例，100% 一致）。
-        d1ok() ? d1All(snapStreakSQL(), [dateMinusN(date, 6), date]).catch(() => null) : Promise.resolve(null),
+        // 2026-11-09：再包一层 KV 缓存（streakCached），命中时这一条 4,000+ 行的查询直接跳过。
+        streakCached(date),
         // 2026-10-25：歌曲/账号元数据（song_meta / acc_meta，由 tmp/sync_song_meta.py 回填）。
         // 用来判断「共创歌曲（合唱）」「绑错歌（歌曲作者里没有本人音乐人）」这两类售后问题。
         // 纯只读、失败降级为 null，缺数据时页面只是不打这两个标签，不影响其它列。
@@ -5668,8 +5692,9 @@ async function handle(request) {
                     role: role, cfg: regCfgNow };
       const _body = JSON.stringify(_out);
       // 2026-11-06：首屏结果写入 KV 缓存（TTL 5 分钟）。命中时上面整段大查询都不会再跑。
+      // 2026-11-09：TTL 按日期分档（今天 300s / 历史 3600s），见上面 _ccTtl。
       if (!_ccSkip && _ccKey) {
-        try { await POOL.put(_ccKey, _body, { expirationTtl: 300 }); } catch (e) {}
+        try { await POOL.put(_ccKey, _body, { expirationTtl: _ccTtl }); } catch (e) {}
       }
       return new Response(_body, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, { 'X-Cache': _ccSkip ? 'bypass' : 'miss' }) });
     }
@@ -7205,7 +7230,7 @@ function login(){
   $('lbtn').disabled=true;
   api('/api/console/login',{user:u,pass:p}).then(function(o){
     $('lbtn').disabled=false;
-    if(o.ok&&o.d.ok){TOKEN=JSON.stringify({user:u,pass:p});save(TOKEN,o.d.role);$('loginBox').hidden=true;$('mainBox').hidden=false;applyRole(o.d.role);loadData();}
+    if(o.ok&&o.d.ok){TOKEN=JSON.stringify({user:u,pass:p});save(TOKEN,o.d.role);$('loginBox').hidden=true;$('mainBox').hidden=false;applyRole(o.d.role);loadData(true);}
     else{$('lm').textContent=(o.d&&o.d.message)||'登录失败';$('lm').className='msg err';}
   }).catch(function(){$('lbtn').disabled=false;$('lm').textContent='网络错误';$('lm').className='msg err';});
 }
@@ -7213,7 +7238,7 @@ $('lbtn').onclick=login;
 $('lp').onkeydown=function(e){if(e.key==='Enter')login();};
 $('lu').onkeydown=function(e){if(e.key==='Enter')$('lp').focus();};
 $('btnOut').onclick=function(){dropTok();location.reload();};
-$('btnRefresh').onclick=loadData;
+$('btnRefresh').onclick=function(){loadData(true);};   // 2026-11-09：点刷新 = 强制回源，不再命中 5 分钟缓存
 // 2026-10-27 21:05：入池筛选是纯前端，改日期直接 render，不再重新请求接口（秒出）
 $('date').onchange=render;$('dateTo').onchange=render;
 $('dClear').onclick=function(){$('date').value='';$('dateTo').value='';render();};
@@ -7310,19 +7335,31 @@ function drngOf(){
   if(a&&b&&a>b){var x=a;a=b;b=x;$('date').value=a;$('dateTo').value=b;}
   return {from:a,to:b};
 }
-function loadData(){
+function loadData(force){
   var t=JSON.parse(TOKEN||'{}');
-  $('btnRefresh').disabled=true;
+  var b=$('btnRefresh');var bt=b.textContent;
+  b.disabled=true;b.textContent='刷新中…';
+  var q={user:t.user,pass:t.pass};
+  // 2026-11-09：点「刷新」必须真的回源。服务端 /api/console/data 本来就支持 body.nocache=1
+  // 强制跳过 KV 缓存，但前端从来没传过 —— 于是 5 分钟内点第二次拿到的是同一份缓存，
+  // 数据一格都不会变（用户反馈「刷新没用」）。
+  // 现在的分工：点刷新 / 登录进来 = 强制取最新；登记、改配置、删号后的自动 reload 走缓存
+  // （那些动作本身会 bump cc:ver，该失效的照样失效）。
+  if(force)q.nocache=1;
   // 2026-10-27 21:05：不传 date/prevDate —— 后端默认就是「昨天 vs 今天」。
   // 日期框改成筛入池日期了，再往这里塞会把筛选值污染成快照日期。
-  api('/api/console/data',{user:t.user,pass:t.pass}).then(function(o){
-    $('btnRefresh').disabled=false;
+  api('/api/console/data',q).then(function(o){
+    b.disabled=false;b.textContent=bt;
     if(!o.ok){if(((o.d&&o.d.message)||'').indexOf('密码')>=0){dropTok();TOKEN=null;}$('lm').textContent=o.d.message||'请重新登录';$('lm').className='msg err';$('loginBox').hidden=false;$('mainBox').hidden=true;return;}
     DATA=o.d;
     applyCfg(DATA.cfg);           // 客服/套餐下拉 + 汇总口径
     applyRole(DATA.role);         // 满权限 / 只读（服务端 data 里带，刷新一次就恢复正确权限）
     render();fitTable();
-  }).catch(function(){$('btnRefresh').disabled=false;});
+  }).catch(function(){
+    // 2026-11-09：原来这里静默吞错，请求超时/5xx 时页面毫无反应，用户以为刷完了。
+    b.disabled=false;b.textContent='刷新失败';
+    setTimeout(function(){b.textContent=bt;},2500);
+  });
 }
 // 2026-10-24：网易工作台只回 missionCode + progressRate 两个原始字段，不翻译就是一串天书；
 // 而且原来把「650 主任务」和「发布笔记」两个代码拼在一格还带 CSS 截断，看着像 650 只有 2%。
@@ -8294,7 +8331,7 @@ $('btnCsv').onclick=function(){
   window.addEventListener('hashchange',function(){hashLogin();});
   if(hashLogin())return;                    // 带 #pw= 时优先免密，不看缓存
   var s=load();
-  if(s){TOKEN=s.t;applyRole(s.role);$('loginBox').hidden=true;$('mainBox').hidden=false;loadData();}
+  if(s){TOKEN=s.t;applyRole(s.role);$('loginBox').hidden=true;$('mainBox').hidden=false;loadData(true);}
 })();
 </script></body></html>`;
 
