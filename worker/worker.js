@@ -2329,12 +2329,34 @@ async function d1Upsert(e, opt) {
      String(e.note || ''), e.rb ? 1 : 0, Number(e.rbFrom) || 0, String(e.rbStart || '')]
   );
 }
+// 2026-11-09 修复「D1 没删掉、KV 侧当删成功」：
+// 旧实现走 d1Run，只要 SQL 不抛异常就 return true —— `DELETE ... WHERE pool=? AND uid=?`
+// 命中 0 行（pool/uid 有偏差、D1 那行其实在别的群）同样回 true。上层按铁律 3 认为「D1 已删」，
+// 接着删 KV 键 + 写墓碑，于是号还在 D1 天天正常跑，KV 里却永久消失（实测 7 个号中招）。
+// 现在按 meta.changes 判：>0 才算删成功；=0 时再查一次把「本来就不存在」和「条件没匹配」分开。
 async function d1Delete(e) {
   if (!d1ok() || !e) return false;
   const uid = e.uid != null ? String(e.uid) : '';
-  if (uid) return d1Run('DELETE FROM accounts WHERE pool=? AND uid=?', [POOL_NAME, uid]);
-  if (e.name) return d1Run('DELETE FROM accounts WHERE pool=? AND name=?', [POOL_NAME, String(e.name)]);
-  return false;
+  let del, chk, params;
+  if (uid) {
+    del = 'DELETE FROM accounts WHERE pool=? AND uid=?';
+    chk = 'SELECT 1 AS x FROM accounts WHERE pool=? AND uid=?';
+    params = [POOL_NAME, uid];
+  } else if (e.name) {
+    del = 'DELETE FROM accounts WHERE pool=? AND name=?';
+    chk = 'SELECT 1 AS x FROM accounts WHERE pool=? AND name=?';
+    params = [POOL_NAME, String(e.name)];
+  } else {
+    return false;
+  }
+  const n = await d1Changes(del, params);
+  if (n < 0) return false;          // D1 不可用/执行失败 → 判失败（铁律 3c：读失败≠读到空）
+  if (n > 0) return true;           // 真删掉了
+  // 0 行：① 这行本来就不在（已被删/从未入库）→ 清 KV 是对的；
+  //       ② WHERE 没匹配上（pool/uid 有偏差）→ 绝不能清 KV，否则就是 11-09 那 7 个号的复现。
+  const left = await d1All(chk, params);
+  if (left === null) return false;  // 读失败 → 判失败，宁可留着 KV 也不误删
+  return left.length === 0;
 }
 
 // ====================================================================
