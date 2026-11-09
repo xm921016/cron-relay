@@ -4890,11 +4890,13 @@ async function handle(request) {
       /* 2026-11-09：链接有效期只留两档（24 小时 / 3 天）。原来接受 1~720 任意值，
          EXE 里还多一档 7 天 —— 链接在群里转手后存活太久，等于把入口长期挂着。 */
       const hours = (Number(b1.hours) === 72) ? 72 : 24;
-      /* 2026-11-09：每客服每日生成配额（KV REG_TOKEN_DAILY_MAX，默认 60）。
+      /* 2026-11-09：每客服每日生成配额（KV REG_TOKEN_DAILY_MAX，默认 200）。
          EXE 里的生成口令是硬编码的，EXE 一旦外流就等于谁都能造链接；配额把最坏情况
-         压成「每天 60 条」，且异常量在 rate_limit 里一眼看得出来。计数不可用则放行。 */
-      let cap = 60;
-      try { cap = parseInt(cleanKV(await POOL.get('REG_TOKEN_DAILY_MAX')), 10) || 60; } catch (e) {}
+         压成「每天 200 条」，且异常量在 rate_limit 里一眼看得出来。计数不可用则放行。
+         2026-11-10：60 → 200。实测单客服日峰值 24 单，但「生成 ≠ 成交」（买家不扫、
+         链接过期重发、EXE 网络重试都占次数），60 偏紧会误伤正常客服。 */
+      let cap = 200;
+      try { cap = parseInt(cleanKV(await POOL.get('REG_TOKEN_DAILY_MAX')), 10) || 200; } catch (e) {}
       const genN = await d1Hit('rtn', String(agent || '-') + ':' + beijingDate());
       if (genN !== null && genN > cap) {
         return json({ ok: false, message: '今天生成链接已达上限（' + cap + ' 条/天），需要更多请联系管理员' }, 429);
