@@ -19,6 +19,7 @@
 """
 import os
 import smtplib
+import time
 import html as _html
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -47,9 +48,11 @@ def _cred():
 # 全失败才算失败（失败件照旧退回队列，下一班重试时会轮到另一个通道）。
 # 2026-11-09：通道数不再写死到 4，改为按序扫描 EMAIL_FROM / EMAIL_FROM2..EMAIL_FROM20，
 # 只认「地址+授权码都有」的项（中间有空号也不影响后面的），新增邮箱只要配 Secret 即可生效。
+# 同批：起始通道按「当前半小时时段」错开（原来每班都从通道 1 起，一班只发 1~3 封时后面几个
+# 通道永远轮不到，加了也白加）。进程内仍逐封轮转，跨班次则自然摊平；单通道时行为不变。
 _MAX_CH = 20
 _ACCTS = []
-_ACCT_AT = [0]
+_ACCT_AT = [int(time.time() // 1800)]
 
 
 def _acct(i):
