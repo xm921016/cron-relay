@@ -2331,7 +2331,7 @@ async function addEntry(entry) {
       // 只有真要推 Secrets 时才做「全池 + 新号」合并（那是一次全表读）——
       // 默认关闭推送后，这里不该再为一份没人读的分片白跑一次查询。
       if (await pushPoolEnabled()) await pushPool(await mergePoolEntry(entry, ekey));
-      try { await refreshPoolSnap(); } catch (e) {}
+      try { await refreshPoolSnap(true); } catch (e) {}   // 新增/续费号：必须立刻进灾备快照
       // 2026-11-10：把类型与最终有效期回给调用方，页面/EXE 才能显示
       // 「续费成功，到期日 2026-12-10（在原基础上 +30 天）」而不是一律「登记成功」。
       const _k = String(kind || 'new');
@@ -2406,7 +2406,7 @@ async function addEntry(entry) {
   await pushPool(updated);
   // 本分支是「D1 查重失败」才走到：如果只是查询超时（D1 仍可写），这次快照能补上新号；
   // 真的未绑定时 refreshPoolSnap 自己会因 d1ok() 为假直接返回 false，不会抛错。
-  try { await refreshPoolSnap(); } catch (e) {}
+  try { await refreshPoolSnap(true); } catch (e) {}   // 新号 → force，跳过 30 分钟节流
   return { ok: true };
 }
 
@@ -2453,12 +2453,14 @@ async function backfillMeta(){
   //   合计约 2,200 行/次 × 2 次 ≈ 4,400 行，而没有待补项时纯属空跑。
   // 影响：只影响「共创歌曲 / 绑错歌」两个标签的补齐时机，最多晚 15 分钟；
   //   那两列本来就是事后排查用的，晚一点不影响任何操作、不影响播放与快照。
-  // 为什么是 15 分钟而不是更短：每次通过闸门要写一次 KV（免费额度 1,000 写/天），
-  //   15 分钟 ≈ 96 次/天，给其它 KV 写留足余量。失败一律退化成「每次都跑」，不影响正确性。
+  // 为什么是 15 分钟而不是更短：每次通过闸门要写一次时间戳。失败一律退化成「每次都跑」，不影响正确性。
+  // 2026-11-10：时间戳从 KV 搬到 Cache API —— 它只是「上次跑过没」的书签，丢了最多多重跑一次，
+  //   而 KV 写免费额度只有 1,000/天、实际是这套系统最紧的额度（11-09 已打满 100%）。
+  //   15 分钟节流 = 原本 96 次/天 KV 写，现在 0。Cache API 每 colo 一份，多 colo 就多跑一次，无影响。
   try{
-    const tick=Number(await POOL.get('meta:tick'))||0;
+    const tick=Number(await caGet('meta:tick'))||0;
     if(tick&&Date.now()-tick<900000)return {skip:'throttle'};
-    await POOL.put('meta:tick',String(Date.now()),{expirationTtl:3600});
+    await caPut('meta:tick',String(Date.now()),900);
   }catch(e){}
   const now=new Date(Date.now()+8*3600*1000).toISOString().replace('T',' ').slice(0,19);
   // 这两个接口用桌面 Chrome UA 更稳（全局 UA 是 iPhone 版，登录接口在用，别动它）
@@ -3210,16 +3212,30 @@ async function d1QuotaProbe(force) {
   }
 }
 
-async function refreshPoolSnap() {
+// 2026-11-10：加节流。它只是「D1 不可用时的重建缓存」，不是权威数据（entry:/D1 才是），
+//   但原来每个写操作（改邮箱 / 改套餐 / 删号 / 改名 / 作废链接）都会整池重读 + 整池重写一份 200KB 单键。
+//   现在默认 30 分钟内不重复刷；只有「真正影响兜底正确性」的变更才传 force=true 立刻刷：
+//   新增号（否则 D1 抖动时兜底快照里没有这个号 → 漏播）、改 CK（否则拿旧 CK 播 → 白跑）、
+//   /api/d1_sync 全表重写。删号不需要 force：墓碑 dead_log 会在 mergePoolKV 里过滤掉残留条目。
+const SNAP_MIN_GAP = 1800000;   // 30 分钟
+
+async function refreshPoolSnap(force) {
   if (!d1ok()) return false;
   // 2026-11-09：额度闸门 —— 这一步本身要全池读 682 行（只为写 1 次 KV），≥95% 时跳过。
   if (await d1ReadBlocked()) return false;
+  if (!force) {
+    try {
+      const last = Number(await caGet('poolsnap:at')) || 0;
+      if (last && Date.now() - last < SNAP_MIN_GAP) return false;
+    } catch (e) { /* 读不到时间戳就照常刷：宁可多写一次，也不能让灾备快照悄悄变旧 */ }
+  }
   // 2026-11-08：同样去掉 ORDER BY（改 JS 排，见 d1PoolCmp），省一半读行数；快照内容顺序不变。
   const rows = await d1All('SELECT ' + D1_COLS + ' FROM accounts WHERE pool=?', [POOL_NAME]);
   if (!rows || !rows.length) return false;
   rows.sort(d1PoolCmp);
   try {
     await POOL.put(poolSnapKey(), JSON.stringify(rows.map(d1RowToEntry)));
+    try { await caPut('poolsnap:at', String(Date.now()), 3600); } catch (e) {}
     return true;
   } catch (e) { console.error('号池快照写入失败:', e && e.message); return false; }
 }
@@ -5076,7 +5092,7 @@ async function handle(request) {
       // 'name:xxx' 是「没有 uid 的老条目」的占位主键，不在 live 里但绝不能删。
       const gone = rows.filter(r => !String(r.uid).startsWith('name:') && !live.has(String(r.uid)));
       await Promise.all(gone.map(r => d1Run('DELETE FROM accounts WHERE pool=? AND uid=?', [POOL_NAME, String(r.uid)])));
-      try { await refreshPoolSnap(); } catch (e) {}   // D1 全表刚被重写 → 同步刷新应急快照
+      try { await refreshPoolSnap(true); } catch (e) {}   // D1 全表刚被重写 → 同步刷新应急快照（force）
       return json({ ok: true, pool: POOL_NAME, kv: master.length, synced: ok, skipped: skip,
                     failed: fail, removed: gone.length });
     }
@@ -7424,7 +7440,9 @@ async function ghJson(tok, url) {
 // 这里只是省 Actions 空转。发令结果存 KV cron:mail:last（1 周过期）供排障。
 async function dispatchMailQueue() {
   // 进门心跳：先落一条 boot 记录再干活 —— 排障用（区分「cron 没触发」和「触发后中途挂」）
-  try { await POOL.put('cron:mail:last', JSON.stringify({ at: new Date().toISOString(), boot: true }), { expirationTtl: 604800 }); } catch (e) { }
+  // 2026-11-10：心跳搬到 Cache API（每小时 1 次 × 24 轮 = 24 次/天 KV 写，纯排障用不值这个价）。
+  //   末尾的 save() 仍写 KV cron:mail:last，它带 at 时间戳，照样能看出最近一轮有没有跑。
+  try { await caPut('cron:mail:boot', JSON.stringify({ at: new Date().toISOString() }), 3600); } catch (e) { }
   const c = await cfg();
   const rec = { at: new Date().toISOString(), day: bjDate(0), action: '', reason: '', pend: 0 };
   const save = async () => {
@@ -7637,7 +7655,7 @@ function snapStreakSQL(){
 // KV 写次数 ≈ 96 次/天（比 D1 省下的行读值这个价）。
 async function metaDicts(){
   try{
-    const hit = await POOL.get('meta:dicts');
+    const hit = await caGet('meta:dicts');
     if (hit) {
       const o = JSON.parse(hit);
       if (o && Array.isArray(o.songs) && Array.isArray(o.acc)) return o;
@@ -7649,7 +7667,9 @@ async function metaDicts(){
   ]);
   if (!songs || !acc) return null;   // 任一失败都降级，不写半份缓存
   const payload = { songs: songs, acc: acc, at: Date.now() };
-  try{ await POOL.put('meta:dicts', JSON.stringify(payload), { expirationTtl: 900 }); }catch(e){}
+  // 2026-11-10：缓存从 KV 搬到 Cache API（同 meta:tick）。这份字典是纯展示用（不打标签而已），
+  //   丢了只是下次重查一遍 D1，而原本 15 分钟一次写 = 96 次/天 KV 写，是全系统最大单笔浪费。
+  try{ await caPut('meta:dicts', JSON.stringify(payload), 900); }catch(e){}
   return payload;
 }
 
@@ -7844,7 +7864,7 @@ async function applyEntryEdit(body) {
     }
     // master 缓存不再回写（2026-10-22）：读者全走 D1，entry: 独立键才是权威
     await pushPool(master);
-    try { await refreshPoolSnap(); } catch (e) {}
+    try { await refreshPoolSnap(true); } catch (e) {}   // 编辑可能改了 CK/暂停标记，灾备快照必须同步
     // 2026-11-05 晚：D1 写了失败就直接报错，不再回「已修改 + 小字警告」。
     // 原因：控制台整张表读的都是 D1，写 D1 失败时页面只会显示旧值，用户的理解就是
     // 「编辑功能坏了」；而且原来的警告是绿色提示、900ms 后自动关窗，基本没人看见。
