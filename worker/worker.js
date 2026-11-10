@@ -2141,10 +2141,19 @@ async function addEntry(entry) {
       let kind = 'new';
       let keepRow = null;
       let hist = null;                                            // 台账原单（补登/续费要用）
-      if (dup.length) {
+      /* 2026-11-10 修复：把「已判死等重登」的行（relogin_at 非空）与「正常在池」的行分开。
+         relogin 行 = CK 已确认失效、已通知号主重登，留在 accounts 里只是等 RELOGIN_TTL_DAYS
+         （默认 7 天）超时清理；buildPlanFrom 会 r.relogin → idle 把它摘出听众环，
+         **它其实已经不参与播放了**。原来不区分，这种号被判成「还在池里正常运行」，两个反向错误：
+           · 客服发补登链接来重登 → 撞「这个号还在号池里正常运行，不需要补登」（文案与事实相反）
+           · 不指定类型 → 判成 renew 收钱，客户只是重登却白付一次套餐
+         现在只有 live 代表「在池运行」，dead 的口径等同「不在池」→ 走补登（免费、继承原单）。 */
+      const live = dup.filter(d => d && !d.relogin_at);
+      const dead = dup.filter(d => d && d.relogin_at);
+      if (live.length) {
         // 号还在池里 → 续费。优先按 uid 认（同一个网易号），没有再看 name 命中的行。
-        const byUid = uidKey ? dup.find(d => d && d.uid != null && String(d.uid) === uidKey) : null;
-        const others = byUid ? dup.filter(d => String(d.uid) !== String(byUid.uid)) : dup.slice();
+        const byUid = uidKey ? live.find(d => d && d.uid != null && String(d.uid) === uidKey) : null;
+        const others = byUid ? live.filter(d => String(d.uid) !== String(byUid.uid)) : live.slice();
         // 同一个手机号还挂着另一个「未到期的非公益号」→ 一号多登，仍按旧口径拒绝。
         if (!byUid && others.some(d => d && !d.pub && !isExpiredExp(d.exp))) {
           return { ok: false, msg: '该账号已登记过（每个账号限登记一首歌），无需重复登记。' };
@@ -2152,11 +2161,18 @@ async function addEntry(entry) {
         keepRow = byUid || others[0] || null;
         kind = 'renew';
       } else {
-        // 号不在池里：看台账原单还在不在有效期内 —— 在 = 客户没享受完，这是补号
+        // 号不在池里（或只剩已判失效的行）：看台账原单还在不在有效期内 —— 在 = 客户没享受完，这是补号
         hist = await d1FindLastOrder(uidKey, entry.name);
         if (hist && hist.exp && hist.exp !== 'forever' && !isExpiredExp(hist.exp)) {
           kind = 'fix';
           keepRow = { exp: hist.exp, added: hist.start || hist.day || '', pub: 0 };
+        } else if (dead.length) {
+          // 号在库里但已判失效、台账又查不到有效原单 → 仍按补登放行：
+          // 到期日/入池日取号上的真实值 —— 保留剩余时长，也别把首周加速（added）重置掉。
+          const dr = (uidKey && dead.find(d => d && String(d.uid) === uidKey)) || dead[0];
+          kind = 'fix';
+          keepRow = { exp: String(dr.exp || '').slice(0, 10) || beijingDate(),
+                      added: String(dr.added || ''), pub: 0 };
         }
       }
 
@@ -2166,16 +2182,23 @@ async function addEntry(entry) {
          客服白干；反过来把新客户标成补登就白送一个套餐。 */
       const _force = entry.__force || null;
       if (_force && _force.kind === 'fix') {
-        if (dup.length) {
+        /* 只有「正常在池」的行才能挡住补登（live）。只剩 relogin 行时放行 ——
+           那种号的 CK 已确认失效，补登正是它唯一的出路；原来用 dup.length 判断，
+           于是「CK 死了但还没被清」的号永远补不回来，提示还说它「正常运行」。 */
+        if (live.length) {
           return { ok: false, msg: '这个号还在号池里正常运行，不需要补登（要延长有效期请走续费）。' };
         }
-        const fexp = String(_force.exp || (hist && hist.exp) || '').slice(0, 10);
+        // 到期日优先级：链接上带的原单到期日 → 台账原单 → 号上现有的到期日（relogin 行的 exp）
+        const fexp = String(_force.exp || (hist && hist.exp) || (keepRow && keepRow.exp) || '').slice(0, 10);
         if (!fexp) return { ok: false, msg: '找不到原单到期日，这次补登没做成，请联系管理员' };
         kind = 'fix';
-        keepRow = { exp: fexp, added: String((hist && (hist.start || hist.day)) || '').slice(0, 19), pub: 0 };
-      } else if (_force && _force.kind === 'renew' && !dup.length) {
-        // 号已掉线，但这一单是付了钱的续费：以原单到期日为基准累加，不能判成免费补登
-        const bexp = String(_force.exp || (hist && hist.exp) || '').slice(0, 10) || beijingDate();
+        keepRow = { exp: fexp,
+          added: String((keepRow && keepRow.added) || (dead[0] && dead[0].added)
+                        || (hist && (hist.start || hist.day)) || '').slice(0, 19),
+          pub: 0 };
+      } else if (_force && _force.kind === 'renew' && !live.length) {
+        // 号已掉线（或只剩 relogin 行），但这一单是付了钱的续费：以原单到期日为基准累加，不能判成免费补登
+        const bexp = String(_force.exp || (hist && hist.exp) || (keepRow && keepRow.exp) || '').slice(0, 10) || beijingDate();
         if (bexp === 'forever') {
           return { ok: false, msg: '这个号原来是永久套餐，续费不会增加时长；直接发「补登」链接免费补回即可。' };
         }
@@ -2184,8 +2207,13 @@ async function addEntry(entry) {
       }
       delete entry.__force;                                       // 类型标签不能写进 KV/D1
 
+      /* 2026-11-10 修复：返回值 days 原来是 planDaysOf(entry.exp) —— 续费时那已经是
+         「续费之后的剩余总天数」，不是「本次买了多少天」，语义是错的（exp 已被 newExp 覆盖）。
+         现在统一成「这一单买到的天数」：new=套餐天数 / renew=本次套餐天数 / fix=0（免费）。 */
+      let boughtDays = 0;
       if (kind === 'renew') {
         const days = planDaysOf(entry.exp);                       // 本次买的套餐天数
+        boughtDays = days;
         const oldExp = String((keepRow && keepRow.exp) || '').slice(0, 10);
         const wasPub = Number(keepRow && keepRow.pub) === 1;      // 公益号（exp 也是 forever，必须靠 pub 区分）
         const newExp = renewExpCalc(oldExp, days, wasPub);
@@ -2211,7 +2239,10 @@ async function addEntry(entry) {
         if (keepRow.added) entry.added = String(keepRow.added).slice(0, 19);
         entry.rb = 1;
         entry.rb_start = String(keepRow.added || '').slice(0, 19);
+        boughtDays = 0;                                           // 免费，本次买到 0 天
         console.log('补号（免费、继承原单）：' + String(entry.name || uidKey) + '  到期 ' + entry.exp);
+      } else {
+        boughtDays = planDaysOf(entry.exp);                       // 新登记：本次套餐天数
       }
       entry.__kind = kind;                                        // 给台账用，写库前删掉
 
@@ -2294,7 +2325,7 @@ async function addEntry(entry) {
       // 「续费成功，到期日 2026-12-10（在原基础上 +30 天）」而不是一律「登记成功」。
       const _k = String(kind || 'new');
       return { ok: true, kind: _k, exp: String(entry.exp || ''), added: String(entry.added || ''),
-        days: _k === 'new' ? 0 : planDaysOf(entry.exp) };
+        days: boughtDays };
     }
   }
 
@@ -2306,7 +2337,9 @@ async function addEntry(entry) {
     try { _old = JSON.parse(kvOld) || {}; } catch (e) {}
     // 2026-11-09：公益号（到期降级留下的 pub=1 / exp=forever）必须允许重新登记 = 续费。
     // 只判 exp 的话 forever 不算过期，到期想续费的人会被永远挡住（与 D1 路径同一个坑）。
-    if (!_old.pub && !isExpiredExp(_old.exp)) {
+    // 2026-11-10：relogin=1（CK 已确认失效、等号主重登）同样放行 —— 与 D1 路径的 live/dead
+    //   分离同口径，否则 D1 读额度被闸门拦下时，补登号又会被「已登记过」挡住。
+    if (!_old.pub && !_old.relogin && !isExpiredExp(_old.exp)) {
       return { ok: false, msg: '该账号已登记过（每个账号限登记一首歌），无需重复登记。' };
     }
     try { await POOL.delete(ekey); } catch (e) {}
@@ -2829,8 +2862,12 @@ async function d1FindDup(uidKey, name) {
   // 2026-11-09：带 pub —— 到期号被 pruneExpired 改成 pub=1/exp='forever'，
   // 'forever' 不算过期，只看 exp 会把「到期降公益号」判成「已登记过」，买家永远续不上费。
   // 2026-11-10：带 added —— 续费/补号要保留原「入池日」（否则首周加速被重置、白烧一周播放量）。
-  if (uidKey) qs.push(d1All('SELECT uid,exp,pub,added,agent,plan FROM accounts WHERE pool=? AND uid=? LIMIT 1', [POOL_NAME, uidKey]));
-  if (nm) qs.push(d1All('SELECT uid,exp,pub,added,agent,plan FROM accounts WHERE pool=? AND name=? LIMIT 1', [POOL_NAME, nm]));
+  // 2026-11-10：带 relogin_at —— CK 已确认失效、已通知号主重登的号仍留在 accounts 里等
+  // RELOGIN_TTL_DAYS（默认 7 天）超时清理，buildPlanFrom 会把它摘出听众环，**其实并不参与播放**。
+  // 不查这一列，这种号会被 addEntry 判成「还在池里正常运行」→ 客户拿补登链接来重登被拒，
+  // 且提示恰好说反（详见 addEntry 里 live/dead 分离处）。
+  if (uidKey) qs.push(d1All('SELECT uid,exp,pub,added,agent,plan,relogin_at FROM accounts WHERE pool=? AND uid=? LIMIT 1', [POOL_NAME, uidKey]));
+  if (nm) qs.push(d1All('SELECT uid,exp,pub,added,agent,plan,relogin_at FROM accounts WHERE pool=? AND name=? LIMIT 1', [POOL_NAME, nm]));
   if (!qs.length) return [];
   const rs = await Promise.all(qs);
   const out = [];
@@ -8243,7 +8280,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">按<b>登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br><b>退单</b>（成交后号被删）不计收入、不计提成；补号单、公益赠号/手动号也都不计营收、不计提成，各自单列。</p>
   <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
     <div><label style="margin-top:0">月份</label><input type="month" id="lgMonth" style="width:150px"></div>
-    <div><label style="margin-top:0">群</label><select id="lgPool" style="width:130px"><option value="">全部</option><option value="hz">主群</option><option value="dz">定制群</option></select></div>
+    <div><label style="margin-top:0">群</label><select id="lgPool" style="width:130px"><option value="hz" selected>主群</option><option value="">全部（含定制群）</option><option value="dz">定制群</option></select></div>
     <div><label style="margin-top:0">客服</label><select id="lgAgent" style="width:160px"><option value="">全部客服</option></select></div>
     <button class="mini" id="lgGo" style="margin-top:0;padding:9px 16px">查询</button>
     <button class="mini gray" id="lgCsv" style="margin-top:0">导出明细CSV</button>
