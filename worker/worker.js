@@ -2138,6 +2138,7 @@ async function addEntry(entry) {
            ①提前续费被拒 ②白丢剩余天数 ③首周加速重复触发白烧一周播放量 ④台账分不清新/续。 */
       let kind = 'new';
       let keepRow = null;
+      let hist = null;                                            // 台账原单（补登/续费要用）
       if (dup.length) {
         // 号还在池里 → 续费。优先按 uid 认（同一个网易号），没有再看 name 命中的行。
         const byUid = uidKey ? dup.find(d => d && d.uid != null && String(d.uid) === uidKey) : null;
@@ -2150,12 +2151,36 @@ async function addEntry(entry) {
         kind = 'renew';
       } else {
         // 号不在池里：看台账原单还在不在有效期内 —— 在 = 客户没享受完，这是补号
-        const hist = await d1FindLastOrder(uidKey, entry.name);
+        hist = await d1FindLastOrder(uidKey, entry.name);
         if (hist && hist.exp && hist.exp !== 'forever' && !isExpiredExp(hist.exp)) {
           kind = 'fix';
           keepRow = { exp: hist.exp, added: hist.start || hist.day || '', pub: 0 };
         }
       }
+
+      /* ===== 2026-11-10：链接上带了类型就以链接为准 =====
+         客服在发链接那一刻就知道这一单收不收钱（补登免费 / 续费收钱），比「号在不在池里」
+         可靠得多 —— 号掉线了但客户付了续费，光看数据会被判成免费补登，客户白付钱、
+         客服白干；反过来把新客户标成补登就白送一个套餐。 */
+      const _force = entry.__force || null;
+      if (_force && _force.kind === 'fix') {
+        if (dup.length) {
+          return { ok: false, msg: '这个号还在号池里正常运行，不需要补登（要延长有效期请走续费）。' };
+        }
+        const fexp = String(_force.exp || (hist && hist.exp) || '').slice(0, 10);
+        if (!fexp) return { ok: false, msg: '找不到原单到期日，这次补登没做成，请联系管理员' };
+        kind = 'fix';
+        keepRow = { exp: fexp, added: String((hist && (hist.start || hist.day)) || '').slice(0, 19), pub: 0 };
+      } else if (_force && _force.kind === 'renew' && !dup.length) {
+        // 号已掉线，但这一单是付了钱的续费：以原单到期日为基准累加，不能判成免费补登
+        const bexp = String(_force.exp || (hist && hist.exp) || '').slice(0, 10) || beijingDate();
+        if (bexp === 'forever') {
+          return { ok: false, msg: '这个号原来是永久套餐，续费不会增加时长；直接发「补登」链接免费补回即可。' };
+        }
+        kind = 'renew';
+        keepRow = { exp: bexp, added: String((hist && (hist.start || hist.day)) || '').slice(0, 19), pub: 0 };
+      }
+      delete entry.__force;                                       // 类型标签不能写进 KV/D1
 
       if (kind === 'renew') {
         const days = planDaysOf(entry.exp);                       // 本次买的套餐天数
@@ -3991,7 +4016,8 @@ async function regTokenGet(code) {
     } catch (e) { console.error('regtok 闸门读 KV 失败:', e && e.message); }
   }
   const rows = await d1All(
-    'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone,ledger_id FROM reg_tokens WHERE token=?',
+    'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone,ledger_id,' +
+    'kind,fix_exp,fix_ref FROM reg_tokens WHERE token=?',
     [c]);
   if (rows === null) {
     /* 2026-11-08：D1「读」额度打满（UTC 日 500 万行，超额回 code 7500）时，
@@ -4030,6 +4056,10 @@ async function regTokenMirror(row, ttlSec) {
     ctime: row.ctime || '', exp_at: row.exp_at || '', used_at: row.used_at || null,
     uid: row.uid || null, uname: row.uname || null, phone: row.phone || null,
     ledger_id: row.ledger_id || null,
+    /* 2026-11-10：链接类型也要进镜像 —— D1 读额度打满时买家全靠这份镜像提交，
+       镜像里没有 kind，补登链接就会被当成新登记（白送一整个套餐）。 */
+    kind: String(row.kind || 'new'), fix_exp: String(row.fix_exp || ''),
+    fix_ref: String(row.fix_ref || ''),
   };
   const ttl = Math.max(60, Math.min(259200, Number(ttlSec) || 259200));
   try { await POOL.put('regtok:' + o.token, JSON.stringify(o), { expirationTtl: ttl }); } catch (e) {}
@@ -4128,21 +4158,26 @@ async function regDevTouch(dev, agent) {
   } catch (e) {}
 }
 
-async function regTokenNew(agent, plan, days, note, hours) {
+async function regTokenNew(agent, plan, days, note, hours, kind, fixExp, fixRef) {
   const code = regCode();
   const now = Date.now();
   const expAt = now + (hours || REG_TTL_H) * 3600 * 1000;
+  /* 2026-11-10：kind 决定这一单算新登记 / 续费 / 补登。老调用方不传 → 默认 new（行为不变）。 */
+  const k = (kind === 'fix' || kind === 'renew') ? kind : 'new';
   const ok = await d1Run(
-    'INSERT INTO reg_tokens (token,agent,plan,days,note,state,ctime,exp_at) VALUES (?,?,?,?,?,?,?,?)',
+    'INSERT INTO reg_tokens (token,agent,plan,days,note,state,ctime,exp_at,kind,fix_exp,fix_ref) ' +
+    'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
     [code, String(agent || ''), String(plan || ''), Number(days) || 0, String(note || ''),
-     'unused', regIso(now), regIso(expAt)]);
+     'unused', regIso(now), regIso(expAt), k, String(fixExp || ''), String(fixRef || '')]);
   if (ok) {
     /* 2026-11-08：新 token 立刻写一份 KV 镜像（TTL 跟链接有效期一致）。
        D1 读额度随时可能被别的查询打满，那时候买家只能靠这份镜像把链接打开。 */
     await regTokenMirror({ token: code, agent: agent, plan: plan, days: days, note: note,
-      state: 'unused', ctime: regIso(now), exp_at: regIso(expAt) }, ((hours || REG_TTL_H) * 3600) + 3600);
+      state: 'unused', ctime: regIso(now), exp_at: regIso(expAt),
+      kind: k, fix_exp: String(fixExp || ''), fix_ref: String(fixRef || '') },
+      ((hours || REG_TTL_H) * 3600) + 3600);
   }
-  return ok ? { code: code, ctime: regIso(now), exp_at: regIso(expAt) } : null;
+  return ok ? { code: code, ctime: regIso(now), exp_at: regIso(expAt), kind: k } : null;
 }
 /* 原子消耗：返回 1=成功 / 0=已被用掉或不存在 / -1=D1 失败 */
 async function regTokenUse(code, uid, uname, phone, ip, ua) {
@@ -4414,7 +4449,19 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
         if (j.used) { finished(j.message || '登记完成，链接已失效。'); return; }
         fail(j.message || '链接无效'); return;
       }
-      E('sub').textContent = (j.planLabel ? '套餐：' + j.planLabel + ' · ' : '') + '本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
+      /* 2026-11-10：按链接类型给不同说明 —— 补登是免费的，不能显示成「套餐：1月」，
+         否则买家以为自己又买了一个月，回头找客服对账。 */
+      var sub;
+      if (j.kind === 'fix') {
+        sub = '这是免费补登链接（原账号掉线补回，有效期不变' + (j.fix_exp ? '，仍到 ' + j.fix_exp : '')
+            + '）· 本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
+      } else if (j.kind === 'renew') {
+        sub = '这是续费链接（' + (j.planLabel || '套餐') + '，在原到期日基础上延长'
+            + (j.fix_exp ? '，当前到期 ' + j.fix_exp : '') + '）· 本链接 ' + j.left_h + ' 小时内有效';
+      } else {
+        sub = (j.planLabel ? '套餐：' + j.planLabel + ' · ' : '') + '本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
+      }
+      E('sub').textContent = sub;
       show('m-box', true);
       st.dev = getDev();
       newQr();
@@ -5008,9 +5055,18 @@ async function handle(request) {
       } catch (me) { console.error('登记邮件入队失败:', me && me.message); }
       // 2026-11-06：登记成功 → 立即作废控制台首屏缓存（号池马上要在控制台看到这个号）
       try { await ccBust(); } catch (e) {}
-      let msg = '登记成功，次日生效。';
+      /* 2026-11-10：按类型给不同回执。客服在 EXE 上登记完要能一眼看出「这次是续费，
+         有效期延到哪天」/「这次是免费补号，原有效期不变」—— 否则只能去控制台翻。
+         文案由服务端下发，老版 EXE 也能直接显示（它本来就显示 message 字段）。 */
+      const _rkd = String((r && r.kind) || 'new');
+      const _rexp = String((r && r.exp) || '');
+      let msg;
+      if (_rkd === 'renew') msg = '续费成功：有效期延长到 ' + _rexp + '（在原到期日基础上累加，剩余天数没清零）。';
+      else if (_rkd === 'fix') msg = '补号成功：免费补回，原有效期不变（到 ' + _rexp + '）。';
+      else msg = '登记成功，次日生效。';
       if (v.provisional) msg += '（注：网易校验接口暂时不可达[' + (v.diag || '') + ']，已跳过在线校验；明天任务会自动复验）';
-      return json({ ok: true, uid: String(v.uid), name: phone || ('qr:' + v.uid), pool: POOL_NAME, d1: d1Confirmed === true, message: msg });
+      return json({ ok: true, uid: String(v.uid), name: phone || ('qr:' + v.uid), pool: POOL_NAME,
+        d1: d1Confirmed === true, kind: _rkd, exp: _rexp, message: msg });
     }
     /* ================= 方案C：网页自助扫码登记 ================= */
     /* 买家页面：/r/<8 位码>。不走 PAGE_ROUTES 口令（那是内部成员页，不能发给买家）。 */
@@ -5041,6 +5097,9 @@ async function handle(request) {
       return json({
         ok: true, plan: String(row.plan || ''), planLabel: planLabel,
         left_h: Math.max(1, Math.round(leftMs / 3600000)), note: String(row.note || ''),
+        /* 2026-11-10：把链接类型告诉买家页 —— 补登要显示「免费、有效期不变」，
+           否则买家以为买了新套餐，回头找客服对账。 */
+        kind: String(row.kind || 'new'), fix_exp: String(row.fix_exp || ''),
       }, 200, { 'Cache-Control': 'no-store' });
     }
     /* 出码：worker 直接向网易申请 unikey，本地生成 PNG
@@ -5172,6 +5231,12 @@ async function handle(request) {
         exp: (pl1 && pl1.exp) ? pl1.exp : (days1 > 0 ? beijingDatePlus(days1) : undefined),
         agent: agent1, plan: pl1 ? pl1.label : String(row.plan || '').slice(0, 8),
       };
+      /* 2026-11-10：链接上标了补登/续费 → 强制按那个类型走。
+         这样客户换手机号、换网易号都不影响判定 —— 类型在发链接时就定了。 */
+      const _tk = String(row.kind || 'new');
+      if (_tk === 'fix' || _tk === 'renew') {
+        ent.__force = { kind: _tk, exp: String(row.fix_exp || '') };
+      }
       const r = await addEntry(ent);
       if (!r.ok) {
         /* 2026-11-08：号早就登记过 → 也不算坏事，token 还回去（买家可能扫错了号，
@@ -5237,8 +5302,15 @@ async function handle(request) {
       let b1;
       try { b1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
       const pw = await regPass();
-      if (!pw) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
-      if (String(b1.pass || '') !== pw) return json({ ok: false, message: '生成口令不正确' }, 403);
+      /* 2026-11-10：控制台也能生成链接（管理员自己补发、发补登链接）。
+         先按客服口令判，不对再按控制台满权限口令判 —— 客服请求不带 user 字段，
+         consoleRole 会立刻回 null，不产生额外 KV 读，客服这条路完全没变慢。 */
+      let passOk = !!pw && String(b1.pass || '') === pw;
+      if (!passOk) passOk = await consoleAuthFull(b1);
+      if (!passOk) {
+        if (!pw) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
+        return json({ ok: false, message: '生成口令不正确' }, 403);
+      }
       const agent = normAgent(b1.agent);
       const rc2 = await regCfg();
       const pl2 = planOf(rc2, b1.plan);
@@ -5264,8 +5336,45 @@ async function handle(request) {
       if (genN !== null && genN > cap) {
         return json({ ok: false, message: '今天生成链接已达上限（' + cap + ' 条/天），需要更多请联系管理员' }, 429);
       }
+      /* ===== 2026-11-10：链接类型（新登记 / 续费 / 补登）=====
+         为什么必须在生成链接时定：补登（免费、继承原单到期日）和续费（收钱、到期日累加）
+         在「客户提交」那一刻长得完全一样 —— 都是「号不在池里 + 原单还没到期」。
+         只靠提交时的字段猜，猜错一次就是白送一个套餐（判成补登）或客户付了钱没延长
+         （判成补登）。这件事只有客服在发链接时知道，所以固化在 token 上。
+         补登必须指定原单（fix_ref = 原单手机号或网易 uid），服务端从台账里取到期日。 */
+      const tokKind = (String(b1.kind || '') === 'fix') ? 'fix'
+        : (String(b1.kind || '') === 'renew' ? 'renew' : 'new');
+      let tokFixExp = '', tokFixRef = '';
+      if (tokKind !== 'new') {
+        const ref = String(b1.fix_ref || b1.ref || '').replace(/[^0-9A-Za-z_-]/g, '').slice(0, 40);
+        if (!ref) {
+          return json({ ok: false,
+            message: (tokKind === 'fix' ? '补登' : '续费') + '链接必须先选原单（填客户的手机号或网易 UID）' }, 400);
+        }
+        const refIsUid = /^\d{6,}$/.test(ref);
+        const hist = await d1FindLastOrder(refIsUid ? ref : null, refIsUid ? '' : ref);
+        if (!hist) {
+          /* d1FindLastOrder 读失败也回 null，这里没法区分「真没有原单」和「这次没读出来」，
+             所以文案两种可能都写上 —— 绝不能让人以为「客户没买过」。 */
+          return json({ ok: false,
+            message: '按「' + ref + '」没查到原单（也可能是数据库刚好忙）。换个手机号或网易 UID 再试；'
+                   + '确实没有原单的客户请按「新登记」发链接' }, 404);
+        }
+        tokFixExp = String(hist.exp || '').slice(0, 10);
+        tokFixRef = ref;
+        if (!tokFixExp) {
+          return json({ ok: false, message: '原单没记录到期日（历史数据缺失），不能做补登/续费，请按新登记处理' }, 400);
+        }
+        /* 补登只在原套餐有效期内免费 —— 原单已经到期再「补登」等于白送一整个套餐。 */
+        if (tokKind === 'fix' && tokFixExp !== 'forever' && isExpiredExp(tokFixExp)) {
+          return json({ ok: false,
+            message: '这个原单已经到期（' + tokFixExp + '），不能走补登（补登只在原套餐有效期内免费）。'
+                   + '客户要继续用得发「续费」或「新登记」链接' }, 400);
+        }
+      }
       const one = await regTokenNew(agent, pl2 ? pl2.key : String(b1.plan || '').slice(0, 16),
-        pObj ? (Number(pObj.days) || 0) : 0, b1.note, hours);
+        pObj ? (Number(pObj.days) || 0) : 0, b1.note, hours,
+        tokKind, tokFixExp, tokFixRef);
       if (!one) return json({ ok: false, message: '生成失败（' + d1ErrHint() + '）' }, 503);
       const origin = url.origin;
       return json({
@@ -5273,14 +5382,19 @@ async function handle(request) {
         link: origin + '/r/' + one.code,
         short: origin.replace(/^https?:\/\//, '') + '/r/' + one.code,
         exp_at: one.exp_at, hours: hours, agent: agent, plan: pl2 ? pl2.label : '',
+        kind: tokKind, fix_exp: tokFixExp, fix_ref: tokFixRef,
       });
     }
     if (url.pathname === '/api/regtoken_list' && request.method === 'POST') {
       let b2;
       try { b2 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
       const pw2 = await regPass();
-      if (!pw2) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
-      if (String(b2.pass || '') !== pw2) return json({ ok: false, message: '生成口令不正确' }, 403);
+      let passOk2 = !!pw2 && String(b2.pass || '') === pw2;
+      if (!passOk2) passOk2 = await consoleAuthFull(b2);       // 2026-11-10：控制台也能查
+      if (!passOk2) {
+        if (!pw2) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
+        return json({ ok: false, message: '生成口令不正确' }, 403);
+      }
       const w = [], ps = [];
       if (b2.agent) { w.push('agent=?'); ps.push(normAgent(b2.agent)); }
       const stq = String(b2.state || '');
@@ -5288,7 +5402,7 @@ async function handle(request) {
       else if (stq) { w.push('state=?'); ps.push(stq); }
       const lim = Math.max(1, Math.min(300, Number(b2.limit) || 80));
       const rows = await d1All(
-        'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone FROM reg_tokens' +
+        'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone,kind,fix_exp,fix_ref FROM reg_tokens' +
         (w.length ? (' WHERE ' + w.join(' AND ')) : '') + ' ORDER BY ctime DESC LIMIT ' + lim, ps);
       if (rows === null) return json({ ok: false, message: '数据库读不到（' + d1ErrHint() + '）' }, 503);
       return json({ ok: true, n: rows.length, rows: rows.map(r => Object.assign({}, r, { state: regStateOf(r) })) });
@@ -5297,8 +5411,12 @@ async function handle(request) {
       let b3;
       try { b3 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
       const pw3 = await regPass();
-      if (!pw3) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
-      if (String(b3.pass || '') !== pw3) return json({ ok: false, message: '生成口令不正确' }, 403);
+      let passOk3 = !!pw3 && String(b3.pass || '') === pw3;
+      if (!passOk3) passOk3 = await consoleAuthFull(b3);       // 2026-11-10：控制台也能作废
+      if (!passOk3) {
+        if (!pw3) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
+        return json({ ok: false, message: '生成口令不正确' }, 403);
+      }
       const n = await d1Changes("UPDATE reg_tokens SET state='void' WHERE token=? AND state='unused'",
                                [regNormCode(b3.code)]);
       if (n === -1) return json({ ok: false, message: '数据库不可用' }, 503);
@@ -7811,6 +7929,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成">月度结算</button>
     <button class="mini gray" id="btnCfg" style="display:none">客服名单</button>
     <button class="mini gray" id="btnDev" style="display:none" title="按客服电脑授权：未授权的机器码不能生成登记链接">设备授权</button>
+    <button class="mini gray" id="btnReg" style="display:none" title="生成买家自助登记链接；续费/补登必须选原单，类型定在链接上">登记链接</button>
     <button class="mini gray" id="btnOut">退出</button>
   </div>
   <div class="twrap"><table><thead><tr>
@@ -7942,6 +8061,35 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <div id="dvBody"></div>
   <div class="row2"><button class="gray" id="dvClose">关闭</button></div>
   <div class="msg" id="dvm"></div>
+</div></div>
+<!-- ===== 2026-11-10：登记链接（新登记 / 续费 / 补登） ===== -->
+<div class="modal" id="rgModal" hidden><div class="mbox" style="width:880px;max-height:92vh;overflow:auto">
+  <h3>登记链接（发链接给买家，让他自己扫码登记）</h3>
+  <p style="font-size:12px;color:#888;margin:4px 0 0;line-height:1.75">
+  <b>三种类型不能混用：</b><br>
+  · <b>新登记</b> —— 新客户。收钱、算提成，到期日 = 今天 + 套餐天数。<br>
+  · <b>续费</b> —— 老客户付钱延期。收钱、算提成，到期日 = <b>原到期日 + 套餐天数</b>（剩下的一天天都不丢）；号已经掉线也能用，会以原单到期日为基准累加。<br>
+  · <b>补登</b> —— 号掉线了，免费补回。不收钱、不算提成，到期日<b>继承原单</b>（不延长）。<br>
+  ⚠ 续费和补登<b>必须先搜到原单</b>：类型是定在链接上的，客户后来换手机号、换网易号都不影响判定。原单已过期的不能补登（补登只在原套餐有效期内免费）。</p>
+  <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:12px 0 6px;padding:10px 12px;background:#fffaf1;border:1px solid #f3e2c8;border-radius:9px">
+    <div><label style="margin-top:0">类型</label><select id="rgKind" style="width:120px"><option value="new">新登记</option><option value="renew">续费</option><option value="fix">补登（免费）</option></select></div>
+    <div><label style="margin-top:0">客服</label><select id="rgAgent" style="width:110px"></select></div>
+    <div><label style="margin-top:0">套餐</label><select id="rgPlan" style="width:110px"></select></div>
+    <div><label style="margin-top:0">链接有效期</label><select id="rgHours" style="width:110px"><option value="24">24 小时</option><option value="72">3 天</option></select></div>
+  </div>
+  <div id="rgRefBox" hidden style="margin:0 0 10px;padding:10px 12px;background:#f6f9ff;border:1px solid #dbe6fb;border-radius:9px">
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <div><label style="margin-top:0">原单（客户手机号 或 网易 UID）</label><input id="rgRef" placeholder="如 13800138000 或 1234567890" style="width:250px" inputmode="numeric"></div>
+      <button class="mini gray" id="rgFind" style="margin-top:0">搜索原单</button>
+    </div>
+    <div id="rgRefOut" style="margin-top:8px"></div>
+  </div>
+  <div><label>备注（买家看不到，只记在这条链接上，方便你自己认）</label><input id="rgNote" maxlength="60" placeholder="如：11月 张先生 号掉线补登"></div>
+  <div class="row2"><button id="rgGo">生成链接</button><button class="gray" id="rgClose">关闭</button></div>
+  <div class="msg" id="rgm"></div>
+  <div id="rgOut"></div>
+  <h4 style="margin:16px 0 6px;font-size:13px">最近生成（只显示最近 25 条）</h4>
+  <div id="rgList"></div>
 </div></div>
 <!-- ===== 2026-11-05：月度结算 ===== -->
 <div class="modal" id="lgModal" hidden><div class="mbox" style="width:980px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
@@ -8100,6 +8248,8 @@ function applyRole(role){
   var full=(ROLE==='full');
   $('btnCfg').style.display=full?'':'none';
   $('btnDev').style.display=full?'':'none';
+  // 2026-11-10：登记链接（含补登/续费）只有满权限能生成，服务端同样只认满权限口令
+  var brg=$('btnReg');if(brg)brg.style.display=full?'':'none';
   // 2026-11-05：结算涉及金额，只有满权限能看到入口（服务端也拦）
   var bl=$('btnLedger');if(bl)bl.style.display=full?'':'none';
   var t=$('ptitle');
@@ -9115,6 +9265,110 @@ $('dvBody').addEventListener('click',function(ev){
     }
   }).catch(function(){$('dvm').textContent='网络错误，请重试';$('dvm').className='msg err';});
 });
+/* ===== 2026-11-10：登记链接（新登记 / 续费 / 补登） =====
+   为什么要在发链接时就选类型：客户提交那一刻，「号不在池 + 原单没到期」既可能是
+   免费补登，也可能是付了钱的续费。系统分不出来，猜错一边就是白送套餐或客户白付钱。 */
+var RG_REF = null;
+function rgTok(){ return JSON.parse(TOKEN||'{}'); }
+function rgKind(){ return $('rgKind').value||'new'; }
+function rgKindName(k){ return k==='fix'?'补登':(k==='renew'?'续费':'新登记'); }
+function rgSync(){ $('rgRefBox').hidden=(rgKind()==='new'); }
+$('rgKind').onchange=function(){ RG_REF=null; $('rgRefOut').innerHTML=''; rgSync(); };
+$('btnReg').onclick=function(){
+  var c=(DATA&&DATA.cfg)||{agents:[],plans:[]};
+  $('rgAgent').innerHTML=(c.agents||[]).map(function(a){return '<option>'+esc(a)+'</option>';}).join('');
+  $('rgPlan').innerHTML=(c.plans||[]).map(function(p){return '<option value="'+esc(p.key)+'">'+esc(p.label)+'</option>';}).join('');
+  $('rgNote').value=''; $('rgm').textContent=''; $('rgm').className='msg';
+  $('rgOut').innerHTML=''; $('rgRef').value=''; $('rgRefOut').innerHTML='';
+  RG_REF=null; rgSync(); $('rgModal').hidden=false; rgLoad();
+};
+$('rgClose').onclick=function(){ $('rgModal').hidden=true; };
+$('rgFind').onclick=function(){
+  var t=rgTok(), q=($('rgRef').value||'').replace(/[^0-9A-Za-z_-]/g,'');
+  if(q.length<4){ $('rgm').textContent='至少输 4 位（手机号 或 网易 UID）'; $('rgm').className='msg err'; return; }
+  $('rgFind').disabled=true; $('rgm').textContent='搜索中…'; $('rgm').className='msg';
+  api('/api/console/findorder',{user:t.user,pass:t.pass,q:q}).then(function(r){
+    $('rgFind').disabled=false;
+    if(!(r.ok&&r.d&&r.d.ok)){ $('rgm').textContent=(r.d&&r.d.message)||'搜索失败'; $('rgm').className='msg err'; return; }
+    var rows=(r.d.rows||[]).filter(function(x){return !!x.exp;});
+    if(!rows.length){
+      $('rgRefOut').innerHTML='<div style="color:#b06a00;font-size:12px">没找到有到期日的原单。真没买过的客户请按「新登记」发链接。</div>';
+      return;
+    }
+    var h='<div style="font-size:12px;color:#666;margin-bottom:5px">点一行选中它当原单：</div>';
+    rows.forEach(function(x,i){
+      h+='<div class="rghit" data-i="'+i+'" style="cursor:pointer;padding:7px 9px;border:1px solid #e3e8f0;border-radius:7px;margin-bottom:5px;font-size:12px;line-height:1.7">'
+        +'<b>'+esc(x.name||'(无手机号)')+'</b> · uid '+esc(x.uid||'-')+' · '+esc(x.plan||'?')
+        +' · 到期 <b>'+esc(x.exp||'')+'</b>'
+        +' · 登记日 '+esc(String(x.start||x.day||'').slice(0,10))
+        +(x.alive?' <span class="badge b-green">还在池</span>':' <span class="badge b-gray">号已删</span>')
+        +(x.rb?' <span class="badge b-orange">补</span>':'')
+        +'</div>';
+    });
+    $('rgRefOut').innerHTML=h;
+    Array.prototype.forEach.call($('rgRefOut').querySelectorAll('.rghit'),function(el){
+      el.onclick=function(){
+        var x=rows[parseInt(el.dataset.i,10)]||{};
+        RG_REF={ref:String(x.uid||x.name||''),exp:String(x.exp||''),name:x.name||'',alive:!!x.alive};
+        Array.prototype.forEach.call($('rgRefOut').querySelectorAll('.rghit'),function(e2){e2.style.background='';e2.style.borderColor='#e3e8f0';});
+        el.style.background='#eef6ff'; el.style.borderColor='#9cc4f5';
+        $('rgm').textContent='已选原单：'+((x.name||x.uid||'')+'，到期 '+x.exp+(x.alive?'（这个号还在池里没掉线）':'')); $('rgm').className='msg ok';
+      };
+    });
+  }).catch(function(){ $('rgFind').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
+};
+$('rgGo').onclick=function(){
+  var t=rgTok(), k=rgKind();
+  if(k!=='new'&&!RG_REF){ $('rgm').textContent='先搜原单、点一行选中它，再生成'; $('rgm').className='msg err'; return; }
+  if(k==='fix'&&RG_REF&&RG_REF.alive){ $('rgm').textContent='这个号还在号池里没掉线，不用补登（要延期请用「续费」）'; $('rgm').className='msg err'; return; }
+  var body={user:t.user,pass:t.pass,kind:k,agent:$('rgAgent').value||'',
+    plan:$('rgPlan').value||'',hours:parseInt($('rgHours').value,10)||24,
+    note:$('rgNote').value||''};
+  if(k!=='new'){ body.fix_ref=RG_REF.ref; body.fix_exp=RG_REF.exp; }
+  $('rgGo').disabled=true; $('rgm').textContent='生成中…'; $('rgm').className='msg';
+  api('/api/regtoken_new',body).then(function(r){
+    $('rgGo').disabled=false;
+    if(!(r.ok&&r.d&&r.d.ok)){ $('rgm').textContent=(r.d&&r.d.message)||'生成失败'; $('rgm').className='msg err'; return; }
+    var d=r.d;
+    $('rgm').textContent='已生成（'+rgKindName(k)+'）'; $('rgm').className='msg ok';
+    $('rgOut').innerHTML='<div style="margin-top:8px;padding:10px 12px;background:#f2fbf4;border:1px solid #cfe8d6;border-radius:9px;font-size:12.5px;line-height:1.95">'
+      +'链接：<input readonly value="'+esc(d.link||'')+'" style="width:auto;min-width:400px;font-family:ui-monospace,Consolas,monospace" onclick="this.select()">'
+      +'<br>有效期至 '+esc(String(d.exp_at||'').slice(0,16).replace('T',' '))+'（'+(d.hours||24)+' 小时），一条链接只能用一次'
+      +(d.fix_exp?('<br>原单到期日：<b>'+esc(d.fix_exp)+'</b>'+(k==='fix'?'（补登后仍到这天，不延长）':'（续费在此基础上累加）')):'')
+      +'<br><span style="color:#888">把链接发给客户，客户自己扫码登记，不用他给你密码。</span></div>';
+    rgLoad();
+  }).catch(function(){ $('rgGo').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
+};
+function rgLoad(){
+  var t=rgTok();
+  api('/api/regtoken_list',{user:t.user,pass:t.pass,limit:25}).then(function(r){
+    if(!(r.ok&&r.d&&r.d.ok)){ $('rgList').innerHTML='<div style="color:#b06a00;font-size:12px">读取失败：'+esc((r.d&&r.d.message)||'')+'</div>'; return; }
+    var rows=r.d.rows||[];
+    if(!rows.length){ $('rgList').innerHTML='<div style="color:#999;font-size:12px">还没有生成过链接。</div>'; return; }
+    var h='<div class="twrap" style="max-height:250px;overflow:auto"><table style="font-size:12px"><thead><tr><th>类型</th><th>客服</th><th>套餐</th><th>状态</th><th>生成时间</th><th>备注</th><th>操作</th></tr></thead><tbody>';
+    rows.forEach(function(x){
+      var st=String(x.state||'unused');
+      var stn=st==='unused'?'未使用':(st==='used'?'已使用':(st==='void'?'已作废':'已过期'));
+      h+='<tr><td>'+rgKindName(String(x.kind||'new'))+'</td><td>'+esc(x.agent||'')+'</td><td>'+esc(x.plan||'')+'</td>'
+        +'<td>'+(st==='unused'?'<b>'+stn+'</b>':stn)+'</td>'
+        +'<td>'+esc(String(x.ctime||'').slice(5,16).replace('T',' '))+'</td>'
+        +'<td>'+esc(x.note||'')+'</td>'
+        +'<td>'+(st==='unused'?('<button class="mini gray" data-void="'+esc(x.token||'')+'">作废</button>'):'—')+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+    $('rgList').innerHTML=h;
+    Array.prototype.forEach.call($('rgList').querySelectorAll('[data-void]'),function(b){
+      b.onclick=function(){
+        var code=b.getAttribute('data-void');
+        if(!confirm('作废这条链接？作废后客户点开就提示失效。')) return;
+        var t2=rgTok(); b.disabled=true;
+        api('/api/regtoken_void',{user:t2.user,pass:t2.pass,code:code}).then(function(r2){
+          if(r2.ok&&r2.d&&r2.d.ok){ rgLoad(); } else { b.disabled=false; alert((r2.d&&r2.d.message)||'作废失败'); }
+        }).catch(function(){ b.disabled=false; alert('网络错误'); });
+      };
+    });
+  }).catch(function(){});
+}
 $('btnCfg').onclick=function(){
   var c=(DATA&&DATA.cfg)||{agents:[],plans:[]};
   // 2026-11-06：名单框支持「客服名|群号」；有群号的客服带竖线展示
