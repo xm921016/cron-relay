@@ -2106,7 +2106,9 @@ async function mergePoolEntry(entry, ekey) {
 // 返回 null = 查不到 / D1 读不了（读不了时按「新登记」走，绝不多送时长）。
 async function d1FindLastOrder(uidKey, name) {
   if (!d1ok()) return null;
-  const SQL = 'SELECT day,start,exp,agent,plan FROM ledger WHERE pool=? AND ';
+  /* 2026-11-10：加 name —— 补登链接要「自动带出上次的手机号」，来源就是台账的 name。
+     台账没有 email 列，所以邮箱没法预填（那是客户现在能收到信的那个，必须自己填）。 */
+  const SQL = 'SELECT day,start,exp,agent,plan,uid,name FROM ledger WHERE pool=? AND ';
   let rows = null;
   if (uidKey) rows = await d1All(SQL + 'uid=? ORDER BY day DESC, id DESC LIMIT 1', [POOL_NAME, String(uidKey)]);
   if ((!rows || !rows.length) && String(name || '')) {
@@ -4020,7 +4022,7 @@ async function regTokenGet(code) {
   }
   const rows = await d1All(
     'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone,ledger_id,' +
-    'kind,fix_exp,fix_ref FROM reg_tokens WHERE token=?',
+    'kind,fix_exp,fix_ref,fix_name FROM reg_tokens WHERE token=?',
     [c]);
   if (rows === null) {
     /* 2026-11-08：D1「读」额度打满（UTC 日 500 万行，超额回 code 7500）时，
@@ -4063,6 +4065,8 @@ async function regTokenMirror(row, ttlSec) {
        镜像里没有 kind，补登链接就会被当成新登记（白送一整个套餐）。 */
     kind: String(row.kind || 'new'), fix_exp: String(row.fix_exp || ''),
     fix_ref: String(row.fix_ref || ''),
+    /* 原单手机号，买家页用它预填。缺了不影响判定，只是客户要多打一遍。 */
+    fix_name: String(row.fix_name || ''),
   };
   const ttl = Math.max(60, Math.min(259200, Number(ttlSec) || 259200));
   try { await POOL.put('regtok:' + o.token, JSON.stringify(o), { expirationTtl: ttl }); } catch (e) {}
@@ -4161,23 +4165,25 @@ async function regDevTouch(dev, agent) {
   } catch (e) {}
 }
 
-async function regTokenNew(agent, plan, days, note, hours, kind, fixExp, fixRef) {
+async function regTokenNew(agent, plan, days, note, hours, kind, fixExp, fixRef, fixName) {
   const code = regCode();
   const now = Date.now();
   const expAt = now + (hours || REG_TTL_H) * 3600 * 1000;
   /* 2026-11-10：kind 决定这一单算新登记 / 续费 / 补登。老调用方不传 → 默认 new（行为不变）。 */
   const k = (kind === 'fix' || kind === 'renew') ? kind : 'new';
   const ok = await d1Run(
-    'INSERT INTO reg_tokens (token,agent,plan,days,note,state,ctime,exp_at,kind,fix_exp,fix_ref) ' +
-    'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+    'INSERT INTO reg_tokens (token,agent,plan,days,note,state,ctime,exp_at,kind,fix_exp,fix_ref,fix_name) ' +
+    'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
     [code, String(agent || ''), String(plan || ''), Number(days) || 0, String(note || ''),
-     'unused', regIso(now), regIso(expAt), k, String(fixExp || ''), String(fixRef || '')]);
+     'unused', regIso(now), regIso(expAt), k, String(fixExp || ''), String(fixRef || ''),
+     String(fixName || '')]);
   if (ok) {
     /* 2026-11-08：新 token 立刻写一份 KV 镜像（TTL 跟链接有效期一致）。
        D1 读额度随时可能被别的查询打满，那时候买家只能靠这份镜像把链接打开。 */
     await regTokenMirror({ token: code, agent: agent, plan: plan, days: days, note: note,
       state: 'unused', ctime: regIso(now), exp_at: regIso(expAt),
-      kind: k, fix_exp: String(fixExp || ''), fix_ref: String(fixRef || '') },
+      kind: k, fix_exp: String(fixExp || ''), fix_ref: String(fixRef || ''),
+      fix_name: String(fixName || '') },
       ((hours || REG_TTL_H) * 3600) + 3600);
   }
   return ok ? { code: code, ctime: regIso(now), exp_at: regIso(expAt), kind: k } : null;
@@ -4403,6 +4409,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
   <div id="d-box" class="card hide">
     <div class="big ok">✓</div>
     <p class="tip ok" id="d-msg"></p>
+    <p class="tip" id="d-uid" style="margin-top:10px"></p>
   </div>
 </div>
 <script>
@@ -4456,8 +4463,9 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
          否则买家以为自己又买了一个月，回头找客服对账。 */
       var sub;
       if (j.kind === 'fix') {
-        sub = '这是免费补登链接（原账号掉线补回，有效期不变' + (j.fix_exp ? '，仍到 ' + j.fix_exp : '')
-            + '）· 本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
+        sub = '这是免费补登链接（原账号掉线补回，有效期不变' + (j.fix_exp ? '，仍到 ' + j.fix_exp : '') + '）'
+            + (j.fix_name ? ' · 已自动带出上次的手机号 ' + j.fix_name + '，换号了就改一下' : '')
+            + ' · 本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
       } else if (j.kind === 'renew') {
         sub = '这是续费链接（' + (j.planLabel || '套餐') + '，在原到期日基础上延长'
             + (j.fix_exp ? '，当前到期 ' + j.fix_exp : '') + '）· 本链接 ' + j.left_h + ' 小时内有效';
@@ -4465,6 +4473,11 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
         sub = (j.planLabel ? '套餐：' + j.planLabel + ' · ' : '') + '本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
       }
       E('sub').textContent = sub;
+      /* 2026-11-10：补登把原单手机号填进输入框。客户没换号就不用再打一遍；
+         换了直接改 —— 类型是按链接走的，改手机号不影响这一单仍算补登。 */
+      if (j.kind === 'fix' && j.fix_name) {
+        try { if (!E('i-phone').value) E('i-phone').value = j.fix_name; } catch(e) {}
+      }
       show('m-box', true);
       st.dev = getDev();
       newQr();
@@ -4665,6 +4678,11 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
       st.done = true;
       show('m-box', false); show('d-box', true);
       E('d-msg').textContent = j.message || '登记成功';
+      /* 2026-11-10：把网易号 UID 直接告诉客户 —— 客户基本不知道自己的 UID 是哪个数字，
+         而补号/查单都要它。登记成功这一刻是唯一能「当面交付」的时机。 */
+      if (j.uid) {
+        E('d-uid').textContent = '你的网易号 UID：' + j.uid + '（截图存一下；以后号掉线找客服补号，报这个最快）';
+      }
     }).catch(function(e){ st.busy = false; E('b-sub').disabled = false; E('sub-tip').textContent = e.message || '网络异常'; });
   };
 
@@ -5107,6 +5125,8 @@ async function handle(request) {
         /* 2026-11-10：把链接类型告诉买家页 —— 补登要显示「免费、有效期不变」，
            否则买家以为买了新套餐，回头找客服对账。 */
         kind: String(row.kind || 'new'), fix_exp: String(row.fix_exp || ''),
+        /* 2026-11-10：补登链接把原单手机号带给买家页，客户没换号就不用再手打一遍。 */
+        fix_name: String(row.fix_name || ''),
       }, 200, { 'Cache-Control': 'no-store' });
     }
     /* 出码：worker 直接向网易申请 unikey，本地生成 PNG
@@ -5357,15 +5377,21 @@ async function handle(request) {
          补登必须指定原单（fix_ref = 原单手机号或网易 uid），服务端从台账里取到期日。 */
       const tokKind = (String(b1.kind || '') === 'fix') ? 'fix'
         : (String(b1.kind || '') === 'renew' ? 'renew' : 'new');
-      let tokFixExp = '', tokFixRef = '';
+      let tokFixExp = '', tokFixRef = '', tokFixName = '';
       if (tokKind !== 'new') {
         const ref = String(b1.fix_ref || b1.ref || '').replace(/[^0-9A-Za-z_-]/g, '').slice(0, 40);
         if (!ref) {
           return json({ ok: false,
             message: (tokKind === 'fix' ? '补登' : '续费') + '链接必须先选原单（填客户的手机号或网易 UID）' }, 400);
         }
-        const refIsUid = /^\d{6,}$/.test(ref);
-        const hist = await d1FindLastOrder(refIsUid ? ref : null, refIsUid ? '' : ref);
+        /* 2026-11-10 修 bug：原来用 `/^\d{6,}$/` 判断「这是 uid」，而手机号是纯数字、
+           长度也 ≥6，于是客服填手机号时实际查的是 uid=手机号，必然查不到 → 一律报
+           「没查到原单」，补登/续费链接根本发不出去。改成手机号优先按 name 查，
+           查不到再按 uid 兜一次（11 位纯数字的 uid 也照样能查）。 */
+        const refIsPhone = /^1\d{10}$/.test(ref);
+        let hist = null;
+        if (refIsPhone) hist = await d1FindLastOrder(null, ref);
+        if (!hist) hist = await d1FindLastOrder(ref, '');
         if (!hist) {
           /* d1FindLastOrder 读失败也回 null，这里没法区分「真没有原单」和「这次没读出来」，
              所以文案两种可能都写上 —— 绝不能让人以为「客户没买过」。 */
@@ -5375,6 +5401,10 @@ async function handle(request) {
         }
         tokFixExp = String(hist.exp || '').slice(0, 10);
         tokFixRef = ref;
+        /* 原单手机号：台账 name 是 11 位数字才认（老号可能存的是 qr:/manual: 占位名）。
+           买家页拿它预填，客户手机号没换就不用再手打一遍。 */
+        const hn = String(hist.name || '').replace(/[^0-9]/g, '');
+        tokFixName = /^1\d{10}$/.test(hn) ? hn : '';
         if (!tokFixExp) {
           return json({ ok: false, message: '原单没记录到期日（历史数据缺失），不能做补登/续费，请按新登记处理' }, 400);
         }
@@ -5385,9 +5415,13 @@ async function handle(request) {
                    + '客户要继续用得发「续费」或「新登记」链接' }, 400);
         }
       }
-      const one = await regTokenNew(agent, pl2 ? pl2.key : String(b1.plan || '').slice(0, 16),
-        pObj ? (Number(pObj.days) || 0) : 0, b1.note, hours,
-        tokKind, tokFixExp, tokFixRef);
+      /* 2026-11-10：补登不存套餐 —— 补登继承原单到期日，套餐对它没有任何作用。
+         前端也不再要求选套餐（选了也白选），这里直接写空，免得列表里出现
+         误导性的「套餐：1月」，让人以为补登还买了时长。 */
+      const one = await regTokenNew(agent,
+        tokKind === 'fix' ? '' : (pl2 ? pl2.key : String(b1.plan || '').slice(0, 16)),
+        tokKind === 'fix' ? 0 : (pObj ? (Number(pObj.days) || 0) : 0),
+        b1.note, hours, tokKind, tokFixExp, tokFixRef, tokFixName);
       if (!one) return json({ ok: false, message: '生成失败（' + d1ErrHint() + '）' }, 503);
       const origin = url.origin;
       return json({
@@ -5395,7 +5429,7 @@ async function handle(request) {
         link: origin + '/r/' + one.code,
         short: origin.replace(/^https?:\/\//, '') + '/r/' + one.code,
         exp_at: one.exp_at, hours: hours, agent: agent, plan: pl2 ? pl2.label : '',
-        kind: tokKind, fix_exp: tokFixExp, fix_ref: tokFixRef,
+        kind: tokKind, fix_exp: tokFixExp, fix_ref: tokFixRef, fix_name: tokFixName,
       });
     }
     /* ---- 客服查原单（生成补登/续费链接前先确认这一单） ----
@@ -5445,11 +5479,16 @@ async function handle(request) {
       const w = [], ps = [];
       if (b2.agent) { w.push('agent=?'); ps.push(normAgent(b2.agent)); }
       const stq = String(b2.state || '');
-      if (stq === 'unused') { w.push("state='unused' AND exp_at > ?"); ps.push(regIso(Date.now())); }
+      /* 2026-11-10：「已过期」是算出来的状态（state 仍是 unused，只是 exp_at 过了），
+         库里根本没有 state='expired' 这种值 —— 原来走到 else 分支拼 state=?
+         永远查回 0 行，所以筛选框里像「没有过期链接」一样。这里单独按时间区间判。 */
+      const nowIso = regIso(Date.now());
+      if (stq === 'unused') { w.push("state='unused' AND exp_at > ?"); ps.push(nowIso); }
+      else if (stq === 'expired') { w.push("state='unused' AND exp_at <= ?"); ps.push(nowIso); }
       else if (stq) { w.push('state=?'); ps.push(stq); }
       const lim = Math.max(1, Math.min(300, Number(b2.limit) || 80));
       const rows = await d1All(
-        'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone,kind,fix_exp,fix_ref FROM reg_tokens' +
+        'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone,kind,fix_exp,fix_ref,fix_name FROM reg_tokens' +
         (w.length ? (' WHERE ' + w.join(' AND ')) : '') + ' ORDER BY ctime DESC LIMIT ' + lim, ps);
       if (rows === null) return json({ ok: false, message: '数据库读不到（' + d1ErrHint() + '）' }, 503);
       return json({ ok: true, n: rows.length, rows: rows.map(r => Object.assign({}, r, { state: regStateOf(r) })) });
@@ -8121,7 +8160,8 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:12px 0 6px;padding:10px 12px;background:#fffaf1;border:1px solid #f3e2c8;border-radius:9px">
     <div><label style="margin-top:0">类型</label><select id="rgKind" style="width:120px"><option value="new">新登记</option><option value="renew">续费</option><option value="fix">补登（免费）</option></select></div>
     <div><label style="margin-top:0">客服</label><select id="rgAgent" style="width:110px"></select></div>
-    <div><label style="margin-top:0">套餐</label><select id="rgPlan" style="width:110px"></select></div>
+    <div><label style="margin-top:0">套餐</label><select id="rgPlan" style="width:110px"></select>
+      <div id="rgPlanTip" hidden style="font-size:11px;color:#b06a00;margin-top:2px">补登继承原单，不用选</div></div>
     <div><label style="margin-top:0">链接有效期</label><select id="rgHours" style="width:110px"><option value="24">24 小时</option><option value="72">3 天</option></select></div>
   </div>
   <div id="rgRefBox" hidden style="margin:0 0 10px;padding:10px 12px;background:#f6f9ff;border:1px solid #dbe6fb;border-radius:9px">
@@ -8135,7 +8175,18 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <div class="row2"><button id="rgGo">生成链接</button><button class="gray" id="rgClose">关闭</button></div>
   <div class="msg" id="rgm"></div>
   <div id="rgOut"></div>
-  <h4 style="margin:16px 0 6px;font-size:13px">最近生成（只显示最近 25 条）</h4>
+  <div style="display:flex;gap:8px;align-items:center;margin:16px 0 6px">
+    <h4 style="margin:0;font-size:13px">最近生成</h4>
+    <!-- 2026-11-10：原来只有「未使用/已使用/已作废」看起来像没有过期这一档。
+         已过期是算出来的（state 仍是 unused、exp_at 过了），服务端已支持筛选。 -->
+    <select id="rgState" style="width:130px;font-size:12px;padding:4px 6px">
+      <option value="">全部状态</option>
+      <option value="unused">未使用（未过期）</option>
+      <option value="expired">已过期</option>
+      <option value="used">已使用</option>
+      <option value="void">已作废</option>
+    </select>
+  </div>
   <div id="rgList"></div>
 </div></div>
 <!-- ===== 2026-11-05：月度结算 ===== -->
@@ -9319,8 +9370,17 @@ var RG_REF = null;
 function rgTok(){ return JSON.parse(TOKEN||'{}'); }
 function rgKind(){ return $('rgKind').value||'new'; }
 function rgKindName(k){ return k==='fix'?'补登':(k==='renew'?'续费':'新登记'); }
-function rgSync(){ $('rgRefBox').hidden=(rgKind()==='new'); }
+function rgSync(){
+  var k=rgKind();
+  $('rgRefBox').hidden=(k==='new');
+  /* 2026-11-10：补登不需要选套餐 —— 有效期完全继承原单，选了也不生效。
+     禁用而不是隐藏，让人看得见「这里本来有套餐、补登用不上」。 */
+  $('rgPlan').disabled=(k==='fix');
+  $('rgPlanTip').hidden=(k!=='fix');
+}
 $('rgKind').onchange=function(){ RG_REF=null; $('rgRefOut').innerHTML=''; rgSync(); };
+/* 2026-11-10：按状态看链接（尤其「已过期」）。过期链接仍然是 unused，作废按钮照样给。 */
+$('rgState').onchange=function(){ rgLoad(); };
 $('btnReg').onclick=function(){
   var c=(DATA&&DATA.cfg)||{agents:[],plans:[]};
   $('rgAgent').innerHTML=(c.agents||[]).map(function(a){return '<option>'+esc(a)+'</option>';}).join('');
@@ -9369,7 +9429,7 @@ $('rgGo').onclick=function(){
   if(k!=='new'&&!RG_REF){ $('rgm').textContent='先搜原单、点一行选中它，再生成'; $('rgm').className='msg err'; return; }
   if(k==='fix'&&RG_REF&&RG_REF.alive){ $('rgm').textContent='这个号还在号池里没掉线，不用补登（要延期请用「续费」）'; $('rgm').className='msg err'; return; }
   var body={user:t.user,pass:t.pass,kind:k,agent:$('rgAgent').value||'',
-    plan:$('rgPlan').value||'',hours:parseInt($('rgHours').value,10)||24,
+    plan:(k==='fix'?'':($('rgPlan').value||'')),hours:parseInt($('rgHours').value,10)||24,
     note:$('rgNote').value||''};
   if(k!=='new'){ body.fix_ref=RG_REF.ref; body.fix_exp=RG_REF.exp; }
   $('rgGo').disabled=true; $('rgm').textContent='生成中…'; $('rgm').className='msg';
@@ -9388,19 +9448,24 @@ $('rgGo').onclick=function(){
 };
 function rgLoad(){
   var t=rgTok();
-  api('/api/regtoken_list',{user:t.user,pass:t.pass,limit:25}).then(function(r){
+  var stv=($('rgState')&&$('rgState').value)||'';
+  api('/api/regtoken_list',{user:t.user,pass:t.pass,limit:(stv?80:25),state:stv}).then(function(r){
     if(!(r.ok&&r.d&&r.d.ok)){ $('rgList').innerHTML='<div style="color:#b06a00;font-size:12px">读取失败：'+esc((r.d&&r.d.message)||'')+'</div>'; return; }
     var rows=r.d.rows||[];
-    if(!rows.length){ $('rgList').innerHTML='<div style="color:#999;font-size:12px">还没有生成过链接。</div>'; return; }
+    if(!rows.length){ $('rgList').innerHTML='<div style="color:#999;font-size:12px">'+(stv?'这个状态下没有链接。':'还没有生成过链接。')+'</div>'; return; }
     var h='<div class="twrap" style="max-height:250px;overflow:auto"><table style="font-size:12px"><thead><tr><th>类型</th><th>客服</th><th>套餐</th><th>状态</th><th>生成时间</th><th>备注</th><th>操作</th></tr></thead><tbody>';
     rows.forEach(function(x){
       var st=String(x.state||'unused');
-      var stn=st==='unused'?'未使用':(st==='used'?'已使用':(st==='void'?'已作废':'已过期'));
-      h+='<tr><td>'+rgKindName(String(x.kind||'new'))+'</td><td>'+esc(x.agent||'')+'</td><td>'+esc(x.plan||'')+'</td>'
-        +'<td>'+(st==='unused'?'<b>'+stn+'</b>':stn)+'</td>'
+      var stn=st==='unused'?'未使用':(st==='used'?'已使用':(st==='void'?'已作废':(st==='expired'?'已过期':'—')));
+      var kn=String(x.kind||'new');
+      /* 补登/续费的实际有效期来自原单，不来自套餐 —— 直接写原单到期日，
+         比在套餐列里显示一个空值有用。 */
+      var pl=(kn!=='new'&&x.fix_exp)?('原单到 '+esc(x.fix_exp)):esc(x.plan||'—');
+      h+='<tr><td>'+rgKindName(kn)+'</td><td>'+esc(x.agent||'')+'</td><td>'+pl+'</td>'
+        +'<td>'+(st==='unused'?'<b>'+stn+'</b>':('expired'===st?'<span style="color:#b06a00">'+stn+'</span>':stn))+'</td>'
         +'<td>'+esc(String(x.ctime||'').slice(5,16).replace('T',' '))+'</td>'
         +'<td>'+esc(x.note||'')+'</td>'
-        +'<td>'+(st==='unused'?('<button class="mini gray" data-void="'+esc(x.token||'')+'">作废</button>'):'—')+'</td></tr>';
+        +'<td>'+((st==='unused'||st==='expired')?('<button class="mini gray" data-void="'+esc(x.token||'')+'">作废</button>'):'—')+'</td></tr>';
     });
     h+='</tbody></table></div>';
     $('rgList').innerHTML=h;
