@@ -2104,15 +2104,26 @@ async function mergePoolEntry(entry, ekey) {
 //   · 原单还在有效期内 → 客户没享受完，这次是补号（免费，有效期继承原单）
 //   · 原单已过期       → 客户的钱已经用完，这次是重新买（按新登记处理）
 // 返回 null = 查不到 / D1 读不了（读不了时按「新登记」走，绝不多送时长）。
-async function d1FindLastOrder(uidKey, name) {
+async function d1FindLastOrder(uidKey, name, exp) {
   if (!d1ok()) return null;
   /* 2026-11-10：加 name —— 补登链接要「自动带出上次的手机号」，来源就是台账的 name。
-     台账没有 email 列，所以邮箱没法预填（那是客户现在能收到信的那个，必须自己填）。 */
+     台账没有 email 列，所以邮箱没法预填（那是客户现在能收到信的那个，必须自己填）。
+     2026-11-10 晚：第三参 exp —— 控制台「选原单」会连同那一笔的到期日一起传上来。
+     原本不管前端选第几笔，这里一律返回 ORDER BY day DESC 的最近一笔，客服看着是
+     「2026-09-01 那单」、实际按「2026-11-01 那单」算续费基数，静默错单。
+     只接受干净的日期串或 forever（避免把前端字符串直接拼进 SQL）。 */
+  const expF = /^\d{4}-\d{2}-\d{2}$/.test(String(exp || '')) ? String(exp)
+    : (String(exp || '') === 'forever' ? 'forever' : '');
+  const tail = (expF ? ' AND exp=? ' : ' ') + 'ORDER BY day DESC, id DESC LIMIT 1';
   const SQL = 'SELECT day,start,exp,agent,plan,uid,name FROM ledger WHERE pool=? AND ';
   let rows = null;
-  if (uidKey) rows = await d1All(SQL + 'uid=? ORDER BY day DESC, id DESC LIMIT 1', [POOL_NAME, String(uidKey)]);
+  if (uidKey) {
+    const ps = expF ? [POOL_NAME, String(uidKey), expF] : [POOL_NAME, String(uidKey)];
+    rows = await d1All(SQL + 'uid=?' + tail, ps);
+  }
   if ((!rows || !rows.length) && String(name || '')) {
-    rows = await d1All(SQL + 'name=? ORDER BY day DESC, id DESC LIMIT 1', [POOL_NAME, String(name)]);
+    const ps = expF ? [POOL_NAME, String(name), expF] : [POOL_NAME, String(name)];
+    rows = await d1All(SQL + 'name=?' + tail, ps);
   }
   return (rows && rows.length) ? rows[0] : null;
 }
@@ -4173,6 +4184,15 @@ function regStateOf(row) {
   if (exp && exp < Date.now()) return 'expired';
   return 'unused';
 }
+/* 2026-11-10 晚：手机号打码（138****8888）。补登链接的原单手机号原来是明文回给
+   /api/r/state 的，页面还会自动填进输入框 —— 链接一旦被转发/截图，客户的号码就出去了。
+   买家页只需要判断「这是不是我的号」，打码足够；真要登记还得自己打一遍，
+   而「手机号必填 + 与网易 uid 一起进号池」这条口径没有任何变化。 */
+function maskPhone(x) {
+  const s = String(x || '').replace(/[^0-9]/g, '');
+  if (!/^1\d{10}$/.test(s)) return '';
+  return s.slice(0, 3) + '****' + s.slice(7);
+}
 /* ===== 2026-11-10：客服机器授权（reg_devices）=====
    背景：EXE 里的生成口令 REG_TOKEN_PASS 是硬编码的，EXE 外流就等于谁都能造链接。
    配额（200 条/天）只是止损。这里加一层「按机器授权」：
@@ -4556,7 +4576,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
       var sub;
       if (j.kind === 'fix') {
         sub = '这是免费补登链接（原账号掉线补回，有效期不变' + (j.fix_exp ? '，仍到 ' + j.fix_exp : '') + '）'
-            + (j.fix_name ? ' · 已自动带出上次的手机号 ' + j.fix_name + '，换号了就改一下' : '')
+            + (j.fix_name_m ? ' · 上次登记的手机号是 ' + j.fix_name_m + '，请在下面填完整' : '')
             + ' · 本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
       } else if (j.kind === 'renew') {
         sub = '这是续费链接（' + (j.planLabel || '套餐') + '，在原到期日基础上延长'
@@ -4565,11 +4585,10 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
         sub = (j.planLabel ? '套餐：' + j.planLabel + ' · ' : '') + '本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
       }
       E('sub').textContent = sub;
-      /* 2026-11-10：补登把原单手机号填进输入框。客户没换号就不用再打一遍；
-         换了直接改 —— 类型是按链接走的，改手机号不影响这一单仍算补登。 */
-      if (j.kind === 'fix' && j.fix_name) {
-        try { if (!E('i-phone').value) E('i-phone').value = j.fix_name; } catch(e) {}
-      }
+      /* 2026-11-10 晚：原来把原单手机号（j.fix_name）直接填进输入框。问题是这个接口
+         谁拿到链接谁就能调 —— 链接被转发到群里或被人截图，客户号码就出去了。
+         现在服务端只回打码版（j.fix_name_m），只用来让买家确认「是不是我的号」，
+         号码本身要自己打一遍（手机号本来就是必填项，不影响判定）。 */
       show('m-box', true);
       st.dev = getDev();
       newQr();
@@ -5233,6 +5252,15 @@ async function handle(request) {
     }
     /* 校验 token：给页面显示套餐和剩余时间 */
     if (url.pathname === '/api/r/state') {
+      /* 2026-11-10 晚：这条是唯一没有频控的 /api/r/* 接口 —— 每次调用 1 行 D1 读 +
+         1 次 KV 读（regTokenGet 的镜像检查），而且无效 code 也照样查库。
+         页面上合法买家只调 1 次（刷新几次也就几条），给 300/天/IP 足够；
+         计数不可用（D1 挂了/额度尽）时 d1Hit 返回 null，照旧放行。 */
+      const stIp = request.headers.get('cf-connecting-ip') || '0';
+      const stN = await d1Hit('rst', stIp + ':' + beijingDate());
+      if (stN !== null && stN > 300) {
+        return json({ ok: false, message: '这条链接打开次数太多了，请稍后再试，或联系客服' }, 429);
+      }
       const row = await regTokenGet(url.searchParams.get('t'));
       if (row === undefined) return json({ ok: false, message: '系统正在忙（数据库限流），请 1 分钟后再刷新；多次不行就把这句话发给客服' }, 503);
       if (!row) return json({ ok: false, message: '这个链接无效，请找客服重新要一条' }, 404);
@@ -5247,22 +5275,30 @@ async function handle(request) {
       const leftMs = regTs(row.exp_at) - Date.now();
       return json({
         ok: true, plan: String(row.plan || ''), planLabel: planLabel,
-        left_h: Math.max(1, Math.round(leftMs / 3600000)), note: String(row.note || ''),
+        /* 2026-11-10 晚：Math.round 会把「还剩 12 分钟」显示成「1 小时」，
+           买家以为还有一小时结果过期了。改成向上取整，至少不会比实际更短。 */
+        left_h: Math.max(1, Math.ceil(leftMs / 3600000)),
+        /* 2026-11-10 晚：note 是客服写在链接上的内部备注（比如「已付 3 元」），
+           买家页根本不显示，没必要回出去。 */
         /* 2026-11-10：把链接类型告诉买家页 —— 补登要显示「免费、有效期不变」，
            否则买家以为买了新套餐，回头找客服对账。 */
         kind: String(row.kind || 'new'), fix_exp: String(row.fix_exp || ''),
-        /* 2026-11-10：补登链接把原单手机号带给买家页，客户没换号就不用再手打一遍。 */
-        fix_name: String(row.fix_name || ''),
+        /* 2026-11-10 晚：原单手机号原来是明文回显 + 自动预填，链接一被转发/截图
+           就等于把客户号码送出去了。改成打码，只用于「这是不是我的号」的确认。 */
+        fix_name_m: maskPhone(row.fix_name),
       }, 200, { 'Cache-Control': 'no-store' });
     }
     /* 出码：worker 直接向网易申请 unikey，本地生成 PNG
        会话完全无状态 —— sDeviceId 由浏览器生成并回传，cookie 打成 bag 原样带回，
        所以这里一行 KV、一行 D1 都不写（免费额度零消耗）。 */
     if (url.pathname === '/api/r/qrkey') {
-      /* 2026-11-09 频控：出码要拿我方出口 IP 去网易申请 unikey，原来完全不限次数（可被刷成风控样本）。 */
+      /* 2026-11-09 频控：出码要拿我方出口 IP 去网易申请 unikey，原来完全不限次数（可被刷成风控样本）。
+         2026-11-10 晚：60 → 200。60 太紧 —— 手机在用运营商 CGNAT、公司/学校 WiFi
+         下，几十个人共享同一个出口 IP，前面几个人换过码就把后面的人全挡成「今天出码
+         次数太多」；而单条链接本身已经被 rqc 限死在 8 张码以内，IP 这一层只需要防刷。 */
       const qkIp = request.headers.get('cf-connecting-ip') || '0';
       const qkN = await d1Hit('rqk', qkIp + ':' + beijingDate());
-      if (qkN !== null && qkN > 60) return json({ ok: false, message: '今天出码次数太多，请明天再试，或联系客服' }, 429);
+      if (qkN !== null && qkN > 200) return json({ ok: false, message: '今天出码次数太多，请明天再试，或联系客服' }, 429);
       const row = await regTokenGet(url.searchParams.get('t'));
       if (row === undefined) return json({ ok: false, message: '系统正在忙（数据库限流），请 1 分钟后再刷新；多次不行就把这句话发给客服' }, 503);
       if (!row || regStateOf(row) !== 'unused') return json({ ok: false, message: '链接不可用，请刷新页面' }, 410);
@@ -5286,10 +5322,14 @@ async function handle(request) {
       if (row === undefined) return json({ ok: false, code: 0, message: '系统正在忙，请稍后刷新重试' }, 503);
       if (!row || regStateOf(row) !== 'unused') return json({ ok: false, code: 0, message: '链接不可用' }, 410);
       /* 2026-11-09 频控：页面每 2 秒轮询一次，正常一次扫码 ≤150 次；600 足够「换几张码」。
-         没有上限时一个恶意页面可以一直轮询到链接过期，把我方 IP 一直挂在网易的扫码接口上。 */
+         没有上限时一个恶意页面可以一直轮询到链接过期，把我方 IP 一直挂在网易的扫码接口上。
+         2026-11-10 晚：600 → 1200。一张码 5 分钟 = 150 次轮询，600 只够换 4 张；
+         买家连着遇到「这张码网易没放行」时第 5 次就被锁，而文案叫他找客服重发 ——
+         其实这条链接还有效、还能用。放到 8 张码，等于把「换几张码」留够。 */
       const qcN = await d1Hit('rqc', regNormCode(url.searchParams.get('t')) + ':' + beijingDate());
-      if (qcN !== null && qcN > 600) {
-        return json({ ok: false, code: 0, message: '这条链接尝试次数过多，请找客服重新要一条' }, 429);
+      if (qcN !== null && qcN > 1200) {
+        return json({ ok: false, code: 0,
+          message: '这条链接今天已经试了很多次了，先别刷新，过几小时再来；急的话找客服换一条' }, 429);
       }
       const key = String(url.searchParams.get('key') || '').trim().slice(0, 64);
       if (!key) return json({ ok: false, code: 0, message: '缺少 key' }, 400);
@@ -5373,6 +5413,20 @@ async function handle(request) {
         return json({ ok: false, message: '号池名额已满（上限 ' + myLimit + ' 人），请联系客服，不要重复提交' }, 429);
       }
 
+      /* 2026-11-10 晚 P0（与 /api/regtoken_new 同一根因）：这条链接生成时如果套餐没解析
+         出来（plan 现在也找不到 + days=0），有效期就算不出来，addEntry 第一行会把空 exp
+         补成「2 年后」—— 等于白送。必须在消耗 token 之前拦下来：拦在后面的话链接已经
+         used，买家连重试的机会都没有。补登(fix)继承原单到期日，不受影响。 */
+      const rc1 = await regCfg();
+      const pl1 = planOf(rc1, row.plan);
+      const days1 = Number(row.days) || 0;
+      const _tk = String(row.kind || 'new');
+      if (_tk !== 'fix' && !(pl1 && pl1.exp) && !(days1 > 0)) {
+        return json({ ok: false, message:
+          '这条链接上的套餐在服务器上找不到了（可能已改名或下架），这次没有登记。'
+          + '请联系客服重新发一条链接 —— 这条链接没有用掉，可以直接丢掉了。' }, 400);
+      }
+
       /* 原子抢 token：两个人同时提交同一条链接，只有一个能进来 */
       const ip = request.headers.get('cf-connecting-ip') || '';
       const ua = request.headers.get('user-agent') || '';
@@ -5381,19 +5435,15 @@ async function handle(request) {
       if (grabbed === -1) return json({ ok: false, message: '数据库暂时不可用，请稍后重试' }, 503);
       if (grabbed === 0) return json({ ok: false, message: '这个链接刚刚已被使用，请联系客服' }, 410);
 
-      const rc1 = await regCfg();
-      const pl1 = planOf(rc1, row.plan);
-      const days1 = Number(row.days) || 0;
       const agent1 = normAgent(row.agent);
       const ent = {
         ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: name,
         uid: v.uid, email: email, phone: phone, grp: 1,
-        exp: (pl1 && pl1.exp) ? pl1.exp : (days1 > 0 ? beijingDatePlus(days1) : undefined),
+        exp: (pl1 && pl1.exp) ? pl1.exp : beijingDatePlus(days1),
         agent: agent1, plan: pl1 ? pl1.label : String(row.plan || '').slice(0, 8),
       };
       /* 2026-11-10：链接上标了补登/续费 → 强制按那个类型走。
          这样客户换手机号、换网易号都不影响判定 —— 类型在发链接时就定了。 */
-      const _tk = String(row.kind || 'new');
       if (_tk === 'fix' || _tk === 'renew') {
         ent.__force = { kind: _tk, exp: String(row.fix_exp || '') };
       }
@@ -5432,7 +5482,11 @@ async function handle(request) {
         }
         console.log('D1 自检读失败，KV 权威键已确认写入:', String(v.uid));
       } else if (chk.length === 0) {
-        return json({ ok: false, message: '这次没能写进数据库，请再点一次「完成登记」' }, 503);
+        /* 2026-11-10 晚：原来只回 503 不回滚 token —— 买家看到「请再点一次」，
+           再点却报「链接已经用过了」。上面 addEntry 已确认没写进库，回滚是安全的
+           （真写进去了 dup 会命中，addEntry 判「已登记过」并把 token 还回来）。 */
+        await regTokenUndo(code);
+        return json({ ok: false, message: '这次没能写进数据库，请再点一次「完成登记」（链接已复位，可以重试）' }, 503);
       }
 
       try {
@@ -5474,6 +5528,26 @@ async function handle(request) {
       const rc2 = await regCfg();
       const pl2 = planOf(rc2, b1.plan);
       const pObj = (rc2.plans || []).find(it => it.key === String(b1.plan || '') || it.label === String(b1.plan || ''));
+      /* ===== 2026-11-10 晚 P0：套餐必须解析成功，否则这条链接会白送 2 年 =====
+         原来的写法：planOf 返回 null 时【照样生成】，只是 days 传 0。买家提交时
+         /api/r/submit 也算不出有效期（exp=undefined），最后落到 addEntry 第一行
+         `if (!entry.exp) entry.exp = beijingDatePlus(730)` —— 2 年后到期；
+         renew 更糟：planDaysOf(2年后) ≈ 730，直接在客户原到期日上 +730 天。
+         全程没有任何报错，客服看到「已生成」、买家看到「登记成功」，只有对账时才发现。
+         触发场景两个，都是日常操作：
+           a) 控制台下架 days=0 的套餐（现在是「永久」80 元）→ 存量永久链接全变 2 年；
+           b) 控制台改套餐名 → 客服电脑上还开着的 EXE 用本地缓存的旧名字生成
+              （refresh_reg_cfg 只在启动时跑一次）→ 新链接 days=0 → 2 年。
+         补登(fix)不读套餐（有效期继承原单），所以只拦 new/renew。
+         放在吃配额之前：套餐不对不该白占一条/天的额度。 */
+      const tokKind = (String(b1.kind || '') === 'fix') ? 'fix'
+        : (String(b1.kind || '') === 'renew' ? 'renew' : 'new');
+      if (tokKind !== 'fix' && !pl2) {
+        return json({ ok: false, bad_plan: true, message:
+          '套餐「' + String(b1.plan || '(空)') + '」不在服务器当前的套餐表里（可能已改名或下架）。'
+          + '请在软件里重新选一次套餐；下拉里如果还是旧名字，重启软件刷新套餐列表。'
+          + '这条链接没有生成，也不占今天的条数。' }, 400);
+      }
       /* 2026-11-09：链接有效期只留两档（24 小时 / 3 天）。原来接受 1~720 任意值，
          EXE 里还多一档 7 天 —— 链接在群里转手后存活太久，等于把入口长期挂着。 */
       const hours = (Number(b1.hours) === 72) ? 72 : 24;
@@ -5486,10 +5560,15 @@ async function handle(request) {
         return json({ ok: false, need_auth: true, dev: dchk.dev || '', message: dchk.msg }, 403);
       }
       await regDevTouch(dchk.dev, agent);
+      /* 2026-11-10 晚：原来只有 dchk.quota 为 0（老版 EXE 不带机器码）时才读 KV
+         REG_TOKEN_DAILY_MAX，而授权设备的 quota 恒 >0（默认 200）⇒ 这个 KV 配置
+         永远不生效，想临时把全局限到 50 条根本改不动。改成取两者较小值：
+         KV 能往下压（应急），不能往上抬（单机配额仍以控制台「设备授权」为准）。 */
       let cap = dchk.quota || 200;
-      if (!dchk.quota) {
-        try { cap = parseInt(cleanKV(await POOL.get('REG_TOKEN_DAILY_MAX')), 10) || 200; } catch (e) {}
-      }
+      try {
+        const kvCap = parseInt(cleanKV(await POOL.get('REG_TOKEN_DAILY_MAX')), 10);
+        if (kvCap > 0) cap = Math.min(cap, kvCap);
+      } catch (e) {}
       const genKey = dchk.dev ? ('d' + dchk.dev) : String(agent || '-');
       const genN = await d1Hit('rtn', genKey + ':' + beijingDate());
       if (genN !== null && genN > cap) {
@@ -5500,9 +5579,8 @@ async function handle(request) {
          在「客户提交」那一刻长得完全一样 —— 都是「号不在池里 + 原单还没到期」。
          只靠提交时的字段猜，猜错一次就是白送一个套餐（判成补登）或客户付了钱没延长
          （判成补登）。这件事只有客服在发链接时知道，所以固化在 token 上。
-         补登必须指定原单（fix_ref = 原单手机号或网易 uid），服务端从台账里取到期日。 */
-      const tokKind = (String(b1.kind || '') === 'fix') ? 'fix'
-        : (String(b1.kind || '') === 'renew' ? 'renew' : 'new');
+         补登必须指定原单（fix_ref = 原单手机号或网易 uid），服务端从台账里取到期日。
+         tokKind 在上面「套餐必须解析成功」那段就算好了（要赶在吃配额之前拦下来）。 */
       let tokFixExp = '', tokFixRef = '', tokFixName = '';
       if (tokKind !== 'new') {
         const ref = String(b1.fix_ref || b1.ref || '').replace(/[^0-9A-Za-z_-]/g, '').slice(0, 40);
@@ -5515,9 +5593,14 @@ async function handle(request) {
            「没查到原单」，补登/续费链接根本发不出去。改成手机号优先按 name 查，
            查不到再按 uid 兜一次（11 位纯数字的 uid 也照样能查）。 */
         const refIsPhone = /^1\d{10}$/.test(ref);
+        /* 2026-11-10 晚：控制台「选原单」会把那一笔的到期日一起传上来（fix_exp）。
+           原来服务端完全不看它，一律取最近一笔 —— 客服选的是 9 月那单，实际按 11 月
+           那单的到期日算续费基数，静默错单。传了就按 exp 精确定位；老 EXE 不传这个
+           字段，refExp 为空，行为与原来完全一致。 */
+        const refExp = String(b1.fix_exp || '').slice(0, 10);
         let hist = null;
-        if (refIsPhone) hist = await d1FindLastOrder(null, ref);
-        if (!hist) hist = await d1FindLastOrder(ref, '');
+        if (refIsPhone) hist = await d1FindLastOrder(null, ref, refExp);
+        if (!hist) hist = await d1FindLastOrder(ref, '', refExp);
         if (!hist) {
           /* d1FindLastOrder 读失败也回 null，这里没法区分「真没有原单」和「这次没读出来」，
              所以文案两种可能都写上 —— 绝不能让人以为「客户没买过」。 */
