@@ -2527,8 +2527,11 @@ async function d1QueueNotice(e, kind) {
    原来写成降序 [30,15,7,3,1]：剩 14 天时 14<=30 成立，直接命中 30 档 ——
    而唯一键 (pool,uid,kind,ref) 会挡掉重复入队，结果就是**每个号只在剩 30 天时收到 1 封，
    15/7/3/1 四档永远发不出来**（实测 mail_queue 里 exp30 有 47 条，其余四档 0 条）。
-   改成升序后：剩 29 天→30 档、14 天→15 档、6 天→7 档、2 天→3 档、0~1 天→1 档。 */
-const MAIL_STAGES = [1, 3, 7, 15, 30];
+   改成升序后：剩 14 天→15 档、6 天→7 档、0~1 天→1 档。
+   2026-11-10：用户决定砍成 3 封（15/7/1）。30 天和 3 天两档取消 ——
+   30 天那封太早（客户记不住），3 天与 7 天太近（连发两封像催收）。
+   回滚只要把这个数组改回 [1,3,7,15,30] 即可，notify_mail.py 按 kind 后缀解析天数，无需同步改。 */
+const MAIL_STAGES = [1, 7, 15];
 async function mailEnqueue(pool, uid, kind, ref, email, name, agent, exp) {
   if (!d1ok()) return false;
   // 2026-11-08：扫码/无手机号登记的占位名（qr: / manual: / name: 前缀）不该出现在邮件正文。
