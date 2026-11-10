@@ -2741,7 +2741,14 @@ async function ledgerMarkRebind(pool, uid, name, on, rbFrom, rbStart, remark, ne
   const id = idQ[0].id;
   // 注意：ledger 没有 rb_start 列 —— 补号时继承后的「服务开始日」直接写进 start。
   // start / exp 只在有值时才更新：取消补号标记（on=false）时不该把已记录的日期抹掉。
-  const sets = ['rb=?', 'rb_from=?', 'remark=?'];
+  /* 2026-11-10：取消补号标记时，把「补号写死的 0 元」还原成 NULL（= 待补价）。
+     原来取消后 rb=0 但 price 仍是 0，月度结算里这一单变成「正常单 0 元」——
+     既不算营收、也不进「待补价」清单，等于这笔钱凭空消失，客服提成也跟着是 0。
+     改成 NULL 后它会出现在「待补价」里，点一下就按当前套餐价补齐。
+     ⚠ 只在「原本就是补号(rb=1)且价格是 0」的行上动手：正常成交单 price 有值，
+       不受影响；只改备注时也会走这个函数（on=false），不能把正常单的价格抹掉。 */
+  const sets = ['rb=?', 'rb_from=?', 'remark=?',
+                'price=CASE WHEN rb=1 AND price=0 THEN NULL ELSE price END'];
   const params = [on ? 1 : 0, Number(rbFrom) || 0, String(remark || '')];
   if (rbStart) { sets.push('start=?'); params.push(String(rbStart)); }
   if (newExp) { sets.push('exp=?'); params.push(String(newExp)); }
