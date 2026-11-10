@@ -1427,7 +1427,7 @@ async function cfg() {
   if (!_cfg || Date.now() - _cfgAt > 300000) {
     // 2026-10-23：原来这里是 8 个串行 await（每个都是一次 KV get），冷启动时白白叠加 8 次 rtt。
     // 改成一次并发读取；语义完全不变（同样的键、同样的默认值、同样的 5 分钟缓存）。
-    const [ghToken, groupPass, groupPass2, adminPass, assignPass, lim, limG1, limG2] = await Promise.all([
+    const [ghToken, groupPass, groupPass2, adminPass, assignPass, lim, limG1, limG2, consolePass, consoleRoPass] = await Promise.all([
       POOL.get('GH_TOKEN').catch(() => null),
       POOL.get('GROUP_PASS').catch(() => null),
       POOL.get('GROUP_PASS2').catch(() => null),
@@ -1438,6 +1438,10 @@ async function cfg() {
       POOL.get('POOL_LIMIT').catch(() => null),
       POOL.get('POOL_LIMIT_G1').catch(() => null),
       POOL.get('POOL_LIMIT_G2').catch(() => null),
+      // 2026-11-11 v2.12：号池查看（/api/pool）要认控制台满权/只读码 —— 用户口径：
+      // 同一个口令在控制台能看数据，在 APK 号池页却报「管理密码错误」太分裂。只加读、不加写。
+      POOL.get('CONSOLE_PASS').catch(() => null),
+      POOL.get('CONSOLE_RO_PASS').catch(() => null),
     ]);
     _cfg = {
       ghToken: cleanKV(ghToken),
@@ -1445,6 +1449,8 @@ async function cfg() {
       groupPass2: cleanKV(groupPass2),
       adminPass: cleanKV(adminPass),
       assignPass: cleanKV(assignPass),
+      consolePass: cleanKV(consolePass),
+      consoleRoPass: cleanKV(consoleRoPass),
       // 分群上限：2026-10-22 默认 500 → 1500，同日晚按「20 并发 + 24h 排队上限」下调到 1200
       // （KV 里 POOL_LIMIT_G1 / POOL_LIMIT_G2 仍可覆盖，改数字即时生效不用改代码）
       poolLimit: parseInt(cleanKV(lim), 10) || 1200,
@@ -4995,8 +5001,14 @@ async function handle(request) {
       let body;
       try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
       const c = await cfg();
-      if (!c.adminPass) return json({ message: '尚未设置管理密码：请在 Cloudflare KV 中添加 ADMIN_PASS 键（任意长随机字符串）' }, 503, CORS);
-      if (!body.pass || body.pass !== c.adminPass) return json({ message: '管理密码错误' }, 403, CORS);
+      /* 2026-11-11 v2.12：号池【查看】口令放宽 —— ADMIN_PASS / CONSOLE_PASS / CONSOLE_RO_PASS
+         任一可读。背景：APK 号池页输满权/只读码报「管理密码错误」，因为这里原先只认 ADMIN_PASS，
+         而同一批口令在 /console 又是能登录看数据的，口径分裂。这是纯读接口，放宽不放大写权限；
+         写操作（/api/admin/entry 等）维持只认 ADMIN_PASS 不变。 */
+      const noPassAtAll = !c.adminPass && !c.consolePass && !c.consoleRoPass;
+      if (noPassAtAll) return json({ message: '尚未设置管理密码：请在 Cloudflare KV 中添加 ADMIN_PASS 键（任意长随机字符串）' }, 503, CORS);
+      const poolViewOk = !!body.pass && (body.pass === c.adminPass || body.pass === c.consolePass || body.pass === c.consoleRoPass);
+      if (!poolViewOk) return json({ message: '管理密码错误' }, 403, CORS);
       /* 2026-11-09：原来每次刷新管理页都跑一遍 pruneExpired()（重建全池 + 到期号逐个写 KV +
          可能刷一次 pool 快照）。而「到期降级公益号」早已挪进每日 cron（scheduled 里
          ctx.waitUntil(pruneExpired())，2026-10-29 的事），这里再跑等于每刷新一次多一份写副作用。
@@ -8589,6 +8601,14 @@ function load(){
     return {t:rec.t,role:rec.role||""};
   }catch(e){return null;}
 }
+/* 2026-11-11 v2.12：dropTok 此前被引用（退出按钮、密码错兜底）却从没定义过 ——
+   点「退出」直接抛 ReferenceError，表现就是「没有任何反应」。这里补上：
+   清 localStorage 的 token + 清内存 TOKEN。 */
+function dropTok(){
+  try{localStorage.removeItem(TOK_KEY);}catch(e){}
+  try{sessionStorage.removeItem(TOK_KEY);}catch(e){}
+  TOKEN=null;
+}
 function login(){
   var u='xx1031',p=$('lp').value;   // 2026-10-25：账号固定，登录框只留口令一个输入框
   if(!u||!p){$('lm').textContent='请输入账号和密码';$('lm').className='msg err';return;}
@@ -8602,7 +8622,15 @@ function login(){
 $('lbtn').onclick=login;
 $('lp').onkeydown=function(e){if(e.key==='Enter')login();};
 $('lu').onkeydown=function(e){if(e.key==='Enter')$('lp').focus();};
-$('btnOut').onclick=function(){dropTok();location.reload();};
+/* 2026-11-11 v2.12：退出要通知宿主页（APK 把控制台嵌在 iframe 里，权限码还存在
+   宿主 ck.html 的 localStorage 里 —— 只清自己的 token，宿主下次又带 #pw= 免密进来，
+   表现就是「点了退出没反应」。postMessage 通知宿主清掉存的权限码并重新弹输入框；
+   独立浏览器标签里 parent 就是自己或没有监听者，发了也无害。 */
+$('btnOut').onclick=function(){
+  try{if(window.parent&&window.parent!==window)window.parent.postMessage('console-logout','*');}catch(e){}
+  dropTok();
+  location.reload();
+};
 $('btnRefresh').onclick=function(){loadData(true);};   // 2026-11-09：点刷新 = 强制回源，不再命中 5 分钟缓存
 // 2026-10-27 21:05：入池筛选是纯前端，改日期直接 render，不再重新请求接口（秒出）
 $('date').onchange=render;$('dateTo').onchange=render;
