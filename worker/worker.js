@@ -6563,14 +6563,16 @@ async function handle(request) {
       try { _ccSkip = body.nocache === 1; } catch (e) {}
       let _ccKey = '';
       let _ccTtl = 300;
+      let _ccVerOut = '';   // 只用于响应头排障：看 cc:ver 是否在两次请求之间抖动
       if (!_ccSkip) {
         const _ccVer = (await POOL.get('cc:ver').catch(function () { return null; })) || '0';
+        _ccVerOut = String(_ccVer);
         _ccKey = 'cc:' + _ccVer + ':' + role + ':' + date + ':' + (prevDate || '');
         // 2026-11-09：按结束日分档。查历史日期时那几天的快照/播放量早已定格，
         // 没必要每 5 分钟重查一遍（一次约 8,200 行）—— 缓存 1 小时。今天仍是 5 分钟。
         if (date !== beijingDate()) _ccTtl = 3600;
         const _ccHit = await caGet(_ccKey);
-        if (_ccHit) return new Response(_ccHit, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, { 'X-Cache': 'hit' }) });
+        if (_ccHit) return new Response(_ccHit, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, { 'X-Cache': 'hit', 'X-CCVer': _ccVerOut.slice(0, 16) }) });
       }
       // 2026-10-22：控制台是高频只读接口，原来每刷新一次就跑 pruneExpired()（全量重建 +
       // 可能删键 + 写 204KB master + 推 12 个 Secret）。改为直接读 D1 全表（一条 SELECT）。
@@ -6808,8 +6810,14 @@ async function handle(request) {
       // 2026-11-06：首屏结果写入缓存（TTL 5 分钟）。命中时上面整段大查询都不会再跑。
       // 2026-11-09：TTL 按日期分档（今天 300s / 历史 3600s），见上面 _ccTtl。
       // 2026-11-10：落 Cache API（不占 KV 写额度）；失败无妨，下一刷重建。
-      if (!_ccSkip && _ccKey) { await caPut(_ccKey, _body, _ccTtl); }
-      return new Response(_body, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, { 'X-Cache': _ccSkip ? 'bypass' : 'miss' }) });
+      // 2026-11-10 晚：把 put 的结果带到 X-Cache 头里（miss-stored / miss-storefail）。
+      //   起因：实测连续 4 次请求全是 miss、每次都跑满 10 秒全量查询 —— 说明这份缓存从来没命中过，
+      //   需要区分「写失败」（Cache API 拒收 818KB 响应？）和「key 不一致」（cc:ver 抖动）。
+      let _ccPutOk = false;
+      if (!_ccSkip && _ccKey) { _ccPutOk = await caPut(_ccKey, _body, _ccTtl); }
+      return new Response(_body, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, {
+        'X-Cache': _ccSkip ? 'bypass' : (_ccPutOk ? 'miss-stored' : 'miss-storefail'),
+        'X-CCVer': _ccVerOut.slice(0, 16) }) });
     }
     // 控制台编辑：hz 本地执行（与管理后台同一套逻辑）；dz 转发到对端 worker 的对等接口
     if (url.pathname === '/api/console/entry' && request.method === 'POST') {
