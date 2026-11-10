@@ -3140,6 +3140,7 @@ const poolSnapKey = () => 'pool:' + POOL_NAME;
 // ====================================================================
 const _CA_HOST = 'https://ca-cache.xx1031.xyz/';
 let _caLastErr = '';   // 2026-11-10：Cache API 最近一次写失败的原因（只在单次 invocation 内有意义，供响应头排障）
+let _caPutOk = 0, _caPutN = 0;   // 本次 invocation 内 caPut 的成功/总次数（排障用：看是不是被 subrequest 上限打掉）
 function _caObj() { try { return (typeof caches !== 'undefined' && caches.default) ? caches.default : null; } catch (e) { return null; } }
 function _caReq(k) { return new Request(_CA_HOST + encodeURIComponent(String(k)), { method: 'GET' }); }
 async function caGet(k) {
@@ -3149,11 +3150,13 @@ async function caGet(k) {
 }
 async function caPut(k, body, ttl) {
   const c = _caObj();
+  _caPutN++;
   if (!c) { _caLastErr = 'no-caches-api'; return false; }
   try {
     await c.put(_caReq(k), new Response(body, {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=' + (Number(ttl) || 300) } }));
     _caLastErr = '';
+    _caPutOk++;
     return true;
   } catch (e) { _caLastErr = String((e && e.message) || e).slice(0, 120); return false; }
 }
@@ -6839,6 +6842,7 @@ async function handle(request) {
       return new Response(_body, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, {
         'X-Cache': _ccSkip ? 'bypass' : (_ccPutOk ? 'miss-stored' : 'miss-storefail'),
         'X-CCVer': _ccVerOut.slice(0, 16),
+        'X-CAPut': _caPutOk + '/' + _caPutN,
         'X-CAErr': String(_caLastErr || '').slice(0, 80) }) });
     }
     // 控制台编辑：hz 本地执行（与管理后台同一套逻辑）；dz 转发到对端 worker 的对等接口
