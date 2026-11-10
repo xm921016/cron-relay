@@ -1646,6 +1646,38 @@ function datePlusFrom(base, n) {
   if (isNaN(d.getTime())) return '';
   return new Date(d.getTime() + (Number(n) || 0) * 86400000).toISOString().slice(0, 10);
 }
+// ====================================================================
+// 2026-11-10：续费 / 补号 判定与有效期累加
+// 背景（用户口径）：
+//   · 号还在池里 = 续费（收钱、给客服提成）；号已经不在池 = 补号（免费、不给提成）。
+//   · 补号只在「原套餐还在有效期内」才算；原套餐已过期再买 = 新登记。
+//   · 只有「有效时长确实增加」才算续费单 —— 时长没涨就没有收益，不计台账。
+// 旧行为（改成原地 UPDATE 之前）：DELETE 两行 + INSERT，added 重置成今天、exp 从今天重算
+//   ⇒ ①提前续费被拒 ②提前续费白丢剩余天数 ③首周加速重复触发白烧一周播放量 ④台账分不清新/续。
+// ====================================================================
+// 从「今天 + 套餐天数」这个日期反推套餐天数（调用方构造 entry 时只给了 exp，没给 days）。
+function planDaysOf(exp) {
+  if (!exp || exp === 'forever') return 0;          // 永久套餐 → 0 天，不参与累加
+  const s = String(exp).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return 0;
+  const d = Math.round((Date.parse(s + 'T00:00:00Z') - Date.parse(beijingDate() + 'T00:00:00Z')) / 86400000);
+  return d > 0 ? d : 0;
+}
+// 续费后的新到期日。三档（见方案 §3.2）：
+//   · 原到期日还在未来          → 原到期日 + 套餐天数（不从今天重算，剩余天数不丢）
+//   · 原已过期 / 公益号(forever) → 今天 + 套餐天数
+//   · 套餐是永久(days=0) 且原本就是真永久 → 保持 forever
+// ⚠ 公益号的 exp 也是 'forever'，和「真永久套餐」长得一样，必须用 pub 区分（11-09 踩过这个坑）。
+function renewExpCalc(oldExp, days, wasPub) {
+  if (!(days > 0)) {
+    // 套餐本身是永久：真永久号保持；公益号续「永久套餐」= 从今天起永久（本来也永久）
+    return 'forever';
+  }
+  if (oldExp === 'forever' && !wasPub) return 'forever';   // 真永久，不再累加
+  const base = (!oldExp || oldExp === 'forever' || isExpiredExp(oldExp)) ? beijingDate() : String(oldExp).slice(0, 10);
+  return datePlusFrom(base, days) || beijingDatePlus(days);
+}
+
 function parseExpInput(x) {
   if (x == null || String(x).trim() === '') return { ok: true };
   const s = String(x).trim();
@@ -2067,6 +2099,22 @@ async function mergePoolEntry(entry, ekey) {
   return list;
 }
 
+// 2026-11-10：查这个号最近一笔台账（判定「补号」用）。
+// 号已经被删（掉线）时 accounts 里查不到，只能从 ledger 找原单的到期日：
+//   · 原单还在有效期内 → 客户没享受完，这次是补号（免费，有效期继承原单）
+//   · 原单已过期       → 客户的钱已经用完，这次是重新买（按新登记处理）
+// 返回 null = 查不到 / D1 读不了（读不了时按「新登记」走，绝不多送时长）。
+async function d1FindLastOrder(uidKey, name) {
+  if (!d1ok()) return null;
+  const SQL = 'SELECT day,start,exp,agent,plan FROM ledger WHERE pool=? AND ';
+  let rows = null;
+  if (uidKey) rows = await d1All(SQL + 'uid=? ORDER BY day DESC, id DESC LIMIT 1', [POOL_NAME, String(uidKey)]);
+  if ((!rows || !rows.length) && String(name || '')) {
+    rows = await d1All(SQL + 'name=? ORDER BY day DESC, id DESC LIMIT 1', [POOL_NAME, String(name)]);
+  }
+  return (rows && rows.length) ? rows[0] : null;
+}
+
 async function addEntry(entry) {
   // 有效期默认 2 年（730 天），管理端可随时修改（exp=YYYY-MM-DD，forever=永久）
   if (!entry.exp) entry.exp = beijingDatePlus(730);
@@ -2082,38 +2130,90 @@ async function addEntry(entry) {
     if (dup === null) {
       console.error('D1 查重失败，回退 KV 全量查重');
     } else {
-      // 2026-10-29：查重带上 exp —— 已过有效期的号允许重新登记（= 续费）。
-      // 以前不看 exp，直接回「该账号已登记过」，而每天并没有地方清到期号（pruneExpired 只挂在
-      // 旧号池管理工具上），等于到期之后号主无论怎么操作都无法再用这个号。
-      // 2026-11-08：dup 现在可能有两条（uid 一条 / name 一条），只要**任意一条**还有效就拒绝；
-      // 全部过期才算续费覆盖。原来只看 dup[0]，两条都命中时结果取决于扫到哪条。
-      // 2026-11-09：到期降公益的号（pub=1）必须允许重新登记 = 续费。
-      // pruneExpired 把它写成 exp='forever'，而 forever 不算「过期」，只按 exp 判会把每一个
-      // 到期想续费的号主都挡在门外（token 还被回滚、页面提示"可继续用"）—— 实测这条必然触发。
-      if (dup.length && dup.some(x => !(x && x.pub) && !isExpiredExp(x && x.exp))) {
-        return { ok: false, msg: '该账号已登记过（每个账号限登记一首歌），无需重复登记。' };
-      }
+      /* 2026-11-10 重构（用户口径）：不再「删除重建」，改成「判定类型 + 原地更新」。
+         kind = new   首次进池（号池 +1，收钱，给客服提成）
+                renew 号还在池里（含公益号/未到期），收钱、给提成，有效期在原基础上累加
+                fix   号已经不在池（掉线被删），但原套餐还在有效期内 → 免费补回，不给提成
+         旧逻辑是 DELETE 两行 + INSERT，把 added 重置成今天、exp 从今天重算，副作用四个：
+           ①提前续费被拒 ②白丢剩余天数 ③首周加速重复触发白烧一周播放量 ④台账分不清新/续。 */
+      let kind = 'new';
+      let keepRow = null;
       if (dup.length) {
-        // 过期覆盖：旧的 KV 键与 D1 行都清掉，避免「旧键按 name / 新键按 uid」并存两份。
+        // 号还在池里 → 续费。优先按 uid 认（同一个网易号），没有再看 name 命中的行。
+        const byUid = uidKey ? dup.find(d => d && d.uid != null && String(d.uid) === uidKey) : null;
+        const others = byUid ? dup.filter(d => String(d.uid) !== String(byUid.uid)) : dup.slice();
+        // 同一个手机号还挂着另一个「未到期的非公益号」→ 一号多登，仍按旧口径拒绝。
+        if (!byUid && others.some(d => d && !d.pub && !isExpiredExp(d.exp))) {
+          return { ok: false, msg: '该账号已登记过（每个账号限登记一首歌），无需重复登记。' };
+        }
+        keepRow = byUid || others[0] || null;
+        kind = 'renew';
+      } else {
+        // 号不在池里：看台账原单还在不在有效期内 —— 在 = 客户没享受完，这是补号
+        const hist = await d1FindLastOrder(uidKey, entry.name);
+        if (hist && hist.exp && hist.exp !== 'forever' && !isExpiredExp(hist.exp)) {
+          kind = 'fix';
+          keepRow = { exp: hist.exp, added: hist.start || hist.day || '', pub: 0 };
+        }
+      }
+
+      if (kind === 'renew') {
+        const days = planDaysOf(entry.exp);                       // 本次买的套餐天数
+        const oldExp = String((keepRow && keepRow.exp) || '').slice(0, 10);
+        const wasPub = Number(keepRow && keepRow.pub) === 1;      // 公益号（exp 也是 forever，必须靠 pub 区分）
+        const newExp = renewExpCalc(oldExp, days, wasPub);
+        // 「只有有效时长真的增加了才算续费」：没涨说明是重复提交（例如刚续过费又点一次），
+        // 什么都不写，免得白记一笔台账、白给一次提成。
+        // ⚠ 不能直接 `newExp <= oldExp` 比字符串：
+        //   oldExp='forever' 时，'2026-12-10' <= 'forever' 成立（'2' < 'f'），
+        //   公益号续费会被判成「没增加」直接拒掉。必须分情况。
+        const _noGain = !oldExp ? false
+          : (oldExp === 'forever' ? !wasPub                 // 真永久号：买什么都不再增加；公益号(forever+pub)要放行
+            : (days === 0 ? false                           // 有期限 → 买永久套餐 = 升级，放行
+              : (newExp <= oldExp)));
+        if (_noGain) {
+          return { ok: false, msg: '该账号已登记过，本次没有增加有效期（刚续过费？），无需重复登记。' };
+        }
+        entry.exp = newExp;
+        if (keepRow && keepRow.added) entry.added = String(keepRow.added).slice(0, 19);   // 保留原入池日
+        console.log('续费：' + String(entry.name || uidKey) + '  ' + (wasPub ? '公益号' : oldExp) +
+                    ' → ' + newExp + '（+' + days + ' 天）');
+      } else if (kind === 'fix') {
+        // 补号：有效期继承原单，一分钱不收，不给提成
+        entry.exp = String(keepRow.exp).slice(0, 10);
+        if (keepRow.added) entry.added = String(keepRow.added).slice(0, 19);
+        entry.rb = 1;
+        entry.rb_start = String(keepRow.added || '').slice(0, 19);
+        console.log('补号（免费、继承原单）：' + String(entry.name || uidKey) + '  到期 ' + entry.exp);
+      }
+      entry.__kind = kind;                                        // 给台账用，写库前删掉
+
+      // 清掉「其它重复行」：同一个号可能同时按 uid / name 命中两条，
+      // 保留 keepRow 那条（下面 upsert 原地更新），其余过期/公益的删掉，避免并存两份。
+      if (dup.length) {
+        for (const d of dup) {
+          if (!d || (keepRow && String(d.uid) === String(keepRow.uid))) continue;
+          try {
+            if (d.uid != null && String(d.uid) !== '') {
+              await d1Run('DELETE FROM accounts WHERE pool=? AND uid=?', [POOL_NAME, String(d.uid)]);
+            }
+          } catch (e) {}
+        }
+        // KV 侧：entry:u / entry:n 两种键都清一遍再重写
         for (const k of [ekey,
-                         ...dup.map(d => (d && d.uid != null) ? 'entry:u' + String(d.uid) : ''),
+                         ...dup.map(d => (d && d.uid != null && String(d.uid) !== '') ? 'entry:u' + String(d.uid) : ''),
                          entry.name ? 'entry:n' + encodeURIComponent(String(entry.name)) : '']) {
           if (!k) continue;
           try { await POOL.delete(k); } catch (e) {}
         }
-        // 2026-11-09：DELETE 不再用 (uid=? OR name=?) —— OR 会让 (pool,uid) 和 (pool,name)
-        // 两个索引同时失效，每次续费都要全池扫一遍。拆成两条单条件，各走自己的索引。
-        try {
-          if (uidKey) await d1Run('DELETE FROM accounts WHERE pool=? AND uid=?', [POOL_NAME, uidKey]);
-          if (String(entry.name || '')) await d1Run('DELETE FROM accounts WHERE pool=? AND name=?',
-                                                    [POOL_NAME, String(entry.name || '')]);
-        } catch (e) {}
-        console.log('到期号重新登记（续费）:', String(entry.name || uidKey));
       }
       // KV 仍写一份：D1 万一回滚，KV 里必须是完整数据
       // 2026-11-10：KV 写必须容错 —— 免费额度只有 1000 写/天，写满后 POOL.put 直接抛异常。
       //   原来这一行没有 try/catch，KV 打满时「D1 明明写得进」却给买家报 500，
       //   买家重试又被判「已登记过」，等于卡死。D1 才是权威库，KV 写失败不该影响结果。
+      // 类型标签只给台账用，不能写进账号数据（否则 KV 里多一个没人认识的字段）。
+      const _regKind = String(entry.__kind || 'new');
+      delete entry.__kind;
       let kvOk = true;
       try { await POOL.put(ekey, JSON.stringify(entry)); }
       catch (e) { kvOk = false; console.error('KV 写 entry 失败（继续走 D1）:', e && e.message); }
@@ -2136,7 +2236,19 @@ async function addEntry(entry) {
         }
       }
       // 2026-11-05：落一笔记账流水（成交台账）。写失败只告警 —— 记账出错不能反过来让登记失败。
-      try { await ledgerAdd(entry); } catch (e) { console.error('记账流水写入失败:', e && e.message); }
+      // 2026-11-10：带上类型。src: new=新登记 / renew=续费 / fix=补号（补号 rb=1，不计营收不计提成）。
+      //   续费与补号的台账 day 必须写「今天」—— 台账唯一键是 (pool,uid,day)，写原入池日的话
+      //   会把首单那一行覆盖掉，月度结算就再也看不到「这个月新开了多少单」。
+      const _kind = _regKind;
+      try {
+        await ledgerAdd(entry, {
+          src: _kind,
+          rb: _kind === 'fix' ? 1 : 0,
+          day: _kind === 'new' ? '' : beijingDate(),
+          price: _kind === 'fix' ? 0 : undefined,
+          remark: _kind === 'renew' ? '续费' : (_kind === 'fix' ? '补号（免费）' : ''),
+        });
+      } catch (e) { console.error('记账流水写入失败:', e && e.message); }
       // 重新登记 → 清墓碑（只影响 KV 回退路径）
       try {
         const deadLog = new Set(await getDeadLog());
@@ -2151,7 +2263,11 @@ async function addEntry(entry) {
       // 默认关闭推送后，这里不该再为一份没人读的分片白跑一次查询。
       if (await pushPoolEnabled()) await pushPool(await mergePoolEntry(entry, ekey));
       try { await refreshPoolSnap(); } catch (e) {}
-      return { ok: true };
+      // 2026-11-10：把类型与最终有效期回给调用方，页面/EXE 才能显示
+      // 「续费成功，到期日 2026-12-10（在原基础上 +30 天）」而不是一律「登记成功」。
+      const _k = String(kind || 'new');
+      return { ok: true, kind: _k, exp: String(entry.exp || ''), added: String(entry.added || ''),
+        days: _k === 'new' ? 0 : planDaysOf(entry.exp) };
     }
   }
 
@@ -2381,7 +2497,13 @@ async function d1QueueNotice(e, kind) {
 // 群号不入队：发送时（/api/mail_pending）按当时的 reg_cfg 现查，客服改群号立即生效。
 // 任何写入失败都只记日志，绝不影响登记/播放主流程。
 // ====================================================================
-const MAIL_STAGES = [30, 15, 7, 3, 1];   // 剩余天数 ≤ 档位 触发；同档同到期日只发一次
+/* 2026-11-10 修复：这个数组**必须升序**。
+   扫描处用的是 `MAIL_STAGES.find(s => left <= s)`（剩余天数 ≤ 档位），取的是「第一个够用的档位」。
+   原来写成降序 [30,15,7,3,1]：剩 14 天时 14<=30 成立，直接命中 30 档 ——
+   而唯一键 (pool,uid,kind,ref) 会挡掉重复入队，结果就是**每个号只在剩 30 天时收到 1 封，
+   15/7/3/1 四档永远发不出来**（实测 mail_queue 里 exp30 有 47 条，其余四档 0 条）。
+   改成升序后：剩 29 天→30 档、14 天→15 档、6 天→7 档、2 天→3 档、0~1 天→1 档。 */
+const MAIL_STAGES = [1, 3, 7, 15, 30];
 async function mailEnqueue(pool, uid, kind, ref, email, name, agent, exp) {
   if (!d1ok()) return false;
   // 2026-11-08：扫码/无手机号登记的占位名（qr: / manual: / name: 前缀）不该出现在邮件正文。
@@ -2572,7 +2694,13 @@ async function ledgerAdd(e, opt) {
     days = pl ? (Number(pl.days) || 0) : 0;
   } catch (_e) { price = -1; }
   const added = String(e.added || '') || beijingDateTime();
-  const day = added.slice(0, 10) || beijingDate();
+  // 2026-11-10：续费/补号要单独指定 day（= 今天）。台账唯一键是 (pool,uid,day)，
+  // 续费时 added 保留原入池日，如果 day 也跟着用原入池日，就会把首单那行覆盖掉。
+  const day = String(o.day || '').slice(0, 10) || added.slice(0, 10) || beijingDate();
+  // 补号是免费的：price 明确给 0 时不能被套餐价盖回去（否则下个月又被算一次营收）。
+  const finalPrice = (o.price !== undefined && o.price !== null)
+    ? (Number(o.price) >= 0 ? Number(o.price) : null)
+    : (price >= 0 ? price : null);
   const exp = String(e.exp || '') || 'forever';
   // 已标记补号的那笔不能被「重新登记/回灌」洗回正常单 —— 否则免费补号下个月又被算一次提成
   return d1Run(
@@ -2584,7 +2712,7 @@ async function ledgerAdd(e, opt) {
     'rb_from=CASE WHEN ledger.rb=1 THEN ledger.rb_from ELSE excluded.rb_from END, ' +
     'remark=CASE WHEN excluded.remark<>\'\' THEN excluded.remark ELSE ledger.remark END',
     [POOL_NAME, uid, String(e.name || ''), String(e.agent || ''), String(e.plan || ''),
-     price >= 0 ? price : null, days, day, String(o.start || day), exp,
+     finalPrice, days, day, String(o.start || day), exp,
      o.rb ? 1 : 0, Number(o.rbFrom) || 0, String(o.remark || ''), String(o.src || 'reg'),
      beijingDateTime()]
   );
@@ -2663,8 +2791,9 @@ async function d1FindDup(uidKey, name) {
   const qs = [];
   // 2026-11-09：带 pub —— 到期号被 pruneExpired 改成 pub=1/exp='forever'，
   // 'forever' 不算过期，只看 exp 会把「到期降公益号」判成「已登记过」，买家永远续不上费。
-  if (uidKey) qs.push(d1All('SELECT uid,exp,pub FROM accounts WHERE pool=? AND uid=? LIMIT 1', [POOL_NAME, uidKey]));
-  if (nm) qs.push(d1All('SELECT uid,exp,pub FROM accounts WHERE pool=? AND name=? LIMIT 1', [POOL_NAME, nm]));
+  // 2026-11-10：带 added —— 续费/补号要保留原「入池日」（否则首周加速被重置、白烧一周播放量）。
+  if (uidKey) qs.push(d1All('SELECT uid,exp,pub,added,agent,plan FROM accounts WHERE pool=? AND uid=? LIMIT 1', [POOL_NAME, uidKey]));
+  if (nm) qs.push(d1All('SELECT uid,exp,pub,added,agent,plan FROM accounts WHERE pool=? AND name=? LIMIT 1', [POOL_NAME, nm]));
   if (!qs.length) return [];
   const rs = await Promise.all(qs);
   const out = [];
@@ -5006,11 +5135,15 @@ async function handle(request) {
       const song = await resolveSong(b0.link);
       if (!song.ok) return json({ ok: false, message: song.msg }, 400);
 
-      /* 名额闸口：与 /api/join_manual 同口径 */
+      /* 名额闸口：与 /api/join_manual 同口径。
+         2026-11-10：加「已在池」豁免 —— 续费/补号不会让号池变大（原地更新），
+         原来的写法在号池满员时会把老客户续费也一并挡掉，等于满了就再也收不到钱。 */
       const c1 = await cfg();
       const myLimit = groupLimitOf(c1, false);
       const master1 = await mergePool();
-      if (activePoolSize(master1) >= myLimit) {
+      const _u0 = String(v.uid);
+      const _alreadyIn = master1.some(e => e && (String(e.uid) === _u0 || (phone && String(e.name || '') === phone)));
+      if (!_alreadyIn && activePoolSize(master1) >= myLimit) {
         return json({ ok: false, message: '号池名额已满（上限 ' + myLimit + ' 人），请联系客服，不要重复提交' }, 429);
       }
 
@@ -5076,10 +5209,21 @@ async function handle(request) {
       } catch (me) { console.error('登记邮件入队失败:', me && me.message); }
       try { await ccBust(); } catch (e) {}
 
-      return json({
-        ok: true, uid: String(v.uid), name: name,
-        message: '登记成功，明天开始生效。' + (phone ? '' : '（没留手机号，以后有事我们用邮箱联系你）'),
-      });
+      /* 2026-11-10：按类型给不同文案。续费必须让客户看见「有效期延到哪天」，
+         补号要说明「免费、不额外收费」—— 否则客服每天都要回答同一句话。 */
+      let _msg;
+      if (r.kind === 'renew') {
+        _msg = '续费成功：有效期已延长到 ' + String(r.exp || '') +
+               '（在原到期日基础上累加，原来剩下的天数不会清零）。';
+      } else if (r.kind === 'fix') {
+        _msg = '补号成功：这个号之前掉线了，本次免费补回、不额外收费，原有效期不变（到 ' +
+               String(r.exp || '') + '）。';
+      } else {
+        _msg = '登记成功，明天开始生效。';
+      }
+      if (!phone) _msg += '（没留手机号，以后有事我们用邮箱联系你）';
+      return json({ ok: true, uid: String(v.uid), name: name,
+        kind: String(r.kind || 'new'), exp: String(r.exp || ''), message: _msg });
     }
     /* ---- 客服生成 / 查看 / 作废登记链接（口令：KV REG_TOKEN_PASS） ---- */
     if (url.pathname === '/api/regtoken_new' && request.method === 'POST') {
@@ -6476,10 +6620,12 @@ async function handle(request) {
         "SUM(CASE WHEN " + GIFT + " THEN 1 ELSE 0 END) giftCnt, " +
         "SUM(CASE WHEN rb=0 AND price IS NOT NULL THEN price ELSE 0 END) money, " +
         "SUM(CASE WHEN rb=0 AND price IS NULL AND NOT " + GIFT + " THEN 1 ELSE 0 END) unpriced";
-      const [byPlan, byAgent, byPool, rows, cfgNow, byAgentAll, accRows, ghost] = await Promise.all([
+      const [byPlan, byAgent, byPool, bySrc, rows, cfgNow, byAgentAll, accRows, ghost] = await Promise.all([
         d1All('SELECT plan, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY plan ORDER BY cnt DESC', params),
         d1All('SELECT agent, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY agent ORDER BY cnt DESC', params),
         d1All('SELECT pool, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY pool', params),
+        // 2026-11-10：按「登记类型」分组（src）。老数据 src 全是 'reg'，统计时归到「新登记」。
+        d1All('SELECT src, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY src', params),
         d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,remark,src FROM ledger WHERE ' +
               W + ' ORDER BY rb, day DESC, id DESC LIMIT 1200', params),
         regCfg().catch(() => REG_CFG_DEFAULT),
@@ -6515,7 +6661,7 @@ async function handle(request) {
       // 2026-11-05 晚：账本读失败（D1 配额用尽 / 抖动）时不能一声不响地回一张残缺的结算表 ——
       // D1 在额度用尽时是**随机打单个查询**的（这次实测：byPlan 出来了 333 单，byPool 却失败，
       // 于是「成交单数」显示 0，看着像本月没成交）。只要有一路聚合没拿到就直接回 503。
-      if (!byPlan || !byAgent || !byPool || !rows || !ghost) {
+      if (!byPlan || !byAgent || !byPool || !bySrc || !rows || !ghost) {
         return json({ message: '账本读取失败：' + d1ErrHint() + '（不是本月没有成交，是数据库这次没读出来，请稍后重试）' }, 503, CORS);
       }
       const aliveSet = new Set();
@@ -6562,9 +6708,25 @@ async function handle(request) {
       // 退单/删号的单不提成：客户钱退了、服务也没了，再算提成等于给客服发空单的钱。
       // 只扣「本来就是有效单」的那批（补号/赠号本来就没算过，不重复扣）。
       t.valid = Math.max(0, t.cnt - t.rbCnt - t.giftCnt - t.goneValid);
+      /* 2026-11-10：按登记类型汇总，回答「这个月开了多少新单 / 收了多少续费 / 免费补了多少号」。
+         src 取值：new=新登记 / renew=续费 / fix=补号（rb=1）。
+         历史数据 src 全是 'reg'（旧代码只写这一个值，分不出新/续），一律归到「新登记」，
+         所以切换当月看到的「新登记」会偏多 —— 这是历史数据口径，不是算错。 */
+      const _srcBucket = () => ({ cnt: 0, rbCnt: 0, giftCnt: 0, money: 0, unpriced: 0 });
+      const srcAgg = { new: _srcBucket(), renew: _srcBucket(), fix: _srcBucket(), other: _srcBucket() };
+      for (const r of (bySrc || [])) {
+        const raw = String(r.src || '');
+        const k = (raw === 'renew') ? 'renew' : (raw === 'fix' ? 'fix' : (raw === 'new' || raw === 'reg' || raw === '') ? 'new' : 'other');
+        srcAgg[k].cnt += num(r.cnt);
+        srcAgg[k].rbCnt += num(r.rbCnt);
+        srcAgg[k].giftCnt += num(r.giftCnt);
+        srcAgg[k].money += num(r.money);
+        srcAgg[k].unpriced += num(r.unpriced);
+      }
+      for (const k of Object.keys(srcAgg)) srcAgg[k].money = Math.round(srcAgg[k].money * 100) / 100;
       return json({
         ok: true, month: month, pool: poolF, agent: agentRaw, total: t,
-        byPlan: fix(byPlan), byAgent: fix(byAgent), byPool: fix(byPool),
+        byPlan: fix(byPlan), byAgent: fix(byAgent), byPool: fix(byPool), bySrc: srcAgg,
         agents: (byAgentAll || []).map(x => ({ agent: String(x.agent == null ? '' : x.agent), cnt: num(x.cnt) })),
         plans: (cfgNow.plans || []),
         rows: outRows,
@@ -8640,6 +8802,13 @@ $('eCancel').onclick=function(){$('modal').hidden=true;};
 // 只读口令看不到这个按钮（applyRole 会隐藏），服务端也会 403。
 var LGDATA=null;
 function lgMoney(v){return (Math.round((Number(v)||0)*100)/100).toFixed(2);}
+// 2026-11-10：明细里的「登记类型」标签。补号优先（rb=1），其次看 src。
+function lgKind(r){
+  if(r.rb)return '<span class="badge b-blue" title="客户掉线后免费补回来的号：不收费、不给客服提成，有效期继承原单">补号</span>';
+  if(String(r.src||'')==='renew')return '<span class="badge" style="background:#e8f0fb;color:#255ea6" title="号原本就在池里，客户又买了一次；有效期在原到期日基础上累加，给客服提成">续费</span>';
+  if(r.gift)return '<span class="badge b-yellow">赠号</span>';
+  return '<span style="color:#777">新登记</span>';
+}
 // 2026-11-05：汇总卡改成「等宽 + 固定三行（标题 / 数值 / 小字）」。
 // 之前是 flex + min-width:118px，卡片宽度跟着文案走 —— 「C庆林 · 有效单（算提成）」这种长标题
 // 把前几张撑宽，第 7 张直接被挤到第二排；标题一折行，数值也跟着往下掉，看着像错位。
@@ -8702,6 +8871,16 @@ function lgRender(o){
     +lgStat('赠号/手动号',(t.giftCnt||0),(t.giftCnt||0)>0,'不算单')
     +lgStat('待补价',(t.unpriced||0),(t.unpriced||0)>0,'套餐空着')
     +'</div>';
+  /* 2026-11-10：登记类型结构条 —— 直接回答「续费的号号池不增加，怎么看出客服做了多少续费」。
+     数据来自接口的 bySrc（新登记 new / 续费 renew / 补号 fix）。 */
+  var S=o.bySrc||{}, sn=(S['new']||{}), sr=(S['renew']||{}), sf=(S['fix']||{}), so=(S['other']||{});
+  h+='<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;background:#f7f9fc;border:1px solid #e6ebf2;border-radius:9px;padding:7px 12px;margin:0 0 10px;font-size:12.5px">'
+    +'<b style="color:#333">本月结构</b>'
+    +'<span>新登记 <b style="color:#3b6d11">'+(sn.cnt||0)+'</b> 单 · '+lgMoney(sn.money||0)+' 元</span>'
+    +'<span>续费 <b style="color:#255ea6">'+(sr.cnt||0)+'</b> 单 · '+lgMoney(sr.money||0)+' 元</span>'
+    +'<span>补号 <b style="color:#b06a00">'+(sf.cnt||0)+'</b> 单 · 免费不计提成</span>'
+    +((so.cnt||0)>0?'<span style="color:#888">历史回填 <b>'+(so.cnt||0)+'</b> 单</span>':'')
+    +'<span style="color:#999;font-size:11.5px">「续费 / 补号」从 2026-11-10 起才打类型标记，之前的单分不出来</span></div>';
   if(who){
     h+='<p style="font-size:11.5px;color:#3b6d11;margin:0 0 8px;background:#f2f7ea;padding:5px 10px;border-radius:7px">'
       +'仅统计 <b>'+esc(who)+'</b> · '+esc(o.month)+' 的单（点「全部客服」看全群）</p>';
@@ -8731,6 +8910,7 @@ function lgRender(o){
   var MD='padding:5px 8px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
   h+='<div style="max-height:calc(92vh - 560px);min-height:170px;overflow:auto;margin-top:6px;border:1px solid #eef0f3;border-radius:8px">'
     +'<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px"><thead><tr>'
+    +'<th style="text-align:left;'+MH+'">类型</th>'
     +'<th style="text-align:left;'+MH+'">登记日</th>'
     +'<th style="text-align:left;'+MH+'">群</th>'
     +'<th style="text-align:left;'+MH+'">账号</th>'
@@ -8741,6 +8921,7 @@ function lgRender(o){
   for(var i=0;i<rows.length;i++){
     var r=rows[i];
     h+='<tr'+(r.rb?' style="background:#f7fafd"':'')+'>'
+      +'<td style="'+MD+'">'+lgKind(r)+'</td>'
       +'<td style="'+MD+'">'+esc(r.day)+'</td>'
       +'<td style="'+MD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
       +'<td style="'+MD+';max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.name||r.uid)+'">'+esc(String(r.name||r.uid||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))
