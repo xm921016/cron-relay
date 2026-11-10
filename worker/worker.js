@@ -1266,19 +1266,32 @@ async function live650(ck) {
   if (rate == null) return null;
   return { r: rate, p: dd.recentPlayCount30 == null ? null : (Number(dd.recentPlayCount30) || 0) };
 }
-// 批量复核：缓存 30 分钟（`l650:<北京日期>:<uid>`），命中就不打网易。
-// 只缓存成功结果 —— 失败（号被限流/接口超时）不留缓存，下次刷新再试。
-// 2026-11-10：缓存从 KV 搬到 Cache API。候选上限 40 个号、TTL 30 分钟，控制台开着的时候
-//   每半小时就会重写一遍这批键（十几个号），是继 meta:tick/meta:dicts 之后第三笔纯缓存 KV 写。
-//   丢了只是重打一次网易接口（本来就有 5 秒时间预算兜着），不影响任何展示口径。
+// 批量复核：整批缓存 30 分钟（`l650b:<北京日期>` 单键），命中就不打网易。
+// 只缓存成功结果 —— 失败（号被限流/接口超时）留 5 分钟哨兵，下次刷新再试。
+// 2026-11-10 晚：从 KV 搬到 Cache API 之后发现一个更关键的问题 —— 原本「一个号一个键」，
+//   40 个候选就是 40 次 caGet + 40 次 caPut，而免费版 Worker 单次 invocation 只有 50 个
+//   subrequest（Cache API 读写和 fetch 一样计数）。首屏光这里就能把额度吃光，导致
+//   /api/console/data 末尾写首屏缓存时直接抛 "Too many subrequests"，那份缓存从 11-09 起
+//   就一次都没写进去过（控制台每次都要跑满 10 秒全量查询）。
+//   改成整批单键后：读写各 1 次，subrequest 从最多 80 降到 2，功能与返回值结构完全不变。
+//   唯一代价：并发刷新时读改写会互相覆盖几条结果（都是缓存，最多重查一次）。
 async function live650Batch(list) {
   const out = {};
-  const keyOf = (c) => 'l650:' + beijingDate() + ':' + String(c.uid);
-  const cached = await Promise.all(list.map(c => caGet(keyOf(c)).catch(() => null)));
+  const batchKey = 'l650b:' + beijingDate();
+  let cur = {};
+  try {
+    const raw = await caGet(batchKey);
+    if (raw) { const o = JSON.parse(raw); if (o && typeof o === 'object') cur = o; }
+  } catch (e) { cur = {}; }
+  const now = Date.now();
   const todo = [];
-  list.forEach((c, i) => {
-    const v = cached[i];
-    if (v) { try { out[c.uid] = JSON.parse(v); return; } catch (e) {} }
+  list.forEach((c) => {
+    const rec = cur[String(c.uid)];
+    // 命中条件：有记录，且不是「超过 5 分钟的空哨兵」（哨兵语义与原 TTL 300 一致）
+    if (rec && !(rec.r == null && now - (Number(rec.t) || 0) > 300000)) {
+      out[c.uid] = { r: rec.r == null ? null : rec.r, p: rec.p == null ? null : rec.p };
+      return;
+    }
     todo.push(c);
   });
   if (!todo.length) return out;
@@ -1301,16 +1314,18 @@ async function live650Batch(list) {
     try {
       const v = await live650(ck);
       if (!v) {
-        // 查不通（限流/超时/接口结构变化）：缓存一个 5 分钟的哨兵，别每次刷新都去撞
-        try { await caPut(keyOf(c), '{"r":null}', 300); } catch (e) {}
+        // 查不通（限流/超时/接口结构变化）：留 5 分钟空哨兵，别每次刷新都去撞
+        cur[String(c.uid)] = { r: null, p: null, t: Date.now() };
         return;
       }
       out[c.uid] = v;
-      try { await caPut(keyOf(c), JSON.stringify(v), 1800); } catch (e) {}
+      cur[String(c.uid)] = { r: v.r == null ? null : v.r, p: v.p == null ? null : v.p, t: Date.now() };
     } catch (e) {}
     })),
     new Promise(res => setTimeout(res, 5000)),
   ]);
+  // 整批回写一次（原来这里是最多 40 次 caPut）
+  try { await caPut(batchKey, JSON.stringify(cur), 1800); } catch (e) {}
   return out;
 }
 
