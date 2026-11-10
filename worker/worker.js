@@ -7341,11 +7341,15 @@ function json(o, status = 200, extraHeaders) { return new Response(JSON.stringif
 async function consoleRole(body) {
   const u = String((body && body.user) || ''), p = String((body && body.pass) || '');
   if (u !== 'xx1031' || !p) return null;
-  let full = '', ro = '';
+  let full = '', ro = '', adm = '';
   try { full = cleanKV(await POOL.get('CONSOLE_PASS')); } catch (e) {}
   try { ro = cleanKV(await POOL.get('CONSOLE_RO_PASS')); } catch (e) {}
+  // 2026-11-11：手机版号池页内嵌控制台，客服只输一把「号池权限码」（ADMIN_PASS），
+  // 所以控制台登录也认它（同为管理级口令，进来就是满权限）。
+  try { adm = cleanKV(await POOL.get('ADMIN_PASS')); } catch (e) {}
   // 满权限口令优先判：万一两把口令被设成同一个值，登进来的应该是满权限那档
   if (full && p === full) return 'full';
+  if (adm && p === adm) return 'full';
   if (ro && p === ro) return 'ro';
   return null;
 }
