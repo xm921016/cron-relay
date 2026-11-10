@@ -4,7 +4,7 @@
 
 反检测特性：
 - 发布间隔平均 3-5 天（脚本内部掷骰子决定是否发布）
-- 随 relay 每晚北京 22:23 触发，脚本内部随机等待 1-5 分钟后开始
+- 随 relay 每晚北京 22:23 触发，脚本内部随机等待 30-60 秒后开始（NOTES_START_WAIT 可调）
 - 文案从正向励志文案库里随机选取，长短句混合，长句自动折行排进图片
 - 图片完全随机生成（背景色、装饰、字体大小、文字位置每次都不同）
 - 操作间加入随机延迟，模拟人类行为
@@ -932,9 +932,23 @@ def main():
             print("今日无发布任务")
             sys.exit(0)
 
-        # 触发后随机等待 1-5 分钟再开始
-        wait_seconds = random.randint(60, 300)
-        logger.info(f"随机等待 {wait_seconds // 60} 分 {wait_seconds % 60} 秒后开始...")
+        # 触发后随机等待再开始。
+        # 2026-11-10：默认从「1~5 分钟」缩到「30~60 秒」—— 这段等待纯粹是「错开各分片同时启动」的抖动，
+        # 与「发完 60~100 秒后删」毫无关系（那个在 delete_wait_seconds()）。原来 1~5 分钟纯属白等：
+        # 每片白烧 ≈2.5 分钟，4 批下来 ≈10 分钟墙钟。要改口径：NOTES_START_WAIT="30-60" / "120"。
+        try:
+            _sw = (os.environ.get("NOTES_START_WAIT") or "30-60").strip()
+            if "-" in _sw:
+                _a, _b = _sw.split("-", 1)
+                _lo, _hi = max(0, int(_a)), max(0, int(_b))
+                if _lo > _hi:
+                    _lo, _hi = _hi, _lo
+            else:
+                _lo = _hi = max(0, int(_sw))
+        except Exception:
+            _lo, _hi = 30, 60
+        wait_seconds = random.randint(_lo, _hi) if _hi > _lo else _lo
+        logger.info(f"随机等待 {wait_seconds} 秒后开始...")
         time.sleep(wait_seconds)
         success_count = 0
         fail_count = 0
