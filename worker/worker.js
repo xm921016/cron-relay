@@ -2765,19 +2765,55 @@ async function ledgerAdd(e, opt) {
     ? (Number(o.price) >= 0 ? Number(o.price) : null)
     : (price >= 0 ? price : null);
   const exp = String(e.exp || '') || 'forever';
+  const src = String(o.src || 'reg');
+  const at = beijingDateTime();
+  const row = [POOL_NAME, uid, String(e.name || ''), String(e.agent || ''), String(e.plan || ''),
+               finalPrice, days, day, String(o.start || day), exp,
+               o.rb ? 1 : 0, Number(o.rbFrom) || 0, String(o.remark || ''), src, at];
+  /* 2026-11-10 修复「同一天两笔互相覆盖」：
+     唯一键原来是 (pool,uid,day)，且一律 ON CONFLICT(pool,uid,day) DO UPDATE —— 同一个号
+     同一天出现两笔不同性质的单（新登记当天又续费 / 一天续两次）时，后一笔把前一笔覆盖掉：
+     price 被改写、而 days 和 src 在 DO UPDATE 里压根没列出来 ⇒ 营收少一笔、套餐天数错乱、
+     类型还留着旧的 'new'。现在分三步：
+       ① 先按「同号 + 同日 + 同类型」查一笔 → 有则累加（一天续两次：钱和天数都保留）
+       ② 没有则 INSERT 新行 —— 需要索引是 (pool,uid,day,src) 才不撞唯一约束，
+          变更语句见 文档\台账同日多笔-索引变更-20261110.md
+       ③ 若读失败、或 INSERT 仍撞旧索引（DDL 还没执行）→ 退回旧 UPSERT，
+          宁可合并成一行也不丢这笔钱（行为与改前一致，不会更差） */
+  let hit = null;
+  try {
+    hit = await d1All('SELECT id FROM ledger WHERE pool=? AND uid=? AND day=? AND src=? LIMIT 1',
+                      [POOL_NAME, uid, day, src]);
+  } catch (_e) { hit = null; }
+  if (hit && hit.length) {
+    // 同类型同日已有 → 累加：price 相加（NULL = 待补价，NULL+n 仍是 NULL）、days 相加，
+    // 到期日/套餐/备注取后一笔。rb 沿用「原来标了补号就不洗掉」的旧口径。
+    return d1Run(
+      'UPDATE ledger SET name=?, agent=?, plan=?, price=price+?, days=days+?, exp=?, at=?, ' +
+      'rb=CASE WHEN rb=1 THEN 1 ELSE ? END, ' +
+      'rb_from=CASE WHEN rb=1 THEN rb_from ELSE ? END, ' +
+      'remark=CASE WHEN ?<>\'\' THEN ? ELSE remark END WHERE id=?',
+      [String(e.name || ''), String(e.agent || ''), String(e.plan || ''), finalPrice, days, exp, at,
+       o.rb ? 1 : 0, Number(o.rbFrom) || 0, String(o.remark || ''), String(o.remark || ''), Number(hit[0].id)]
+    );
+  }
+  if (hit) {
+    const okIns = await d1Run(
+      'INSERT INTO ledger (pool,uid,name,agent,plan,price,days,day,start,exp,rb,rb_from,remark,src,at) ' +
+      'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', row);
+    if (okIns) return true;
+  }
   // 已标记补号的那笔不能被「重新登记/回灌」洗回正常单 —— 否则免费补号下个月又被算一次提成
   return d1Run(
     'INSERT INTO ledger (pool,uid,name,agent,plan,price,days,day,start,exp,rb,rb_from,remark,src,at) ' +
     'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ' +
     'ON CONFLICT(pool,uid,day) DO UPDATE SET name=excluded.name, agent=excluded.agent, ' +
-    'plan=excluded.plan, price=excluded.price, exp=excluded.exp, at=excluded.at, ' +
+    'plan=excluded.plan, price=ledger.price+excluded.price, days=ledger.days+excluded.days, ' +
+    'exp=excluded.exp, at=excluded.at, ' +
     'rb=CASE WHEN ledger.rb=1 THEN 1 ELSE excluded.rb END, ' +
     'rb_from=CASE WHEN ledger.rb=1 THEN ledger.rb_from ELSE excluded.rb_from END, ' +
     'remark=CASE WHEN excluded.remark<>\'\' THEN excluded.remark ELSE ledger.remark END',
-    [POOL_NAME, uid, String(e.name || ''), String(e.agent || ''), String(e.plan || ''),
-     finalPrice, days, day, String(o.start || day), exp,
-     o.rb ? 1 : 0, Number(o.rbFrom) || 0, String(o.remark || ''), String(o.src || 'reg'),
-     beijingDateTime()]
+    row
   );
 }
 // 把某个号的成交记录打上/去掉「补号」标记（控制台编辑弹窗调用）。
