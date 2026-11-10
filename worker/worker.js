@@ -3334,7 +3334,21 @@ function buildPlanAccel(live, songs, listeners, today, idle) {
   //   门闩 520 分钟：02:44 起跑 → 11:24，留 16 分钟给快照主采。
   // ⚠ 改 run.yml 的 ACCOUNTS_PER_SLICE / ACCOUNT_PARALLEL 必须同步改下面 4 个常量，
   //   偏大 = 单班顶穿门闩被 kill，偏小 = 加速档被白白等比稀释（都是静默的，不报错）。
-  const APS_ASSUME = 12, JOB_CONC = 20, KNIFE_MIN = 520, MIN_PER_SONG = 1.52;
+  /* 2026-11-10：APS 不再写死 12 —— 只把那个值当「小池子默认值」。
+     原因：run.yml 的 ACCOUNTS_PER_SLICE 改成「按目标波数自动反算」后，per 会随池子人数变
+     （776 号 = 13、1200 号 = 20），这里若仍写死 12，waves 会多算一波 → PER_CAP 偏小 →
+     加速档被白白等比稀释（静默的）。两边必须逐字一致，公式：
+       per = clamp(ceil(M / (TARGET_WAVES × JOB_CONC)), 8, floor(PAR / 1.7))
+     floor(PAR/1.7) 的 1.7 = 「哈希最重片 ÷ 平均片」的实测倍率上限。sliceBucket 11-10 实测：
+       ns=20 → 1.28×、ns=60 → 1.54×、ns=100 → 2.08×；取 1.7 是保证最重片 ≤ ACCOUNT_PARALLEL，
+       不出现「片内跑第 2 轮」（那会把该片时长直接翻倍，整轮也多一跳）。
+     M < 500 走旧值 12：dz 是 118 号 / 6 号一片 / 1 波，用新公式会把 waves 从 1 抬到 3、
+     PER_CAP 从 334 砍到 106 —— 一旦某个加速日 S/M 超过 106 就会整批稀释，那是 dz 现在
+     唯一能保 650 的档位。按 M 分叉（不是按群名），两仓输入相同就一定能算出同一份 plan。 */
+  const JOB_CONC = 20, TARGET_WAVES = 3, PAR_ASSUME = 24, KNIFE_MIN = 520, MIN_PER_SONG = 1.52;
+  const APS_ASSUME = M >= 500
+    ? Math.max(8, Math.min(Math.ceil(M / (TARGET_WAVES * JOB_CONC)), Math.floor(PAR_ASSUME / 1.7)))
+    : 12;
   const waves = Math.max(1, Math.ceil(Math.ceil(M / APS_ASSUME) / JOB_CONC));
   const PER_CAP = Math.max(16, Math.floor(KNIFE_MIN / waves / MIN_PER_SONG) - 8);
   let capped = 0;
@@ -4996,12 +5010,11 @@ async function handle(request) {
       const c = await cfg();
       const gp2 = groupPassCheck(c, body);
       if (!gp2.ok) return json({ message: gp2.msg }, gp2.status);
-      // 号池满员闸口（防止绕过网页登记直接灌号）；一律按一群计数
+      /* 2026-11-10：满员闸口从「validateCookie 之前」下移到「拿到 uid / 手机号之后」，见下方。
+         原位置无法判断这单是不是给已在池的老客户续费/补登，号池一满就再也收不到钱，
+         也与 /api/r/submit 的 _alreadyIn 豁免口径不一致（两个入口行为分裂）。 */
       const isG2 = false;
       const myLimit = groupLimitOf(c, isG2);
-      const _m2 = await mergePool();
-      const grpUsed = activePoolSize(_m2);   // 排除已过期未清的号，口径一致
-      if (grpUsed >= myLimit) return json({ message: '本群名额已满（上限 ' + myLimit + ' 人），暂停登记。已有账号的互听和签到不受影响，请稍后再试或联系群主。' }, 429);
       const mu = (body.musicU || '').trim();
       if (!mu) return json({ message: '请填写 MUSIC_U' }, 400);
       const email = (body.email || '').trim();
@@ -5022,8 +5035,25 @@ async function handle(request) {
       if (!song.ok) return json({ message: song.msg }, 400);
       const expQ = parseExpInput(body.exp);
       if (!expQ.ok) return json({ message: '有效期格式不对：填天数(如730)、日期(2028-10-18)或不填（默认2年）' }, 400);
-      const phoneRaw = (body.phone || '').replace(/[^0-9]/g, '');
-      const phone = /^1\d{10}$/.test(phoneRaw) ? phoneRaw : '';
+      const phoneIn = String(body.phone || '').trim();
+      const phoneRaw = phoneIn.replace(/[^0-9]/g, '');
+      /* 2026-11-10：手机号「填了但格式不对」直接 400，不再静默丢弃。
+         原来写错一位数就变成 phone='' → name 记成 qr:<uid>，当场看不出任何异常，
+         但这个号从此失去「按手机号认回原单」的凭据 —— 补登/续费链接全都查不到原单。
+         不填仍然放行：老版 EXE 主界面没有手机号输入框，在这硬校验会让客服全线登记失败。 */
+      if (phoneIn && !/^1\d{10}$/.test(phoneRaw)) {
+        return json({ message: '手机号要 11 位、以 1 开头，请检查一下（不填可以；填错这个号以后就认不回原单了）' }, 400);
+      }
+      const phone = phoneIn ? phoneRaw : '';
+      /* 满员闸口（2026-11-10 从上方下移到这里）：已在池的号续费/补登不占新名额，
+         口径与 /api/r/submit 的 _alreadyIn 完全一致 —— uid 命中 或 手机号命中 name 即豁免。
+         号池到 1200 那天，否则客服给老客户续费会被 429 挡死、收不到钱。 */
+      const _m2 = await mergePool();
+      const _u2 = String(v.uid || '');
+      const _alreadyIn2 = _m2.some(e => e && (String(e.uid) === _u2 || (phone && String(e.name || '') === phone)));
+      if (!_alreadyIn2 && activePoolSize(_m2) >= myLimit) {
+        return json({ message: '本群名额已满（上限 ' + myLimit + ' 人），暂停登记。已有账号的互听和签到不受影响，请稍后再试或联系群主。' }, 429);
+      }
       // 2026-10-27：客服 + 套餐（口径同 /api/join）
       const rc2 = await regCfg();
       const pl2 = planOf(rc2, body.plan);

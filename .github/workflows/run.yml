@@ -135,18 +135,18 @@ jobs:
                              # 以后真要上 1500，得先把 ACCOUNTS_PER_SLICE 调到 8（188 片 9.4 波）。
                              # ⚠️ 2026-11-05 起 ACCOUNTS_PER_SLICE=34，250 片对应 8500 号，
                              #    实际上限由号池登记上限 POOL_LIMIT_G1 约束，这个 250 只剩 matrix 256 的意义。
-          ACCOUNTS_PER_SLICE: '12'  # 2026-11-09：34 → 12。目的是「按真实分片数自动摊薄 IP」+ 修 6h 超时。
-                                    # 片数 = ceil(号池人数 / 本值)，池子涨片数自动涨，不需要改代码。
-                                    # 为什么不能停在 34：per（每号每晚听几首）11-09 从 32 涨到 57，
-                                    #   单号时长 1.7h → 2.8h，而哈希分片大小不均（682 号 / 21 片 → 最重 49、最轻 21）。
-                                    #   最重片 49 号 @ 并发 20 = 3 轮 × 2.8h = 8.4h > GitHub 单 job 6h 上限
-                                    #   → 最重那几片每天必被 cancel，丢尾部的号。per=32 时代 3 轮只要 5.1h 才没暴露。
-                                    # 现值 12：682 号 → 57 片，最重片 19 号 < 并发 20 ⇒ 每片 1 轮 2.8h。
-                                    #   57 片 = 57 个独立 runner = 57 个出口 IP（原 21），
-                                    #   单首歌 118 个听众摊到每 IP 最多约 6 个号（原 13 个），用户要求的「多 IP 打散」自动成立。
-                                    #   20 并发 3 波 × 2.8h ≈ 8.4h，仍在 11:40 采集门闩之前。
-                                    # ⚠️ 必须与 ACCOUNT_PARALLEL 一起看：本值只要显著大于并发数就会出现 2 轮+。
-                                    # ⚠️ 本值只影响「谁在哪个 runner 上跑」，不影响 per / 目标听众 / 播放逻辑。
+          # 2026-11-10：改成「自动反算」，池子涨了不用再手改这里。
+          # 填数字 = 强制该值（定向补跑/排查用）；填 auto 或留空 = 自动。
+          # 公式：per = clamp(ceil(人数 / (TARGET_WAVES × 20并发)), 8, floor(ACCOUNT_PARALLEL / 1.7))
+          #   776 号 → per=13 → 60 片 → 3 波 → 约 6.3h（原来是 per=12 → 65 片 → 3.25 波 → 8.5h）
+          #   1200 号 → per=20（被 PAR 上限夹到 14）→ 86 片 → 4.3 波 → 约 10.6h
+          #   ⚠ 1.7 = 「哈希最重片 ÷ 平均片」的实测倍率上限，保证最重片 ≤ ACCOUNT_PARALLEL，
+          #     不出现「片内跑第 2 轮」把该片时长翻倍（sliceBucket 11-10 实测 1.28~2.08×）。
+          #   ⚠ 与 worker.js:buildPlanAccel 的 TARGET_WAVES / PAR_ASSUME 必须逐字一致。
+          # 历史：34（11-05 前）→ 34（11-05）→ 12（11-09，防单 job 超 6h）→ auto（11-10）。
+          ACCOUNTS_PER_SLICE: 'auto'
+          TARGET_WAVES: '3'          # 目标波数：ns ≈ TARGET_WAVES × 20，波数决定整轮时长
+          ACCOUNT_PARALLEL: '24'     # 必须与 brush 段里同名变量一致（worker 侧 PAR_ASSUME 同步）
           # 2026-10-22：片数优先按 D1 里的真实账号池人数算（问不到 worker 才回退数 Secrets），
           # 这样 Secrets 分片过期/写失败都不会再导致排片数不对。
           WORKER_URL: 'https://xx1031.xyz'
@@ -203,7 +203,16 @@ jobs:
               print("::error::问不到号池人数（worker 与 Secrets 都为空），拒绝按 ns=4 跑一整晚。"
                     "先确认 worker 是否存活、ASSIGN_PASS 是否失效、NB_POOL_* 是否还在。")
               raise SystemExit(1)
-          per = int(os.environ.get("ACCOUNTS_PER_SLICE", "8"))
+          _ap = (os.environ.get("ACCOUNTS_PER_SLICE") or "").strip().lower()
+          _par = int(os.environ.get("ACCOUNT_PARALLEL", "24") or 24)
+          _tw = float(os.environ.get("TARGET_WAVES", "3") or 3)
+          if _ap.isdigit() and int(_ap) > 0:
+              per = int(_ap)      # 显式数字 = 强制（定向补跑/排查用，与改前行为一致）
+          else:
+              # 自动：按目标波数反算，再用 ACCOUNT_PARALLEL 夹住上限，保证最重片不跨轮
+              per = max(8, min(int(math.ceil(n / (_tw * 20))), int(math.floor(_par / 1.7))))
+          print("per=%d (%s) n=%d par=%d target_waves=%s" % (
+              per, "forced" if (_ap.isdigit() and int(_ap) > 0) else "auto", n, _par, _tw))
           lo = int(os.environ.get("MIN_SLICES", "4"))
           hi = int(os.environ.get("MAX_SLICES", "30"))
           ns = max(lo, min(hi, math.ceil(n / per) if n else lo))
