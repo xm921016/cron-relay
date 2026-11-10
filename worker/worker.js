@@ -3120,6 +3120,7 @@ const poolSnapKey = () => 'pool:' + POOL_NAME;
 // 任何异常都退化成「不缓存」，绝不影响主流程。
 // ====================================================================
 const _CA_HOST = 'https://ca-cache.xx1031.xyz/';
+let _caLastErr = '';   // 2026-11-10：Cache API 最近一次写失败的原因（只在单次 invocation 内有意义，供响应头排障）
 function _caObj() { try { return (typeof caches !== 'undefined' && caches.default) ? caches.default : null; } catch (e) { return null; } }
 function _caReq(k) { return new Request(_CA_HOST + encodeURIComponent(String(k)), { method: 'GET' }); }
 async function caGet(k) {
@@ -3129,12 +3130,13 @@ async function caGet(k) {
 }
 async function caPut(k, body, ttl) {
   const c = _caObj();
-  if (!c) return false;
+  if (!c) { _caLastErr = 'no-caches-api'; return false; }
   try {
     await c.put(_caReq(k), new Response(body, {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=' + (Number(ttl) || 300) } }));
+    _caLastErr = '';
     return true;
-  } catch (e) { return false; }
+  } catch (e) { _caLastErr = String((e && e.message) || e).slice(0, 120); return false; }
 }
 
 // ====================================================================
@@ -6817,7 +6819,8 @@ async function handle(request) {
       if (!_ccSkip && _ccKey) { _ccPutOk = await caPut(_ccKey, _body, _ccTtl); }
       return new Response(_body, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, {
         'X-Cache': _ccSkip ? 'bypass' : (_ccPutOk ? 'miss-stored' : 'miss-storefail'),
-        'X-CCVer': _ccVerOut.slice(0, 16) }) });
+        'X-CCVer': _ccVerOut.slice(0, 16),
+        'X-CAErr': String(_caLastErr || '').slice(0, 80) }) });
     }
     // 控制台编辑：hz 本地执行（与管理后台同一套逻辑）；dz 转发到对端 worker 的对等接口
     if (url.pathname === '/api/console/entry' && request.method === 'POST') {
