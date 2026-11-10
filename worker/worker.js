@@ -5029,6 +5029,24 @@ async function handle(request) {
       const pl2 = planOf(rc2, body.plan);
       const ent = { ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: phone || ('qr:' + v.uid), uid: v.uid, email: email, phone: phone, grp: isG2 ? 2 : 1, exp: expQ.exp || (pl2 ? pl2.exp : undefined),
         agent: normAgent(body.agent), plan: pl2 ? pl2.label : normAgent(body.plan).slice(0, 8) };
+      /* 2026-11-10：客服端也可以指定这一单是「续费」还是「补登」（主界面下拉框）。
+         不传 / 传 auto → 保持原来的自动判定（号在池里=续费；号不在池但台账原单没到期=补登），
+         老版本 EXE 不带这个字段，行为完全不变。
+         传了就以它为准，到期日从台账原单取 —— 与自助登记链接同一套口径，理由也一样：
+         「号掉线了但客户付了续费」光看数据会被判成免费补登，客户白付钱、客服白干。
+         不提供「强制新登记」：新单从今天算一定比在原到期日上累加少，没有业务场景需要它。 */
+      const _mk2 = String(body.kind || '').trim();
+      if (_mk2 === 'fix' || _mk2 === 'renew') {
+        const hist2 = await d1FindLastOrder(String(v.uid || ''), phone);
+        if (hist2 === null && !d1ok()) {
+          return json({ message: '数据库读不到，暂时没法核对原单，请稍后再试' }, 503);
+        }
+        if (!hist2) {
+          return json({ message: (_mk2 === 'fix' ? '补登' : '续费') + '要先有原单，台账里查不到这个手机号/网易号的记录。'
+            + '确实没有原单的，把「这一单是」改回「自动判定」再登记。' }, 404);
+        }
+        ent.__force = { kind: _mk2, exp: String(hist2.exp || '').slice(0, 10) };
+      }
       const r = await addEntry(ent);
       if (!r.ok) return json({ ok: false, message: r.msg }, 400);
       // 2026-10-29 写后自检：控制台/管理后台读的都是 D1，而 addEntry 里的 D1 镜像失败
