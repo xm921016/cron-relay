@@ -2118,7 +2118,7 @@ async function d1FindLastOrder(uidKey, name, exp) {
   const expF = /^\d{4}-\d{2}-\d{2}$/.test(String(exp || '')) ? String(exp)
     : (String(exp || '') === 'forever' ? 'forever' : '');
   const tail = (expF ? ' AND exp=? ' : ' ') + 'ORDER BY day DESC, id DESC LIMIT 1';
-  const SQL = 'SELECT day,start,exp,agent,plan,uid,name FROM ledger WHERE pool=? AND ';
+  const SQL = 'SELECT day,start,exp,agent,plan,uid,name,at FROM ledger WHERE pool=? AND ';
   let rows = null;
   if (uidKey) {
     const ps = expF ? [POOL_NAME, String(uidKey), expF] : [POOL_NAME, String(uidKey)];
@@ -2228,6 +2228,25 @@ async function addEntry(entry) {
       if (kind === 'renew') {
         const days = planDaysOf(entry.exp);                       // 本次买的套餐天数
         boughtDays = days;
+        /* 2026-11-10 晚：防「超时重试」被当成第二次续费（真实事故）。
+           手机版 APK 的原生登记通道读超时只有 20 秒，而这条链路要打 3~4 次外部接口 + 写 D1 +
+           整池重建灾备快照，常态 8~15 秒，弱网必然撞线。撞线只是客户端没等到回执 ——
+           服务端其实已经写库了。客服看到「登记失败」就再点，于是每次都被判成「号还在池里 = 续费」，
+           有效期一次次 +730 天（11-10 21:38 实例：2 年套餐被点了 5 次，直接变成 3650 天）。
+           判据用台账而不看 accounts.updated_at：台账只在真登记时写，改邮箱/改 CK 不会动它，
+           不会误伤；而且 ledger 的 (pool,uid,day) 唯一、同日多笔会合并成一行、at 取最后一次，
+           所以「最近一笔在 10 分钟内」就等于「刚刚登记成功过」。
+           10 分钟窗口对正常业务无影响（同一个人一天内连买两单套餐本来就不存在）。
+           查不到（D1 读失败）时照旧放行，不因为校验不了就把人挡在外面。 */
+        const _last = await d1FindLastOrder(uidKey, entry.name);
+        const _lastAt = _last ? String(_last.at || '') : '';
+        const _lt = _lastAt ? Date.parse(_lastAt.replace(' ', 'T') + '+08:00') : 0;
+        if (_lt && Date.now() - _lt < 10 * 60 * 1000) {
+          const _mins = Math.max(1, Math.round((Date.now() - _lt) / 60000));
+          return { ok: false, msg: '这个号 ' + _mins + ' 分钟前已经登记成功过（上一次多半只是软件没等到回执，'
+            + '其实已经进池了）。请先到控制台或「号池数据」里核对到期日，不要重复提交；'
+            + '确实要再续一单，请等 10 分钟后再试。' };
+        }
         const oldExp = String((keepRow && keepRow.exp) || '').slice(0, 10);
         const wasPub = Number(keepRow && keepRow.pub) === 1;      // 公益号（exp 也是 forever，必须靠 pub 区分）
         const newExp = renewExpCalc(oldExp, days, wasPub);
