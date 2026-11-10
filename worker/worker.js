@@ -5385,6 +5385,40 @@ async function handle(request) {
         kind: tokKind, fix_exp: tokFixExp, fix_ref: tokFixRef,
       });
     }
+    /* ---- 客服查原单（生成补登/续费链接前先确认这一单） ----
+       2026-11-10：EXE 里有生成口令、没有控制台口令，所以不能复用 /api/console/findorder。
+       这里只按「完整手机号 / 完整网易 UID」精确查（两条单条件查询，都走索引），
+       不用 LIKE —— ledger 全表扫描在额度打满时最容易被拖死。 */
+    if (url.pathname === '/api/regtoken_find' && request.method === 'POST') {
+      let bf;
+      try { bf = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const pwf = await regPass();
+      let okf = !!pwf && String(bf.pass || '') === pwf;
+      if (!okf) okf = await consoleAuthFull(bf);
+      if (!okf) return json({ ok: false, message: pwf ? '生成口令不正确' : '生成口令未配置' }, 403);
+      const qf = String(bf.q || '').replace(/[^0-9A-Za-z_-]/g, '').slice(0, 40);
+      if (qf.length < 5) return json({ ok: false, message: '请输完整手机号 或 完整网易 UID' }, 400);
+      const COLS = 'uid,name,plan,exp,day,start,rb';
+      let rows = await d1All('SELECT ' + COLS + ' FROM ledger WHERE pool=? AND uid=? ORDER BY day DESC, id DESC LIMIT 5',
+                             [POOL_NAME, qf]);
+      if (rows !== null && !rows.length) {
+        rows = await d1All('SELECT ' + COLS + ' FROM ledger WHERE pool=? AND name=? ORDER BY day DESC, id DESC LIMIT 5',
+                           [POOL_NAME, qf]);
+      }
+      if (rows === null) return json({ ok: false, message: '数据库读不到，请稍后再试（不是没有原单）' }, 503);
+      const uids = [...new Set(rows.map(r => String(r.uid || '')).filter(Boolean))];
+      const alive = {};
+      if (uids.length) {
+        const a = await d1All('SELECT uid FROM accounts WHERE pool=? AND uid IN (' + uids.map(() => '?').join(',') + ')',
+                              [POOL_NAME].concat(uids));
+        if (a) for (const x of a) alive[String(x.uid)] = 1;    // 读失败就当「不在池」，只影响显示
+      }
+      return json({ ok: true, rows: rows.map(r => ({
+        uid: String(r.uid || ''), name: String(r.name || ''), plan: String(r.plan || ''),
+        exp: String(r.exp || ''), day: String(r.day || ''), start: String(r.start || ''),
+        rb: Number(r.rb) || 0, alive: !!alive[String(r.uid)],
+      })) });
+    }
     if (url.pathname === '/api/regtoken_list' && request.method === 'POST') {
       let b2;
       try { b2 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
