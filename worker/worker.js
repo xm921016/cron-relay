@@ -2776,10 +2776,15 @@ async function ledgerAdd(e, opt) {
      price 被改写、而 days 和 src 在 DO UPDATE 里压根没列出来 ⇒ 营收少一笔、套餐天数错乱、
      类型还留着旧的 'new'。现在分三步：
        ① 先按「同号 + 同日 + 同类型」查一笔 → 有则累加（一天续两次：钱和天数都保留）
-       ② 没有则 INSERT 新行 —— 需要索引是 (pool,uid,day,src) 才不撞唯一约束，
-          变更语句见 文档\台账同日多笔-索引变更-20261110.md
-       ③ 若读失败、或 INSERT 仍撞旧索引（DDL 还没执行）→ 退回旧 UPSERT，
-          宁可合并成一行也不丢这笔钱（行为与改前一致，不会更差） */
+       ② 没有则 INSERT 新行
+       ③ 读失败、或 INSERT 撞上唯一索引 → 退回旧 UPSERT，宁可合并成一行也不丢这笔钱
+     ⚠️ 唯一索引目前仍是 (pool,uid,day)，所以「同一天跨类型」（新登记 + 当天又续费）
+        那一笔会撞索引、落到 ③ 合并成一行：金额和天数累加都对，只有 src 记成第一笔。
+        这是**有意保留**的（2026-11-10 评估后决定不改索引）：D1 netpool 与 dz 共用，
+        dz 既没有续费体系、也没有「时长没增加就拒绝」的 noGain 防线，
+        一旦把索引改成 (pool,uid,day,src)，dz 那边同一笔重复提交会从「覆盖」变成「天数累加」= 虚增。
+        真要改索引，必须先给 dz 补 noGain 防线。
+        详见 文档\补登判定与台账同日多笔-修复说明-20261110.md */
   let hit = null;
   try {
     hit = await d1All('SELECT id FROM ledger WHERE pool=? AND uid=? AND day=? AND src=? LIMIT 1',
