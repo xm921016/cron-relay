@@ -9143,6 +9143,10 @@ function pickStat(v){
 // 2026-10-23：运行状态横条（作业状态/应跑实跑/快照新鲜度/今日删号与待复核）
 function fmtAdded(x){x=String(x||'');if(x.length<11)return esc(x);return esc(x.slice(0,10))+'<div class="snap-at">'+esc(x.slice(11))+'</div>';}
 function bjTime(iso){if(!iso)return '';var d=new Date(iso);if(isNaN(d.getTime()))return '';var b=new Date(d.getTime()+8*3600*1000);return ('0'+(b.getUTCMonth()+1)).slice(-2)+'-'+('0'+b.getUTCDate()).slice(-2)+' '+('0'+b.getUTCHours()).slice(-2)+':'+('0'+b.getUTCMinutes()).slice(-2);}
+/* 2026-11-10 晚：带年份的北京时间。D1 里的时间一律是 UTC ISO（regIso），
+   以前链接列表/设备列表直接 slice + replace('T',' ') 截断 = 显示 UTC，比北京慢 8 小时。
+   要知道具体哪天就只能用这个（bjTime 只给 月-日 时:分）。 */
+function bjFull(iso){if(!iso)return '';var d=new Date(iso);if(isNaN(d.getTime()))return String(iso).slice(0,16).replace('T',' ');var b=new Date(d.getTime()+8*3600*1000);return b.getUTCFullYear()+'-'+('0'+(b.getUTCMonth()+1)).slice(-2)+'-'+('0'+b.getUTCDate()).slice(-2)+' '+('0'+b.getUTCHours()).slice(-2)+':'+('0'+b.getUTCMinutes()).slice(-2);}
 function renderRunbar(){
   if(!DATA)return;
   var A=DATA.actions||[],C=DATA.coverage||{},F=DATA.fresh||{},D=DATA.dead||[],S=DATA.suspects||[];
@@ -9580,7 +9584,8 @@ function suspectRename(oldList,newList){
   return {gone:gone,add:add};
 }
 /* ===== 2026-11-10：设备授权（客服电脑）===== */
-function dvFmt(t){return t?String(t).slice(0,16).replace('T',' '):'-';}
+/* 2026-11-10 晚：ctime 是 UTC ISO，这里原来是原样截断（显示 UTC，慢 8 小时），改走 bjFull。 */
+function dvFmt(t){return t?esc(bjFull(t)):'-';}
 function dvTxt(s){return s==='ok'?'已授权':(s==='hold'?'已停用':'待授权');}
 function dvBadge(s){
   var c=s==='ok'?'#2e7d32':(s==='hold'?'#8a8a8a':'#b26a00');
@@ -9753,7 +9758,7 @@ $('rgGo').onclick=function(){
     $('rgm').textContent='已生成（'+rgKindName(k)+'）'; $('rgm').className='msg ok';
     $('rgOut').innerHTML='<div style="margin-top:8px;padding:10px 12px;background:#f2fbf4;border:1px solid #cfe8d6;border-radius:9px;font-size:12.5px;line-height:1.95">'
       +'链接：<input readonly value="'+esc(d.link||'')+'" style="width:auto;min-width:400px;font-family:ui-monospace,Consolas,monospace" onclick="this.select()">'
-      +'<br>有效期至 '+esc(String(d.exp_at||'').slice(0,16).replace('T',' '))+'（'+(d.hours||24)+' 小时），一条链接只能用一次'
+      +'<br>有效期至 '+esc(bjFull(d.exp_at))+'（'+(d.hours||24)+' 小时），一条链接只能用一次'
       +(d.fix_exp?('<br>原单到期日：<b>'+esc(d.fix_exp)+'</b>'+(k==='fix'?'（补登后仍到这天，不延长）':'（续费在此基础上累加）')):'')
       +'<br><span style="color:#888">把链接发给客户，客户自己扫码登记，不用他给你密码。</span></div>';
     rgLoad();
@@ -9776,7 +9781,7 @@ function rgLoad(){
       var pl=(kn!=='new'&&x.fix_exp)?('原单到 '+esc(x.fix_exp)):esc(x.plan||'—');
       h+='<tr><td>'+rgKindName(kn)+'</td><td>'+esc(x.agent||'')+'</td><td>'+pl+'</td>'
         +'<td>'+(st==='unused'?'<b>'+stn+'</b>':('expired'===st?'<span style="color:#b06a00">'+stn+'</span>':stn))+'</td>'
-        +'<td>'+esc(String(x.ctime||'').slice(5,16).replace('T',' '))+'</td>'
+        +'<td>'+esc(bjTime(x.ctime))+'</td>'
         +'<td>'+esc(x.note||'')+'</td>'
         +'<td>'+((st==='unused'||st==='expired')?('<button class="mini gray" data-void="'+esc(x.token||'')+'">作废</button>'):'—')+'</td></tr>';
     });
