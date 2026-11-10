@@ -4285,15 +4285,23 @@ async function regDevGet(dev) {
   return undefined;
 }
 
-/* 返回 { ok, dev, quota, msg, legacy }。legacy=true 表示老版 EXE（不带机器码）。 */
-async function regDevCheck(devRaw, agent) {
+/* 返回 { ok, dev, quota, msg, legacy }。legacy=true 表示老版客户端（不带机器码）。
+   2026-11-10 晚：加了第三个可选参数，让手机端（APK）复用同一套设备授权，但用**独立开关**
+   和**独立文案**，两边的发版节奏互不影响：
+     opt.requireKey  开关用的 KV 键名，默认 REG_REQUIRE_DEV（电脑版）；
+                     APK 传 APK_REQUIRE_DEV —— 打开电脑闸门不会顺手把手机也锁死。
+     opt.term        文案里的称呼，默认「电脑」。 */
+async function regDevCheck(devRaw, agent, opt) {
+  const o = opt || {};
+  const kNeed = o.requireKey || 'REG_REQUIRE_DEV';
+  const term = o.term || '电脑';
   const dev = regDevNorm(devRaw);
   if (!dev) {
     let need = '';
-    try { need = cleanKV(await POOL.get('REG_REQUIRE_DEV')); } catch (e) {}
+    try { need = cleanKV(await POOL.get(kNeed)); } catch (e) {}
     if (need === '1') {
       return { ok: false, dev: '', quota: 0,
-        msg: '这台电脑上的软件版本太旧，已停止生成链接。请找管理员要新版软件。' };
+        msg: '这台' + term + '上的软件版本太旧，已停止使用。请找管理员要新版软件。' };
     }
     return { ok: true, dev: '', quota: 0, legacy: true };
   }
@@ -4321,7 +4329,7 @@ async function regDevCheck(devRaw, agent) {
   const quota = Math.max(1, Number(g.row.quota) || 200);
   if (st === 'ok') return { ok: true, dev: dev, quota: quota };
   if (st === 'hold') {
-    return { ok: false, dev: dev, quota: 0, msg: '这台电脑的生成权限已被管理员停用，请联系管理员。' };
+    return { ok: false, dev: dev, quota: 0, msg: '这台' + term + '的权限已被管理员停用，请联系管理员。' };
   }
   /* pending：看宽限期 */
   const born = regTs(g.row.ctime);
@@ -4330,7 +4338,7 @@ async function regDevCheck(devRaw, agent) {
       grace_left_h: Math.max(1, Math.round((REG_DEV_GRACE_MS - (Date.now() - born)) / 3600000)) };
   }
   return { ok: false, dev: dev, quota: 0,
-    msg: '这台电脑还没被授权。请把机器码 ' + dev + ' 发给管理员，授权后重启软件即可。' };
+    msg: '这台' + term + '还没被授权。请把机器码 ' + dev + ' 发给管理员，授权后重新打开软件即可。' };
 }
 
 async function regDevTouch(dev, agent) {
@@ -5171,6 +5179,24 @@ async function handle(request) {
       const c = await cfg();
       const gp2 = groupPassCheck(c, body);
       if (!gp2.ok) return json({ message: gp2.msg }, gp2.status);
+      /* 2026-11-10 晚：登记入库也过机器闸门（与「生成链接」同一套 reg_devices 表）。
+         背景：APK 装到任何一台新手机上，只要群口令（内嵌在安装包里的 music2026）就能
+         一键登记入库 —— 取 CK 是本地行为拦不住，但「往号池里塞号」必须能管住，
+         否则软件外流等于号池对所有人开放。
+         开关独立：KV 键 APK_REQUIRE_DEV 未设置时，不带 dev 的老版本一律放行（软上线），
+         等新版 APK/EXE 铺开、机器都授权完，再把它置 1 才真正开始拒绝。
+         放在 groupPassCheck 之后：群口令都不对的请求不会污染 reg_devices 表。 */
+      let dchk;
+      try {
+        dchk = await regDevCheck(body.dev, body.agent || '',
+                                 { requireKey: 'APK_REQUIRE_DEV', term: '手机' });
+      } catch (e) {
+        /* 校验本身炸了（极端情况）：放行 + 留日志。授权是钱的事，但无故停摆更伤。 */
+        console.error('join_manual 设备校验异常，临时放行:', e && e.message);
+        dchk = { ok: true, dev: '' };
+      }
+      if (!dchk.ok) return json({ ok: false, message: dchk.msg, dev: dchk.dev || '' }, 403);
+      if (dchk.dev) { try { await regDevTouch(dchk.dev, body.agent || ''); } catch (e) {} }
       /* 2026-11-10：满员闸口从「validateCookie 之前」下移到「拿到 uid / 手机号之后」，见下方。
          原位置无法判断这单是不是给已在池的老客户续费/补登，号池一满就再也收不到钱，
          也与 /api/r/submit 的 _alreadyIn 豁免口径不一致（两个入口行为分裂）。 */
