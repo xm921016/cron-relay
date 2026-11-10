@@ -42,6 +42,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       ns: ${{ steps.plan.outputs.ns }}
+      par: ${{ steps.plan.outputs.par }}
       day: ${{ steps.plan.outputs.day }}
     steps:
       # 2026-10-28 新增：每轮 relay 开跑前，先把 D1 账号池（accounts/snapshots/kv_misc/dead_log）
@@ -137,16 +138,21 @@ jobs:
                              #    实际上限由号池登记上限 POOL_LIMIT_G1 约束，这个 250 只剩 matrix 256 的意义。
           # 2026-11-10：改成「自动反算」，池子涨了不用再手改这里。
           # 填数字 = 强制该值（定向补跑/排查用）；填 auto 或留空 = 自动。
-          # 公式：per = clamp(ceil(人数 / (TARGET_WAVES × 20并发)), 8, floor(ACCOUNT_PARALLEL / 1.7))
-          #   776 号 → per=13 → 60 片 → 3 波 → 约 6.3h（原来是 per=12 → 65 片 → 3.25 波 → 8.5h）
-          #   1200 号 → per=20（被 PAR 上限夹到 14）→ 86 片 → 4.3 波 → 约 10.6h
-          #   ⚠ 1.7 = 「哈希最重片 ÷ 平均片」的实测倍率上限，保证最重片 ≤ ACCOUNT_PARALLEL，
-          #     不出现「片内跑第 2 轮」把该片时长翻倍（sliceBucket 11-10 实测 1.28~2.08×）。
-          #   ⚠ 与 worker.js:buildPlanAccel 的 TARGET_WAVES / PAR_ASSUME 必须逐字一致。
-          # 历史：34（11-05 前）→ 34（11-05）→ 12（11-09，防单 job 超 6h）→ auto（11-10）。
+          # 公式（2026-11-11 起 per 与 PAR 双自动，池子涨到 ~1440 号都不用手改）：
+          #   per0 = ceil(人数 / (TARGET_WAVES × 20并发))
+          #   PAR  = clamp(ceil(per0 × 2.0), 24, 48)     ← PAR 跟着 per 走
+          #   per  = min(per0, floor(PAR / 2.0))
+          #   2.0 = 「哈希最重片 ÷ per」的安全倍率（ns≈60 实测 1.54~1.88×），
+          #         PAR ≥ 2×per 保证最重片 ≤ PAR，不出现「片内跑第 2 轮」把该片时长翻倍。
+          #   上限 48：单 runner 48 并发线程 + 单 IP 并发播放的保守天花板（20 job × 48 = 960 并发号）。
+          #   813 号 → per=14 / PAR=28 → 59 片 → 3 波 → 约 7.0h（改前 PAR 死 24，最重片 26 跨轮 → 8.8h）
+          #   1440 号 → per=24 / PAR=48 → 60 片 → 3 波 → 约 7.7h（模拟 tmp/_sim_autopar_1111.mjs）
+          #   ⚠ 与 worker.js:buildPlanAccel 的 PER0_ASSUME / PAR_ASSUME 公式必须逐字一致。
+          # 历史：34（11-05 前）→ 34（11-05）→ 12（11-09，防单 job 超 6h）→ auto（11-10）→ PAR 也 auto（11-11）。
           ACCOUNTS_PER_SLICE: 'auto'
           TARGET_WAVES: '3'          # 目标波数：ns ≈ TARGET_WAVES × 20，波数决定整轮时长
-          ACCOUNT_PARALLEL: '24'     # 必须与 brush 段里同名变量一致（worker 侧 PAR_ASSUME 同步）
+          ACCOUNT_PARALLEL: ''       # 留空 = 自动（plan 按 per×2.0 算出并经 outputs.par 传给 brush）；
+                                     # 填数字 = 强制（排查/回退用）。brush 段不要再写死。
           # 2026-10-22：片数优先按 D1 里的真实账号池人数算（问不到 worker 才回退数 Secrets），
           # 这样 Secrets 分片过期/写失败都不会再导致排片数不对。
           WORKER_URL: 'https://xx1031.xyz'
@@ -204,15 +210,18 @@ jobs:
                     "先确认 worker 是否存活、ASSIGN_PASS 是否失效、NB_POOL_* 是否还在。")
               raise SystemExit(1)
           _ap = (os.environ.get("ACCOUNTS_PER_SLICE") or "").strip().lower()
-          _par = int(os.environ.get("ACCOUNT_PARALLEL", "24") or 24)
+          _par_env = (os.environ.get("ACCOUNT_PARALLEL") or "").strip()
           _tw = float(os.environ.get("TARGET_WAVES", "3") or 3)
-          if _ap.isdigit() and int(_ap) > 0:
-              per = int(_ap)      # 显式数字 = 强制（定向补跑/排查用，与改前行为一致）
-          else:
-              # 自动：按目标波数反算，再用 ACCOUNT_PARALLEL 夹住上限，保证最重片不跨轮
-              per = max(8, min(int(math.ceil(n / (_tw * 20))), int(math.floor(_par / 1.7))))
-          print("per=%d (%s) n=%d par=%d target_waves=%s" % (
-              per, "forced" if (_ap.isdigit() and int(_ap) > 0) else "auto", n, _par, _tw))
+          _forced_ap = _ap.isdigit() and int(_ap) > 0
+          _forced_par = _par_env.isdigit() and int(_par_env) > 0
+          # 2026-11-11：per 与 PAR 双自动。per 按目标波数反算；PAR 跟着 per 走
+          #（哈希最重片 ≈ per × 2.0，PAR ≥ 2×per 保证最重片不跨轮，见上方公式注释）。
+          per0 = max(8, int(math.ceil(n / (_tw * 20))))
+          par = int(_par_env) if _forced_par else max(24, min(48, int(math.ceil(per0 * 2.0))))
+          per = int(_ap) if _forced_ap else max(8, min(per0, int(math.floor(par / 2.0))))
+          print("per=%d (%s) n=%d par=%d (%s) target_waves=%s" % (
+              per, "forced" if _forced_ap else "auto", n,
+              par, "forced" if _forced_par else "auto", _tw))
           lo = int(os.environ.get("MIN_SLICES", "4"))
           hi = int(os.environ.get("MAX_SLICES", "30"))
           ns = max(lo, min(hi, math.ceil(n / per) if n else lo))
@@ -234,6 +243,7 @@ jobs:
               day = (__import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(hours=8)).date().isoformat()
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"ns={ns}\n")
+              f.write(f"par={par}\n")
               f.write("day=" + day + "\n")
               f.write(f"matrix={json.dumps({'slice': _slices})}\n")
           print(f"pool_size={n} ns={ns} slices={len(_slices)} day={day}")
@@ -269,17 +279,22 @@ jobs:
       # 两者都没配时 run.py 自动回退 NB_PASS（老布局兼容）；worker 侧同样是「配了新口令就只认新的」。
       PEER_KEY: ${{ secrets.PEER_KEY }}
       ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
-      ACCOUNT_PARALLEL: '24'  # 每个号一个线程并行播放（单号大部分时间在等播放时长，不占 CPU）
-                              # 2026-11-09 晚：20 → 24。原因是「片内号数 > 本值就要跑第 2 轮，整片翻倍」：
-                              #   当时 686 号 / 每片 12 号 = 58 片，但哈希分片不均 → 最重片 21 个号 > 20，
-                              #   那一片 2 轮（2h→4h），把整个波次从 6h 拖到 8h。提到 24 后最重片也能 1 轮。
-                              # ⚠️ 不要靠调大 ACCOUNTS_PER_SLICE 来提速（实测模拟，2026-11-09）：
-                              #   per=12 → 58 片、最重 21；per=14 → 49 片、最重 28；per=18 → 39 片、最重 30。
-                              #   片数少了但片更肥，超限的片从 1 个变 11 个，总时长反而更差。
-                              # 历史：6（11-05 前）→ 20（11-05，配合每片 34 号）→ 24（11-09）。
-                              # 86min 是 11-05 实测单号中位耗时；单 runner 实测过 12 并发（exp_ipcap D48 臂），
-                              # 20/24 属未测区间，若出现大面积「网络异常/跳过」或 job 耗时异常拉长，先回落 20。
-                              # ⚠️ 本值只影响「片内同时播几个号」，不影响 per（每号听几首）/ 目标听众 / 播放逻辑。
+      # 2026-11-11：PAR 改由 plan 自动算出（= clamp(ceil(per×2.0), 24, 48)，经 needs.plan.outputs.par 传入），
+      # 目的：号池增长时「最重哈希片」永远 ≤ PAR，不出现片内第 2 轮把整片时长翻倍。
+      # plan 段 ACCOUNT_PARALLEL 填数字可强制本值；这里不要写死。
+      ACCOUNT_PARALLEL: ${{ needs.plan.outputs.par }}
+      #                          # 每个号一个线程并行播放（单号大部分时间在等播放时长，不占 CPU）
+      #                          # 2026-11-09 晚：20 → 24。原因是「片内号数 > 本值就要跑第 2 轮，整片翻倍」：
+      #                          #   当时 686 号 / 每片 12 号 = 58 片，但哈希分片不均 → 最重片 21 个号 > 20，
+      #                          #   那一片 2 轮（2h→4h），把整个波次从 6h 拖到 8h。提到 24 后最重片也能 1 轮。
+      #                          # ⚠️ 不要靠调大 ACCOUNTS_PER_SLICE 来提速（实测模拟，2026-11-09）：
+      #                          #   per=12 → 58 片、最重 21；per=14 → 49 片、最重 28；per=18 → 39 片、最重 30。
+      #                          #   片数少了但片更肥，超限的片从 1 个变 11 个，总时长反而更差。
+      #                          # 历史：6（11-05 前）→ 20（11-05，配合每片 34 号）→ 24（11-09）→ plan 自动（11-11）。
+      #                          # 86min 是 11-05 实测单号中位耗时；单 runner 实测过 12/20/24 并发，
+      #                          # 28~48 属未测区间，若出现大面积「网络异常/跳过」或 job 耗时异常拉长，
+      #                          # 在 plan 段 ACCOUNT_PARALLEL 填数字强制回落（如 24）。
+      #                          # ⚠️ 本值只影响「片内同时播几个号」，不影响 per（每号听几首）/ 目标听众 / 播放逻辑。
                               # ⚠️ 若调到 >20，要同步 worker.js:buildPlanAccel 的 JOB_CONC（用于推 PER_CAP）。
                               #   现值 24 与 20 算出的波数完全相同（58 片都是 3 波），所以暂未改 worker。
       # 2026-11-01：不再固定 12 片。manifest 最多 40 片，worker 写了几片这里就透出几片；

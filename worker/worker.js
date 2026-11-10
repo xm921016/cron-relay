@@ -3485,7 +3485,7 @@ function buildPlanAccel(live, songs, listeners, today, idle) {
   //     —— 依据：11-07 relay 实测 212min，per=32、21 片、最重片 3 轮、2 波，反推 99s/首。
   //   波数 = ceil(ceil(M/APS) / 20)，APS 与并发取自 run.yml（现值 12 / 20）。
   //   门闩 520 分钟：02:44 起跑 → 11:24，留 16 分钟给快照主采。
-  // ⚠ 改 run.yml 的 ACCOUNTS_PER_SLICE / ACCOUNT_PARALLEL 必须同步改下面 4 个常量，
+  // ⚠ 改 run.yml 的 ACCOUNTS_PER_SLICE / ACCOUNT_PARALLEL 公式必须同步改下面 PER0_ASSUME/PAR_ASSUME，
   //   偏大 = 单班顶穿门闩被 kill，偏小 = 加速档被白白等比稀释（都是静默的，不报错）。
   /* 2026-11-10：APS 不再写死 12 —— 只把那个值当「小池子默认值」。
      原因：run.yml 的 ACCOUNTS_PER_SLICE 改成「按目标波数自动反算」后，per 会随池子人数变
@@ -3498,9 +3498,20 @@ function buildPlanAccel(live, songs, listeners, today, idle) {
      M < 500 走旧值 12：dz 是 118 号 / 6 号一片 / 1 波，用新公式会把 waves 从 1 抬到 3、
      PER_CAP 从 334 砍到 106 —— 一旦某个加速日 S/M 超过 106 就会整批稀释，那是 dz 现在
      唯一能保 650 的档位。按 M 分叉（不是按群名），两仓输入相同就一定能算出同一份 plan。 */
-  const JOB_CONC = 20, TARGET_WAVES = 3, PAR_ASSUME = 24, KNIFE_MIN = 520, MIN_PER_SONG = 1.52;
+  /* 2026-11-11：PAR 也不再写死 —— 跟着 per 走（与 run.yml plan 的自动公式逐字一致）：
+       per0 = ceil(M / (TARGET_WAVES × JOB_CONC))
+       PAR  = clamp(ceil(per0 × 2.0), 24, 48)
+       per  = min(per0, floor(PAR / 2.0))
+     2.0 = 「哈希最重片 ÷ per」的安全倍率（ns≈60 实测 1.54~1.88×），PAR ≥ 2×per 保证最重片
+     不跨轮。11-10 实测教训：PAR 死 24、813 号 → per=14 → 有一片 26 个号 > 24 跨第 2 轮，
+     整轮 8.8h；PAR 自动到 28 后同一片 1 轮，整轮 7.0h。模拟（tmp/_sim_autopar_1111.mjs）：
+     813~1440 号整轮都稳定 7.0~7.7h、恒 3 波 1 轮，池子增长不用再手改任何数字。
+     M < 500（dz）分支不变：APS=12、PAR_ASSUME 只在此分支不参与 per 计算，仍给 24。 */
+  const JOB_CONC = 20, TARGET_WAVES = 3, KNIFE_MIN = 520, MIN_PER_SONG = 1.52;
+  const PER0_ASSUME = M >= 500 ? Math.max(8, Math.ceil(M / (TARGET_WAVES * JOB_CONC))) : 12;
+  const PAR_ASSUME = M >= 500 ? Math.min(48, Math.max(24, Math.ceil(PER0_ASSUME * 2.0))) : 24;
   const APS_ASSUME = M >= 500
-    ? Math.max(8, Math.min(Math.ceil(M / (TARGET_WAVES * JOB_CONC)), Math.floor(PAR_ASSUME / 1.7)))
+    ? Math.max(8, Math.min(PER0_ASSUME, Math.floor(PAR_ASSUME / 2)))
     : 12;
   const waves = Math.max(1, Math.ceil(Math.ceil(M / APS_ASSUME) / JOB_CONC));
   const PER_CAP = Math.max(16, Math.floor(KNIFE_MIN / waves / MIN_PER_SONG) - 8);
