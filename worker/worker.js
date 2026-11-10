@@ -1287,8 +1287,14 @@ async function live650Batch(list) {
   const todo = [];
   list.forEach((c) => {
     const rec = cur[String(c.uid)];
-    // 命中条件：有记录，且不是「超过 5 分钟的空哨兵」（哨兵语义与原 TTL 300 一致）
-    if (rec && !(rec.r == null && now - (Number(rec.t) || 0) > 300000)) {
+    // 命中条件：有记录，且没过它自己的有效期 —— 成功结果 30 分钟（与原单键 TTL 1800 一致），
+    // 空哨兵 5 分钟（与原 TTL 300 一致）。
+    // 2026-11-10 晚修：原来只判「空哨兵」不判成功记录的年龄 —— 而整批回写每次都把 batchKey 的
+    //   TTL 续到 30 分钟，只要这 40 个候选里有一个号持续查不通（每次刷新都会整批回写），
+    //   cur 里其它号的成功记录就永远命中、永不过期 → 控制台「650 复核」那两列几天不刷新，
+    //   而且完全静默（数字停在旧值，没有任何报错）。加年龄判定后每号最多 30 分钟必重查一次。
+    const recAge = now - (Number(rec && rec.t) || 0);
+    if (rec && recAge <= ((rec.r != null) ? 1800000 : 300000)) {
       out[c.uid] = { r: rec.r == null ? null : rec.r, p: rec.p == null ? null : rec.p };
       return;
     }
