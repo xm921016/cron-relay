@@ -1266,12 +1266,15 @@ async function live650(ck) {
   if (rate == null) return null;
   return { r: rate, p: dd.recentPlayCount30 == null ? null : (Number(dd.recentPlayCount30) || 0) };
 }
-// 批量复核：KV 缓存 30 分钟（`l650:<北京日期>:<uid>`），命中就不打网易。
+// 批量复核：缓存 30 分钟（`l650:<北京日期>:<uid>`），命中就不打网易。
 // 只缓存成功结果 —— 失败（号被限流/接口超时）不留缓存，下次刷新再试。
+// 2026-11-10：缓存从 KV 搬到 Cache API。候选上限 40 个号、TTL 30 分钟，控制台开着的时候
+//   每半小时就会重写一遍这批键（十几个号），是继 meta:tick/meta:dicts 之后第三笔纯缓存 KV 写。
+//   丢了只是重打一次网易接口（本来就有 5 秒时间预算兜着），不影响任何展示口径。
 async function live650Batch(list) {
   const out = {};
   const keyOf = (c) => 'l650:' + beijingDate() + ':' + String(c.uid);
-  const cached = await Promise.all(list.map(c => POOL.get(keyOf(c)).catch(() => null)));
+  const cached = await Promise.all(list.map(c => caGet(keyOf(c)).catch(() => null)));
   const todo = [];
   list.forEach((c, i) => {
     const v = cached[i];
@@ -1299,11 +1302,11 @@ async function live650Batch(list) {
       const v = await live650(ck);
       if (!v) {
         // 查不通（限流/超时/接口结构变化）：缓存一个 5 分钟的哨兵，别每次刷新都去撞
-        try { await POOL.put(keyOf(c), '{"r":null}', { expirationTtl: 300 }); } catch (e) {}
+        try { await caPut(keyOf(c), '{"r":null}', 300); } catch (e) {}
         return;
       }
       out[c.uid] = v;
-      try { await POOL.put(keyOf(c), JSON.stringify(v), { expirationTtl: 1800 }); } catch (e) {}
+      try { await caPut(keyOf(c), JSON.stringify(v), 1800); } catch (e) {}
     } catch (e) {}
     })),
     new Promise(res => setTimeout(res, 5000)),
