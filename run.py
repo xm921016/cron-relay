@@ -742,16 +742,23 @@ def main():
     # 3) 跨群：拉对端群的歌曲 id（只有 id、不含任何账号信息），与本群歌曲合并成一个歌池。
     #    两个群的 KV 账号池、人数、上限完全独立 —— 这里只共享「听谁的歌」，不合并「谁是谁的号」。
     #    D1 分配模式下，服务端已经把两群的歌一起排进环里，这里直接用分配结果，不再重复拉对端。
+    # 2026-11-11：公益号（pub=1）登记的歌**一条都不能被听** —— 号主原话「公益号只负责听别人的，
+    # 自己的歌不能被听」。服务端 buildPlan 的 songs 已按 !pub 过滤（且 /api/assign 出口又挡了一道），
+    # 这里是客户端第三道闸：任何来源的歌 id（D1 分配、KV 兜底、对端群歌单、混听热歌榜、
+    # 以后的 idle 随机抽样）只要命中 pub_songs，就地剔除，绝不下发播放。
+    pub_songs = {str(e.get("song")) for e in active if e.get("pub") and e.get("song")}
+    if pub_songs:
+        print(f"[slice {slice_idx}] 公益号 {len(pub_songs)} 首登记歌已拉黑：任何路径都不会去听")
     if assigned:
         peer_songs = []
         own_songs = [s for e in active for s in (e.get("plays") or [])]
-        song_pool = sorted(set(own_songs))
+        song_pool = sorted(set(own_songs) - pub_songs)
         print(f"[slice {slice_idx}] 歌池：D1 分配 {len(song_pool)} 首（已含跨群歌曲）")
     else:
         peer_songs = load_peer_songs()
         # 2026-11-01：公益号登记的歌不进歌池（它的号主明确不要自己的歌被听）
         own_songs = [str(e["song"]) for e in active if e.get("song") and not e.get("pub")]
-        song_pool = sorted(set(own_songs) | {s for s in peer_songs if s})
+        song_pool = sorted((set(own_songs) | {s for s in peer_songs if s}) - pub_songs)
         print(f"[slice {slice_idx}] 歌池：本群 {len(set(own_songs))} 首 + 对端 {len(peer_songs)} 首 → 去重后 {len(song_pool)} 首")
 
     # 3.1) 预取所有歌时长（换号重试：单个号的会话受限/请求失败就换下一个，不再静默全空）
@@ -786,7 +793,7 @@ def main():
     # 3.5) 预取混听歌池（云音乐热歌榜，全片共享一份；只听歌池以外的歌）
     hot = []
     if mixed_max > 0 and active:
-        pool_set = set(song_pool)
+        pool_set = set(song_pool) | pub_songs   # 公益号的歌同样不参与混听（2026-11-11）
         for e in active:
             try:
                 hot = [(i, d) for (i, d) in Client(e["ck"]).playlist_tracks(MIX_HOT_PID)
@@ -837,17 +844,20 @@ def main():
         # 4) 组建播放任务：跨群（pid=歌曲id）与混听（pid=热歌榜）合并后随机穿插执行，
         #    让"听群内歌"和"听群外热歌"混在一起，而不是先刷完跨群再补混听。
         #    候选来自整个歌池（含对端群），但一定剔除自己的歌 —— 绝不听自己。
-        cand = [s for s in song_pool if s != mine]
+        cand = [s for s in song_pool if s != mine and s not in pub_songs]
         if acc.get("plays"):
             # D1 分配模式：服务端已算好「这个号今天该听哪几首」（每日轮转、每首歌恰好 p 个听众），
             # 顺序也按 (uid+日期) 打过乱，这里绝不能再随机抽，否则零遗漏的保证会被破坏。
-            picks = [s for s in acc["plays"] if s != mine]
+            picks = [s for s in acc["plays"] if s != mine and s not in pub_songs]
         else:
             picks = random.sample(cand, plays) if len(cand) > plays else cand
         tasks = [(sid, dur_map.get(sid) or 240, sid) for sid in picks]
         if hot:
             n_mix = random.randint(mixed_min, mixed_max)
-            for sid, dur in random.sample(hot, min(len(hot), n_mix)):
+            # 混听也不能把公益号的歌捞回来（热歌榜是群外歌单，pool_set 剔除的是群内歌，
+            # 公益号的歌本来就该彻底不出现在播放列表里）
+            hot_c = [h for h in hot if h[0] not in pub_songs]
+            for sid, dur in random.sample(hot_c, min(len(hot_c), n_mix)):
                 tasks.append((sid, dur or 240, MIX_HOT_PID))
         random.shuffle(tasks)
 

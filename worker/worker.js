@@ -2546,7 +2546,10 @@ async function backfillMeta(){
   //    注意两点：① acc_meta 里「上次失败」的 NULL 占位行也要算待补（NOT EXISTS 会漏，踩过）；
   //             ② 连发太快会被网易按「操作频繁 code=405」限流，每个请求之间必须留间隔。
   try{
-    const rows=await d1All("SELECT DISTINCT a.uid AS uid FROM accounts a LEFT JOIN acc_meta m ON m.uid=a.uid WHERE a.song IS NOT NULL AND a.song<>'' AND (m.uid IS NULL OR m.artist_id IS NULL) LIMIT 20");
+    // 2026-11-11 补第三类待补：artist_id=''（确认非音乐人）但记录超过 7 天的也重检 ——
+    //   有号 11-08 同步时还不是音乐人、11-11 已是（15123972125 实测）：号主后来入驻/转正，
+    //   老的 '' 永远不刷新会让控制台把这种号错标成红「非音乐人」。7 天重检一次，20/15 分钟自动消化。
+    const rows=await d1All("SELECT DISTINCT a.uid AS uid FROM accounts a LEFT JOIN acc_meta m ON m.uid=a.uid WHERE a.song IS NOT NULL AND a.song<>'' AND (m.uid IS NULL OR m.artist_id IS NULL OR (m.artist_id='' AND m.updated_at < datetime('now','-7 days'))) LIMIT 20");
     for(const row of (rows||[])){
       const uid=String(row.uid);
       await sleep(260);
@@ -2707,7 +2710,10 @@ async function d1Upsert(e, opt) {
     // 无脑清空会让刚通知过的号立刻又回到听众环、再失败一次、再发一封邮件。
     'relogin_at=CASE WHEN accounts.ck<>excluded.ck THEN \'\' ELSE COALESCE(accounts.relogin_at,\'\') END',
     [POOL_NAME, uid, String(e.name || ''), String(e.song || ''), String(e.ck || ''), String(e.added || ''),
-     String(e.exp || ''), e.noListen ? 1 : 0, String(e.email || ''), new Date().toISOString(),
+     // 2026-11-11：公益号（pub=1）一律写 'forever'。所有写入口（控制台编辑、/api/d1_sync 回灌、
+     // pruneExpired 到期降级、补号重放）都走这一个漏斗，在这里归一化才能保证「库里不存在
+     // 有到期日的公益号」这个不变量 —— 否则某条路径漏改，第二天到期号会被当成普通号再算一遍。
+     e.pub ? 'forever' : String(e.exp || ''), e.noListen ? 1 : 0, String(e.email || ''), new Date().toISOString(),
      String(e.agent || ''), String(e.plan || ''), e.pub ? 1 : 0,
      String(e.note || ''), e.rb ? 1 : 0, Number(e.rbFrom) || 0, String(e.rbStart || '')]
   );
@@ -5139,10 +5145,20 @@ async function handle(request) {
         if (!rs) return json({ ok: false, message: 'D1 查询失败（本片 CK 补查），请稍后重试' }, 503);
         for (const r of rs) meta[String(r.uid)] = r;
       }
+      // 2026-11-11：公益号（pub=1）的歌一律不得出现在任何号的 plays 里 —— 号主诉求是
+      // 「公益号只负责听别人的，自己的歌不能被听」。buildPlanFrom 的 songs 已经按 !pub 过滤，
+      // 这里再加一道出口闸：只要某个 pub 号的 song 混进了 plays（老计划、KV 兜底、以后谁改错
+      // 过滤条件），就在这一层剔除。这是下发播放任务的唯一出口，挡在这里 = 全链路兜住。
+      // 注意必须把 idle（只收不听 / 失效）也并进来：pub 且 no_listen 的号不进 plans，只在 idle 里。
+      const pubSongs = new Set((plan.plans || []).concat(plan.idle || [])
+        .filter(x => x.pub && x.song).map(x => String(x.song)));
       const pack = x => {
         const m = x.ck ? x : (meta[x.uid] || {});
+        const plays = pubSongs.size
+          ? (x.plays || []).filter(s => !pubSongs.has(String(s)))
+          : (x.plays || []);
         return { uid: x.uid, name: m.name || x.name || '', ck: m.ck || x.ck || '',
-                 email: m.email || x.email || '', song: x.song || '', plays: x.plays || [],
+                 email: m.email || x.email || '', song: x.song || '', plays: plays,
                  // 2026-11-01：公益号标记（make_accounts.py 据此跳过签到/发笔记）
                  pub: x.pub ? 1 : 0 };
       };
@@ -6903,9 +6919,14 @@ async function handle(request) {
       const songs = {};
       for (const r of (songRows || [])) {
         if (!r || r.song == null) continue;
-        let ids = [];
-        try { ids = (JSON.parse(r.artists || '[]') || []).map(x => String((x && x[0] != null) ? x[0] : '')); } catch (e) { ids = []; }
-        songs[String(r.song)] = { n: Number(r.n_artists) || 0, i: ids, f: r.first_artist || '', g: Number(r.gone) ? 1 : 0 };
+        // 2026-11-11：ns = 全部歌手名（原来只给 id 数组和第一艺人名，控制台要对「歌手 vs 音乐人同名」人肉核对没有原料）
+        let ids = [], nms = [];
+        try {
+          const _arr = (JSON.parse(r.artists || '[]') || []);
+          ids = _arr.map(x => String((x && x[0] != null) ? x[0] : ''));
+          nms = _arr.map(x => String((x && x[1]) || ''));
+        } catch (e) { ids = []; nms = []; }
+        songs[String(r.song)] = { n: Number(r.n_artists) || 0, i: ids, ns: nms, f: r.first_artist || '', g: Number(r.gone) ? 1 : 0 };
       }
       const artists = {};
       for (const r of (accRows || [])) {
@@ -7927,8 +7948,19 @@ async function applyEntryEdit(body) {
     // 真正生效的两处：buildPlanFrom 把它登记的歌剔出互听歌环；make_accounts.py 把它排除出签到/笔记。
     if (body.pub !== undefined && body.pub !== null) {
       target.pub = body.pub ? 1 : 0;
-      changes.push(body.pub ? '设为公益号(只帮别人听，自己的歌不再分给别人听、也不签到)'
-                            : '恢复普通号(参加互听+签到)');
+      // 2026-11-11：公益号一律改永久 —— 号主明确说「公益号只负责听别人的，自己的歌不能被听」，
+      // 这种号没有「到期」概念，它的终点是 CK 失效（判死/删号），不是到期日。
+      // 所以设成公益号时无条件把有效期写成 'forever'：即使这一笔同时填了「有效期」也被覆盖
+      // （上面的 exp 分支先执行，这里后执行才有这个效果 —— 顺序别调）。
+      // 反向（改回普通号）**不动 exp**：需要限期就在「有效期」栏重新填，避免一个误点
+      // 让一个付费号白拿永久。响应里会明确提示当前仍是永久。
+      if (target.pub) {
+        target.exp = 'forever';
+        changes.push('设为公益号(只帮别人听，自己的歌不再分给别人听、也不签到)·有效期自动改永久');
+      } else {
+        changes.push('恢复普通号(参加互听+签到)'
+          + (String(target.exp || '') === 'forever' ? '·注意：有效期仍是永久，要限期请在「有效期」栏重填' : ''));
+      }
     }
     // 2026-10-27：客服标签 / 套餐档位（补录、纠错用）。留空=不改，与其它栏口径一致。
     // 注意：改套餐不会自动改有效期（两件事分开），要一起改就把「有效期」也填上。
@@ -8283,7 +8315,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
 /* 手机端（<=860px）把 17 列表格改成卡片流。纯 CSS、零 JS 改动 —— 判定口径与桌面端完全同一份，
    只是换了个呈现方式；桌面端（>860px）一行都不受影响。列名读 td 的 data-l（见 render），
    这里只排显示顺序，顺序同 thead：
-   1# 2池 3账号 4客服 5UID 6歌曲 7时长 8昨日650 9今日650 10较昨日 11近30日播放 12其他任务
+   1# 2池 3账号 4客服 5UID 6歌曲 7歌手 8时长 9昨日650 10今日650 11较昨日 12近30日播放 13笔记任务
    13入池 14有效期 15套餐 16标记 17操作 */
 @media (max-width:860px){
   body{padding:10px 8px}
@@ -8392,12 +8424,12 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <button class="mini gray" id="btnOut">退出</button>
   </div>
   <div class="twrap"><table><thead><tr>
-    <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人">邮箱</th><th>绑定歌曲</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="除 650 播放外的同组小任务（如发布笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">其他<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成">备注</th><th>标记</th><th>操作</th>
+    <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人">邮箱</th><th>绑定歌曲</th><th title="上=该号音乐人昵称（acc_meta），下=登记歌的歌手名（song_meta）。两个名字对上（绿色✓）= 歌挂在自己名下；对不上或不认识（红色✗）= 疑似绑错歌 / 非音乐人。数据由元数据同步回填，没同步到显示「未同步」">歌手 / 音乐人</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="笔记任务（发布图文笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">笔记<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成">备注</th><th>标记</th><th>操作</th>
   </tr></thead><tbody id="tb"></tbody></table></div>
   <details class="deadbox" id="deadBox" hidden><summary>删号记录 / 待复核账号（最近 12 条，来自 D1 dead_log 与 accounts.suspect_at）</summary>
   <div class="muted" style="margin:6px 0 8px">原因：<b>手动删除</b>＝你在控制台/号池工具点的删除；<b>Cookie失效</b>＝播放前验活自动判死；<b>到期清理</b>＝账号有效期到了自动移除。已回池（迁移到另一群或当天重登）的号不算删号。<br>通知：<b>已通知</b>＝确认发出；<b>已回池·不发</b>＝号还在跑；<b>无邮箱·不发</b>＝没登记邮箱；<b>待判·12h</b>＝删后满 12 小时才判定该不该发；<b>自动判死·run.py 发信</b>＝早期记录，发信由播放任务临时触发，发没发事后查不到。</div><div id="deadList"></div></details>
   <details class="deadbox" id="legendBox"><summary><b>标记看不懂 / 数字怎么读？点开这份对照表</b></summary><div class="lgd">
-    <b>一、先认清三个数（别再混）：</b>「650进度」= 音乐人后台的 650 任务完成度，100% 才算做完，是唯一有意义的成绩；「近30日播放量」= 工作台统计的播放次数，刷再多也不直接等于进度；「其他任务」= 网易塞在同一组里的另一个小任务（多半是「发布笔记」），跟播放和 650 一点关系都没有，一列显示「—」也是正常的。
+    <b>一、先认清三个数（别再混）：</b>「650进度」= 音乐人后台的 650 任务完成度，100% 才算做完，是唯一有意义的成绩；「近30日播放量」= 工作台统计的播放次数，刷再多也不直接等于进度；「笔记任务」= 网易塞在同一组里的另一个小任务（发布图文笔记），跟播放和 650 一点关系都没有，一列显示「—」也是正常的。
     <br><b>二、标记对照（按「问题出在哪」分组，越靠上的越该先处理）：</b>
     <table><thead><tr><th>标记</th><th>意思</th><th>要怎么处理</th></tr></thead><tbody>
     <tr><td colspan="3" style="background:#fdf0f0;font-weight:600;color:#a32d2d">A · 歌曲问题 —— 必须改歌，刷多少都不会涨</td></tr>
@@ -8415,7 +8447,8 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <tr><td><span class="badge b-orange">有播放·650为0·卡住</span></td><td>连续 2 天以上 0% 且播放量还在涨，<b>且刚刚实时查过工作台仍是 0%</b>（控制台对这类号自动做一次实时复核，30 分钟内不重复查）。实测「0%」绝大多数是<b>快照采在网易结算之前</b>：同一个号 07:20 快照 0%、11:30 实时已 100%，这类现在会被改标成灰色的「实时已恢复」</td><td>真卡住的（连续 8 天以上、实时也 0%）先让号主去音乐人后台看 650 任务还在不在；<b>后台没有「领取上期奖励 / 开启新一期」这种按钮</b>（卡片上只有「看攻略」，周期按 31 天自动换期），任务真被下掉只能重新报名或换号</td></tr>
     <tr><td><span class="badge b-orange">有播放·650为0</span></td><td>近30日播放已有 <b>650 次以上</b>，但快照里的 650 进度是 0%。<b>多半是这一轮快照早于网易结算</b>（结算窗口实测到 11:30~12:00）；控制台会自动实时复核，实时有进度就改标灰的「实时已恢复」。入池 ≤2 天的新号不标这一类</td><td>观察即可：实时复核仍是 0% 且连续 2 天以上，才升级成「·卡住」</td></tr>
     <tr><td><span class="badge b-gray">实时已恢复</span></td><td>快照里 650 是 0%，但<b>刚刚实时查工作台已经有进度</b>：这一轮快照采在网易结算之前，不是掉量也不是周期问题（同一个号 07:20 快照 0%、11:30 实时 100%）</td><td>不用管。这个标记只在被怀疑「有播放·650为0」的号上出现，30 分钟内不重复查</td></tr>
-    <tr><td><span class="badge b-gray">无650任务</span></td><td>后台没返回 650 任务（不是音乐人 / 没报名该任务 / 歌曲未通过审核）</td><td>要管：让号主去音乐人后台确认</td></tr>
+    <tr><td><span class="badge b-red">非音乐人</span></td><td>账号元数据（acc_meta）已确认该号<b>没有音乐人身份</b>：拿普通用户号登记的歌，播放永远不会计入 650（11-11 批量核查 12 个无650任务号，7 个是这类）。实习期号不会标这个 —— 实习号的音乐人身份是有的</td><td>要管：找买家核实身份 —— 要么换成音乐人号，要么按非音乐人号重新定价。让号主去后台「点开通」解决不了，因为根本没有音乐人身份</td></tr>
+    <tr><td><span class="badge b-gray">无650任务</span></td><td>后台没返回 650 任务。已按账号元数据细分：有音乐人身份的 = <b>任务没开通，多为实习期未转正</b>（官方 90 天实习期里特殊权益开不了，实测实习号维持天数恒为 0、不每天涨）；转正不是纯时间驱动，有号超 90 天仍实习，可能卡在号主侧认证。元数据没同步到的保持通用提示</td><td>用「号体检」工具实时复核（能分辨非音乐人 / 实习期 / 可开通没开通三种根因）。实习期未到 90 天的等转正，超 90 天的催号主上后台查实习状态</td></tr>
     <tr><td><span class="badge b-gray">周期归零</span>（较昨日列 + 标记列）</td><td>昨日 650 已接近满（≥80%）、今天突然 0%，但近30日播放量没塌 —— 这是 <b>650 换新周期</b>，进度从头计，不是掉量。<b>周期按 31 天日历走，不看进度</b>：上期只做到 98% 到期也一样归零重来，没用完的百分比不会带到新一期</td><td>不用管：已不计入「今日下跌」，也不再标成「有播放·650为0」</td></tr>
     <tr><td colspan="3" style="background:#fdf9e6;font-weight:600;color:#8a6d00">D · 进度停滞（还在周期内，只是没动）</td></tr>
     <tr><td><span class="badge b-yellow">今日零增长</span></td><td>650 进度和昨天完全一样（还没到 100%），<b>近30日播放量也刚好持平</b>（不多不少；在跌的那种已单独标成下面的「净增≤0」）。原因基本是 <b>30 天滚动回吐</b>：悬浮说明里会给两个数 —— 该号近两周平均每天净涨多少次（=每天正常应增加的水平）、今天被多少次老播放到期退出抵掉</td><td>先观察 2~3 天，不是每天都一定涨</td></tr>
@@ -8444,7 +8477,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <br>⑤ <b>「播放补了但总量没涨」看「净增≤0」</b>：近30日播放量是 30 天滚动窗口，今天补的播放会被 30 天前的老播放到期退出抵掉，看起来总量持平甚至略降，但播放确实补进去了。偶发一两天正常；连续 3 天以上净增≤0 才说明补的量追不上退的量，要加每号播放次数或换更热的歌。
     <br><b>所以判断号有没有问题，看「今日零增长 / 净增≤0」连续几天 + 「近30日播放量」在涨还是在跌</b>：播放量在跌且 650 也不动 = 今天补的播放被 30 天前老量退出抵消（「净增≤0」，偶发正常）；播放量在涨但 650 一直不动 = 播放被判无效（「650未结算」，连续 3 天以上才查）；650 是 0% 的先把「实时复核」结果看完再动手。
   </div></details>
-  <p style="font-size:12px;color:#888;margin:10px 0 0">数据口径：<b>650进度</b>=音乐人后台 650 任务完成度（近30日滚动，会回吐，100%=达标）；<b>近30日播放量</b>=工作台播放次数（≠有效播放，≠650进度；30 天滚动，今天补的量可能被 30 天前的老量退出抵掉 → 标「净增≤0」）；<b>650 实时复核</b>=对「快照 0% 但近30日播放≥650」的号直接查一次工作台当前进度（KV 缓存 30 分钟，不写回 rate、不动任何其它列）：实时有进度标灰「实时已恢复」，实时仍 0% 才继续标「有播放·650为0」；<b>较昨日</b>=今天快照-昨天快照，前一日无快照显示 —（数据断层，非故障；<b>今晚听歌</b>=按当前号池回放的今晚计划（每号本群歌单首数，已配平；加速档每天每首歌要几个听众，被稀释时标红）；顶部每个统计名的用词与标记列完全一致，搜索框直接搜那个词就能筛出对应行）；昨日≥80% 今日 0% 且播放量没塌的显示为灰色「周期归零」= 650 换新周期不是掉量（已从「今日下跌」剔除）；<b>其他任务</b>=与 650 无关的同组小任务（如发布笔记，按「已发x/4」显示：30 天内发布图文笔记天数≥4，4/4 即完成），显示 — 表示只有 650 一个任务；<b>时长</b>=登记歌曲长度（红=短歌&lt;2:12、黄=长歌&gt;5:36，仅提示，10-22 修完后都能正常计入）；<b>今日进度下的小字</b>=该行快照采集时间（北京时间；凌晨轮次边跑边采，不代表当天最终值，11:40 主采后的数才准）；各标记含义见上方「标记看不懂」对照表。<b>运行状态横条</b>：作业=两仓库最近一次定时轮次（GitHub API，5 分钟缓存）；应跑/实跑=按当前号池对所选日期回放的轮转计划与 runs 表核对（历史日期为近似值）；快照更新=该日快照最后写入时间（北京时间）；今日删号/待复核来自 D1。</p>
+  <p style="font-size:12px;color:#888;margin:10px 0 0">数据口径：<b>650进度</b>=音乐人后台 650 任务完成度（近30日滚动，会回吐，100%=达标）；<b>近30日播放量</b>=工作台播放次数（≠有效播放，≠650进度；30 天滚动，今天补的量可能被 30 天前的老量退出抵掉 → 标「净增≤0」）；<b>650 实时复核</b>=对「快照 0% 但近30日播放≥650」的号直接查一次工作台当前进度（KV 缓存 30 分钟，不写回 rate、不动任何其它列）：实时有进度标灰「实时已恢复」，实时仍 0% 才继续标「有播放·650为0」；<b>较昨日</b>=今天快照-昨天快照，前一日无快照显示 —（数据断层，非故障；<b>今晚听歌</b>=按当前号池回放的今晚计划（每号本群歌单首数，已配平；加速档每天每首歌要几个听众，被稀释时标红）；顶部每个统计名的用词与标记列完全一致，搜索框直接搜那个词就能筛出对应行）；昨日≥80% 今日 0% 且播放量没塌的显示为灰色「周期归零」= 650 换新周期不是掉量（已从「今日下跌」剔除）；<b>笔记任务</b>=与 650 无关的同组小任务（发布图文笔记，按「已发x/4」显示：30 天内发布图文笔记天数≥4，4/4 即完成），显示 — 表示只有 650 一个任务；<b>时长</b>=登记歌曲长度（红=短歌&lt;2:12、黄=长歌&gt;5:36，仅提示，10-22 修完后都能正常计入）；<b>今日进度下的小字</b>=该行快照采集时间（北京时间；凌晨轮次边跑边采，不代表当天最终值，11:40 主采后的数才准）；各标记含义见上方「标记看不懂」对照表。<b>运行状态横条</b>：作业=两仓库最近一次定时轮次（GitHub API，5 分钟缓存）；应跑/实跑=按当前号池对所选日期回放的轮转计划与 runs 表核对（历史日期为近似值）；快照更新=该日快照最后写入时间（北京时间）；今日删号/待复核来自 D1。</p>
 </div>
 <div class="modal" id="modal" hidden><div class="mbox">
   <h3 id="mTitle">编辑账号</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="mSub"></p>
@@ -8808,7 +8841,7 @@ var MIS_NAME={mission_code_musician_notebook_publish:'发布笔记'};  // 网易
 // 计数型任务在这里登记目标值，页面渲染成 x/4；没登记的目标值仍按百分比显示（保持旧行为）。
 var MIS_TOTAL={mission_code_musician_notebook_publish:4};   // 网易任务目标值（条/天，非百分比）
 function misName(k){if(MIS_NAME[k])return MIS_NAME[k];return String(k).replace(/^mission_code_/,'').replace(/_v\\d+$/,'').replace(/_/g,' ');}
-// 「其他任务」列：650 主任务已在进度列显示，这里只列其余小任务并译成中文；没有就显示 —
+// 「笔记任务」列：650 主任务已在进度列显示，这里只列其余小任务（当前就是发布笔记）并译成中文；没有就显示 —
 function otherMis(a){
   if(!a||!a.mis)return '<span class="flat">—</span>';
   var h='';
@@ -8907,7 +8940,18 @@ function computeMarks(r, susSet){
   else if(!e.song)add('b-gray','公益号','没有登记歌曲的公益号：只帮别人听歌，没有 650 进度，属正常');
   if(!e.email)add('b-yellow','未绑邮箱','没填通知邮箱，号失效时通知不到人；不影响播放');
   if(e.noListen)add('b-gray','只收不听','号主自己关了互听：只收别人的播放，不给别人播');
-  if(!isPub&&a&&a.rate==null&&e.song&&!(e.added&&e.added>=DATA.date))add('b-gray','无650任务','后台没返回 650 任务：可能不是音乐人、没报名该任务或歌曲未过审，让号主去音乐人后台确认');
+  // 2026-11-11：按 acc_meta 细分根因（11-11 批量实时核查 12 个「无650任务」号的结论落进标记）——
+  //   artist_id=''（acc_meta 已确认该号不是音乐人）→ 单独标「非音乐人」：拿普通用户号登记的歌，
+  //   播放永远不会计入 650，找买家核实身份，不是让号主去后台点开通能解决的；
+  //   artist_id 有值（音乐人身份在）→ 「无650任务」文案改为实习期/未开通口径：官方 90 天实习期
+  //   转正前开不了特殊权益（实测实习号 maintainDays 恒 0），转正后开通进度才从 0 开始爬；
+  //   acc_meta 没有该号记录 → 保持原通用文案（等元数据同步）。
+  if(!isPub&&a&&a.rate==null&&e.song&&!(e.added&&e.added>=DATA.date)){
+    var _am=DATA.artists?DATA.artists[String(e.uid)]:null;
+    if(_am&&_am[0]==='')add('b-red','非音乐人','acc_meta 已确认该账号没有音乐人身份：拿普通用户号登记的歌，播放永远不会计入 650。不是号主去后台点开通能解决的 —— 找买家核实身份：要么换成音乐人号，要么按非音乐人号重新定价（11-11 实测 12 个无650任务号里 7 个是这类）');
+    else if(_am&&_am[0])add('b-gray','无650任务','后台没返回 650 任务：该号音乐人身份已确认（'+(_am[1]||'音乐人')+'），但任务没开通 —— 多为实习期未转正（官方 90 天，实习期里特殊权益开不了，实测实习号维持天数恒为 0），转正后在音乐人后台开通，进度才从 0 开始爬；也可能卡在号主侧认证（有号超 90 天仍未转正）。用「号体检」工具实时复核 canOpen/状态确认根因');
+    else add('b-gray','无650任务','后台没返回 650 任务：可能不是音乐人、没报名该任务或歌曲未过审，让号主去音乐人后台确认（账号元数据还没同步，用「号体检」工具实时复核可分辨是不是音乐人）');
+  }
   // C 任务周期
   // 2026-10-25 补：入池 ≤2 天的新号即使 0% 也是正常爬坡（当天登记、次日才被听），
   // 不能按「周期已结束」报，否则新号全被误标成售后问题 → 新号前 1~2 天不打标记，只在顶部「今日入池」计数。
@@ -8991,6 +9035,18 @@ function computeMarks(r, susSet){
 // 2026-10-27 21:05：日期框改成筛入池日期后，650 两列固定「昨天 vs 今天」，名字不再变。
 // 保留这个函数只为把真实日期写进表头 title（鼠标悬停能确认看的是哪两天）。
 var LB_A='昨日650',LB_B='今日650',LB_D='较昨日';
+// 2026-11-11：「歌手 / 音乐人」列的数据组装。上行 = 该号音乐人昵称（acc_meta， artist_id='' 为已确认非音乐人），
+// 下行 = 登记歌的歌手名（song_meta.ns 全部歌手 / 老数据退回第一艺人名 f）。两个名字对上给绿 ✓，对不上给红 ✗，
+// 让「歌挂没挂在自己名下」不用点开歌就能人眼核对。r.ai 同时喂给搜索框（搜歌手名 / 音乐人名都能命中行）。
+function artistInfo(e){
+  var am=(DATA.artists)?DATA.artists[String(e.uid)]:null;
+  var sm=(e.song&&DATA.songs)?DATA.songs[String(e.song)]:null;
+  var mus=(am&&am[0])?(am[1]||''):'';
+  var sns='';
+  if(sm){ if(sm.g){sns='查无此歌';} else {sns=(sm.ns&&sm.ns.length)?sm.ns.join(' / '):(sm.f||'');} }
+  var hit=!!(mus&&sm&&sm.ns&&sm.ns.length&&('\u0001'+sm.ns.join('\u0001')+'\u0001').indexOf('\u0001'+mus+'\u0001')>=0);
+  return { am:am, sm:sm, mus:mus, sns:sns, hit:hit };
+}
 function rangeLabels(){
   var a=(DATA&&DATA.prevDate)||'',b=(DATA&&DATA.date)||'';
   var thA=$('thA'),thB=$('thB'),thD=$('thD');
@@ -9005,7 +9061,7 @@ function render(){
   renderRunbar();
   rangeLabels();                 // 必须在 buildRows 之前：行内 data-l 列名要用 LB_*
   var all=buildRows();
-  all.forEach(function(r){var m=computeMarks(r,susSet);r.markHtml=m.html;r.markText=m.text;});
+  all.forEach(function(r){var m=computeMarks(r,susSet);r.markHtml=m.html;r.markText=m.text;r.ai=artistInfo(r.e);});
   var q=($('q').value||'').trim().toLowerCase();
   // 2026-10-27 21:05：入池日期范围（纯前端过滤，不重新请求接口）。
   // added 形如 2026-10-27，截前 10 位后按字符串比大小（yyyy-mm-dd 正好可比）。
@@ -9026,7 +9082,8 @@ function render(){
     if(!q)return true;
     var e=r.e;
     // 2026-10-25：搜索也能命中标记文本（如搜「绑错歌」「共创」「未开刷」直接筛出同类号）
-    return ((e.name||'')+' '+(e.email||'')+' '+(e.uid||'')+' '+(e.song||'')+' '+(e.agent||'')+' '+(e.plan||'')+' '+r.markText).toLowerCase().indexOf(q)>=0;
+    // 2026-11-11：追加歌手名 / 音乐人昵称 —— 客服拿艺人名来核对时直接搜名字就能定位行
+    return ((e.name||'')+' '+(e.email||'')+' '+(e.uid||'')+' '+(e.song||'')+' '+(e.agent||'')+' '+(e.plan||'')+' '+r.markText+' '+((r.ai&&r.ai.mus)||'')+' '+((r.ai&&r.ai.sns)||'')).toLowerCase().indexOf(q)>=0;
   });
   // 2026-11-05：统计卡筛选（点一下卡片 = 按这一项筛表格）。
   // 必须分两层：baseRows = 除统计卡以外的所有筛选，stats 的数字全部按 baseRows 算，
@@ -9065,6 +9122,8 @@ function render(){
   var stuck3=0,stuck7=0;
   baseRows.forEach(function(r){var m=/连续([0-9]+)天未涨/.exec(r.markText||'');if(m){var n=+m[1];if(n>=3)stuck3++;if(n>=7)stuck7++;}});
   var noTask=cntTxt('无650任务');
+  // 2026-11-11：非音乐人单独计数（acc_meta 确认 artist_id='' 的号，标记文本独立，不再混进无650任务）
+  var noMus=cntTxt('非音乐人');
   // 「有播放·650为0」和它的升级版「有播放·650为0·卡住」现在是同一个前缀（2026-10-26 改名），
   // 一次 cntTxt 就两类全算，搜索框搜「有播放」也两类全中，数字和搜索结果终于对得上。
   var played0=cntTxt('有播放·650为0');
@@ -9094,7 +9153,8 @@ function render(){
    +statCard('近30日净增≤0',netLoss,'净增≤0',{warn:true,title:'近30日播放量今天没涨或略降、650 进度也没涨：今天补的播放被 30 天前的老播放到期退出抵掉了（30 天滚动窗口的正常现象），不是播放没算进去。只统计两边快照采集时刻相差 3 小时以内的号，避免拿今早的数和昨晚的数硬比'})
    +statCard('650未结算',unsettled,'650未结算',{title:'650 进度没动但近30日播放量在涨：播放已入账，网易分批结算未滚到 650（入账窗口实测持续到 11:30~12:00），停 1~2 天属正常，不算真停滞'})
    +statCard('__stuck3',stuck3,'3天+未涨',{warn:true,title:'连续 ≥3 天 650 进度没涨（已排除已满 100%、周期归零、歌曲有问题的号）'+(stuck7?'，其中 ≥7 天 '+stuck7+' 个':'')+'。先看「近30日播放量」：在跌=30天滚动窗口老播放退出（做过满 100% 的号常见，属自然衰减）；在涨却不动=播放被判无效'})
-   +statCard('无650任务',noTask,'无650任务',{warn:true,color:'#b85c00',title:'后台没返回 650 任务：可能不是音乐人、没报名该任务或歌曲未过审 —— 这类号刷再多也不会涨，必须让号主去音乐人后台确认'})
+   +statCard('无650任务',noTask,'无650任务',{warn:true,color:'#b85c00',title:'后台没返回 650 任务：多为实习期未转正（官方 90 天，实习期里特殊权益开不了），也可能是转正后没去开通 —— 用「号体检」工具实时复核根因。非音乐人的号单独算在「非音乐人」卡里，不重复计入这张'})
+   +statCard('非音乐人',noMus,'非音乐人',{warn:true,color:'#a32d2d',title:'账号元数据已确认没有音乐人身份：拿普通用户号登记的歌，播放永远不会计入 650。找买家核实身份：换音乐人号或按非音乐人号重新定价'})
    +statCard('有播放·650为0',played0,'有播放·650为0',{warn:true,title:'近30日播放已有 650 次以上，但快照里的 650 进度是 0%：多半是这一轮快照采在网易结算之前（结算窗口到 11:30~12:00）。控制台会对这批号实时复核一次：实时有进度就不计入本数（改标「实时已恢复」'+(liveOk?'，本次 '+liveOk+' 个':'')+'），实时仍 0% 才计入。带「·卡住」后缀的是已连续 2 天以上 0%'})
    +statCard('歌曲无效',svcWrong,'歌曲无效',{warn:true,color:'#a32d2d',title:'歌曲无效 = 绑错歌（歌的作者里没有他）或 查无此歌（已下架/删除）：刷多少都不会涨，必须改绑'})
    +statCard('共创歌曲',svcCoop,'共创歌曲',{warn:true,color:'#b85c00',title:'共创歌曲 = 多人合唱：播放会被分摊给其他艺人，非主艺的号实测恒定 0%'})
@@ -9165,6 +9225,23 @@ function render(){
         plCell+='<span class="badge b-yellow" style="margin-left:4px" title="套餐记的是「'+esc(e.plan)+'」（'+(_pd?(_pd+' 天'):'永久')+'），但按入池日算有效期实际是 '+(_ad?(_ad+' 天'):'永久')+'。两个字段互相独立：套餐只影响统计口径，卡时长的是有效期；改一边不会自动改另一边。">≠</span>';
       }
     }
+    // 2026-11-11：歌手 / 音乐人列。上行音乐人昵称、下行歌的歌手名；同名绿✓、异名红✗、
+    // 非音乐人红标、元数据没同步灰字。只读展示不改任何数据 —— 真正的绑错判定仍走 A 组标记（按 artist id），
+    // 这里的人眼核对只是辅助：名字对上但 id 对不上（重名艺人）以 A 组标记为准。
+    var ai=r.ai||artistInfo(e);
+    var artCell='';
+    if(ai.am&&ai.am[0]===''){
+      artCell='<span class="badge b-red" title="账号元数据已确认该号没有音乐人身份：拿普通用户号登记的歌，播放永远不会计入 650">非音乐人</span>';
+    }else{
+      var _same=(ai.hit?'<span class="badge b-green" style="margin-left:4px" title="歌的歌手名里有该号的音乐人昵称：歌大概率挂在自己名下（真伪以「绑错歌」标记为准，那边按 artist id 判）">✓</span>':'');
+      if(!ai.mus&&!ai.sns){artCell='<span style="color:#bbb" title="账号/歌曲元数据还没同步到（新号等元数据回填，或手动跑 tmp/sync_song_meta.py）">未同步</span>';}
+      else{
+        var _tip='音乐人昵称：'+(ai.mus||'未同步')+'\\n歌的歌手：'+(ai.sns||'未同步')+'（'+(e.song||'')+'）';
+        artCell='<div title="'+esc(_tip)+'" style="line-height:1.3"><b>'+(ai.mus?esc(ai.mus):'<span style="color:#bbb">音乐人未同步</span>')+'</b>'
+          +_same
+          +'<div class="snap-at">'+(ai.sns?esc(ai.sns):'<span style="color:#bbb">歌手未同步</span>')+'</div></div>';
+      }
+    }
     var opCell=(ROLE==='full')
       ? '<button class="mini" style="padding:4px 10px;font-size:12px" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'">编辑</button>'
       : '<span style="color:#c9ced6;font-size:12px">只读</span>';
@@ -9182,12 +9259,13 @@ function render(){
       // 2026-11-02：新增邮箱列（数据来自 /api/console/data 的 entries[].email，dz 池走对穿同样带）
       +'<td class="mail" data-l="邮箱">'+(e.email?esc(e.email):'<span style="color:#bbb">—</span>')+'</td>'
       +'<td class="num" data-l="歌曲">'+song+'</td>'
+      +'<td data-l="歌手">'+artCell+'</td>'
       +'<td data-l="时长">'+durCell+'</td>'
       +'<td class="num" data-l="'+LB_A+'">'+ratePrev+'</td>'
       +'<td class="num" data-l="'+LB_B+'" style="font-weight:600">'+rateNow+(a&&a.at?'<div class="snap-at">采于 '+bjTime(a.at)+'</div>':'')+'</td>'
       +'<td data-l="'+LB_D+'">'+dCell+'</td>'
       +'<td class="num" data-l="近30日播放">'+(a&&a.rpc30!=null?a.rpc30:'—')+'</td>'
-      +'<td data-l="其他任务">'+misCell+'</td>'
+      +'<td data-l="笔记任务">'+misCell+'</td>'
       +'<td class="num" data-l="入池">'+fmtAdded(e.added)+'</td>'
       +'<td class="num" data-l="有效期">'+esc(e.exp||'永久')+'</td>'
       +'<td data-l="套餐">'+plCell+'</td>'
@@ -9195,7 +9273,7 @@ function render(){
       +'<td>'+(marks||'<span style="color:#bbb">正常</span>')+'</td>'
       +'<td>'+opCell+'</td></tr>';
   });
-  $('tb').innerHTML=h||'<tr><td colspan="19" style="text-align:center;color:#999;padding:20px">没有匹配的账号</td></tr>';
+  $('tb').innerHTML=h||'<tr><td colspan="20" style="text-align:center;color:#999;padding:20px">没有匹配的账号</td></tr>';
 }
 // 点顶部的套餐卡片 = 直接按这个套餐筛选（再点一次取消）
 function pickPlan(label){
