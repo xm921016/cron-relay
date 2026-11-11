@@ -5823,6 +5823,24 @@ async function handle(request) {
       if (stq === 'unused') { w.push("state='unused' AND exp_at > ?"); ps.push(nowIso); }
       else if (stq === 'expired') { w.push("state='unused' AND exp_at <= ?"); ps.push(nowIso); }
       else if (stq) { w.push('state=?'); ps.push(stq); }
+      /* 2026-11-11：客服查询（手机版 APK 用）—— q 支持三种：
+         ① 整条链接（自动截 /r/ 后面的编码）② 编码本身 ③ 客户手机号。
+         编码走主键 token=?；手机号走 phone=?（reg_tokens 没有 phone 索引，但表就几千行、
+         客服手动查询频率很低，全扫可接受，且是单条件不踩 OR 毁索引的坑）。
+         判定顺序：先试 /r/ 编码和裸编码；纯数字（6~15 位）当手机号；都不像 → 明确报错不猜。 */
+      const q2 = String(b2.q || '').trim();
+      if (q2) {
+        const m2 = q2.match(/\/r\/([A-Za-z0-9]{4,16})/i);
+        const code2 = m2 ? m2[1] : (/^[A-Za-z0-9]{4,16}$/.test(q2) ? q2 : '');
+        const ph2 = q2.replace(/[^0-9]/g, '');
+        if (code2 && !/^\d{6,15}$/.test(code2)) {
+          w.push('token=?'); ps.push(regNormCode(code2));
+        } else if (/^\d{6,15}$/.test(ph2)) {
+          w.push('phone=?'); ps.push(ph2);
+        } else {
+          return json({ ok: false, message: '认不出要查的内容：粘登记链接、填 8 位编码、或填客户手机号' }, 400);
+        }
+      }
       const lim = Math.max(1, Math.min(300, Number(b2.limit) || 80));
       const rows = await d1All(
         'SELECT token,agent,plan,days,note,state,ctime,exp_at,used_at,uid,uname,phone,kind,fix_exp,fix_ref,fix_name FROM reg_tokens' +
