@@ -8548,7 +8548,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <div class="row2"><button id="rgGo">生成链接</button><button class="gray" id="rgClose">关闭</button></div>
   <div class="msg" id="rgm"></div>
   <div id="rgOut"></div>
-  <div style="display:flex;gap:8px;align-items:center;margin:16px 0 6px">
+  <div style="display:flex;gap:8px;align-items:center;margin:16px 0 6px;flex-wrap:wrap">
     <h4 style="margin:0;font-size:13px">最近生成</h4>
     <!-- 2026-11-10：原来只有「未使用/已使用/已作废」看起来像没有过期这一档。
          已过期是算出来的（state 仍是 unused、exp_at 过了），服务端已支持筛选。 -->
@@ -8559,6 +8559,12 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
       <option value="used">已使用</option>
       <option value="void">已作废</option>
     </select>
+    <!-- 2026-11-11：链接查询（与 APK / EXE 同一套 q 参数）。粘整条链接、填 8 位编码、
+         或填客户手机号都认；查询是服务端真查（编码走主键、手机号走 phone 条件），
+         不是在这 25 条里过滤，老链接也查得到。 -->
+    <input id="rgQ" placeholder="查询：粘链接 / 编码 / 客户手机号" style="flex:1;min-width:190px;font-size:12px;padding:5px 8px;border:1px solid #ddd;border-radius:6px">
+    <button class="mini" id="rgQBt" style="margin-top:0">查询</button>
+    <button class="mini gray" id="rgQAll" style="margin-top:0">显示全部</button>
   </div>
   <div id="rgList"></div>
 </div></div>
@@ -9840,14 +9846,25 @@ $('rgGo').onclick=function(){
     rgLoad();
   }).catch(function(){ $('rgGo').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
 };
+function rgCp(url){
+  /* 点编码复制整条链接；剪贴板 API 只在 https 下有，失败就弹框让用户手动复制 */
+  if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(url); }
+  else{ window.prompt('完整链接（手动复制）：', url); }
+}
 function rgLoad(){
   var t=rgTok();
   var stv=($('rgState')&&$('rgState').value)||'';
-  api('/api/regtoken_list',{user:t.user,pass:t.pass,limit:(stv?80:25),state:stv}).then(function(r){
+  var qv=(($('rgQ')&&$('rgQ').value)||'').trim();
+  /* 2026-11-11：查询时忽略状态筛选（与 EXE 同口径）——不然状态框停在「已使用」，
+     查一条还没用的链接会被滤掉，让人误以为客户没登记。 */
+  var body={user:t.user,pass:t.pass,limit:((qv||stv)?80:25)};
+  if(qv){ body.q=qv; } else if(stv){ body.state=stv; }
+  $('rgList').innerHTML='<div style="color:#999;font-size:12px;padding:6px 0">读取中…</div>';
+  api('/api/regtoken_list',body).then(function(r){
     if(!(r.ok&&r.d&&r.d.ok)){ $('rgList').innerHTML='<div style="color:#b06a00;font-size:12px">读取失败：'+esc((r.d&&r.d.message)||'')+'</div>'; return; }
     var rows=r.d.rows||[];
-    if(!rows.length){ $('rgList').innerHTML='<div style="color:#999;font-size:12px">'+(stv?'这个状态下没有链接。':'还没有生成过链接。')+'</div>'; return; }
-    var h='<div class="twrap" style="max-height:250px;overflow:auto"><table style="font-size:12px"><thead><tr><th>类型</th><th>客服</th><th>套餐</th><th>状态</th><th>生成时间</th><th>备注</th><th>操作</th></tr></thead><tbody>';
+    if(!rows.length){ $('rgList').innerHTML='<div style="color:#999;font-size:12px">'+(qv?'没查到。换客户手机号、或把整条链接粘进来再试（只填 8 位编码也行）。':(stv?'这个状态下没有链接。':'还没有生成过链接。'))+'</div>'; return; }
+    var h='<div class="twrap" style="max-height:250px;overflow:auto"><table style="font-size:12px"><thead><tr><th>类型</th><th>客服</th><th>套餐</th><th>状态</th><th title="点一下复制完整链接">编码</th><th>买家</th><th>生成时间</th><th>登记时间</th><th>备注</th><th>操作</th></tr></thead><tbody>';
     rows.forEach(function(x){
       var st=String(x.state||'unused');
       var stn=st==='unused'?'未使用':(st==='used'?'已使用':(st==='void'?'已作废':(st==='expired'?'已过期':'—')));
@@ -9855,14 +9872,23 @@ function rgLoad(){
       /* 补登/续费的实际有效期来自原单，不来自套餐 —— 直接写原单到期日，
          比在套餐列里显示一个空值有用。 */
       var pl=(kn!=='new'&&x.fix_exp)?('原单到 '+esc(x.fix_exp)):esc(x.plan||'—');
+      var code=esc(x.token||'');
+      var link=location.origin+'/r/'+code;
       h+='<tr><td>'+rgKindName(kn)+'</td><td>'+esc(x.agent||'')+'</td><td>'+pl+'</td>'
         +'<td>'+(st==='unused'?'<b>'+stn+'</b>':('expired'===st?'<span style="color:#b06a00">'+stn+'</span>':stn))+'</td>'
+        +'<td><span data-cp="'+link+'" title="点击复制完整链接" style="cursor:pointer;font-family:ui-monospace,Consolas,monospace;color:#3b6d11;text-decoration:underline dotted">'+code+'</span></td>'
+        +'<td>'+esc(x.phone||x.uname||'—')+'</td>'
         +'<td>'+esc(bjTime(x.ctime))+'</td>'
+        +'<td>'+(x.used_at?esc(bjTime(x.used_at)):'—')+'</td>'
         +'<td>'+esc(x.note||'')+'</td>'
         +'<td>'+((st==='unused'||st==='expired')?('<button class="mini gray" data-void="'+esc(x.token||'')+'">作废</button>'):'—')+'</td></tr>';
     });
     h+='</tbody></table></div>';
+    if(qv){ h='<div style="font-size:11.5px;color:#666;margin:0 0 5px">查询「'+esc(qv)+'」：'+rows.length+' 条（点「显示全部」回最近列表）</div>'+h; }
     $('rgList').innerHTML=h;
+    Array.prototype.forEach.call($('rgList').querySelectorAll('[data-cp]'),function(el){
+      el.onclick=function(){ rgCp(el.getAttribute('data-cp')); };
+    });
     Array.prototype.forEach.call($('rgList').querySelectorAll('[data-void]'),function(b){
       b.onclick=function(){
         var code=b.getAttribute('data-void');
@@ -9873,8 +9899,12 @@ function rgLoad(){
         }).catch(function(){ b.disabled=false; alert('网络错误'); });
       };
     });
-  }).catch(function(){});
+  }).catch(function(){ $('rgList').innerHTML='<div style="color:#b06a00;font-size:12px">网络错误，请重试</div>'; });
 }
+/* 2026-11-11：链接查询三个入口 —— 点「查询」、框里按回车、「显示全部」清条件回最近列表 */
+$('rgQBt').onclick=function(){ rgLoad(); };
+$('rgQAll').onclick=function(){ if($('rgQ'))$('rgQ').value=''; if($('rgState'))$('rgState').value=''; rgLoad(); };
+if($('rgQ')){ $('rgQ').onkeydown=function(e){ if((e.key||e.keyCode)===13||e.key==='Enter'){ rgLoad(); } }; }
 $('btnCfg').onclick=function(){
   var c=(DATA&&DATA.cfg)||{agents:[],plans:[]};
   // 2026-11-06：名单框支持「客服名|群号」；有群号的客服带竖线展示
