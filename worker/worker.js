@@ -5833,18 +5833,32 @@ async function handle(request) {
          ① 整条链接（自动截 /r/ 后面的编码）② 编码本身 ③ 客户手机号。
          编码走主键 token=?；手机号走 phone=?（reg_tokens 没有 phone 索引，但表就几千行、
          客服手动查询频率很低，全扫可接受，且是单条件不踩 OR 毁索引的坑）。
-         判定顺序：先试 /r/ 编码和裸编码；纯数字（6~15 位）当手机号；都不像 → 明确报错不猜。 */
+         判定顺序：先试 /r/ 编码和裸编码；纯数字（6~15 位）当手机号；都不像 → 明确报错不猜。
+
+         2026-11-11 晚改：客服反馈「必须输完整链接或完整 8 位编码太难用」⇒ 改模糊匹配，
+         只要 3 位以上片段就行（编码 /r/ 后的、手机号的任意几位都认）。
+         - 编码：token LIKE '%片段%'（库内 token 已是 regNormCode 规范化的大写，输入也先规范化）
+         - 手机号：phone LIKE '%片段%'，同时并一条 token LIKE（纯数字片段也算编码片段）
+         LIKE 走不了索引，但 reg_tokens 只有几千行、客服手点一次，代价和原来的 phone=? 全扫一个量级；
+         代价是太短的片段会一次捞回几十条无关记录，反而更难找，所以 <3 位直接拒绝并说清楚。 */
       const q2 = String(b2.q || '').trim();
       if (q2) {
-        const m2 = q2.match(/\/r\/([A-Za-z0-9]{4,16})/i);
-        const code2 = m2 ? m2[1] : (/^[A-Za-z0-9]{4,16}$/.test(q2) ? q2 : '');
-        const ph2 = q2.replace(/[^0-9]/g, '');
-        if (code2 && !/^\d{6,15}$/.test(code2)) {
-          w.push('token=?'); ps.push(regNormCode(code2));
-        } else if (/^\d{6,15}$/.test(ph2)) {
-          w.push('phone=?'); ps.push(ph2);
+        const m2 = q2.match(/\/r\/([A-Za-z0-9]+)/i);
+        const raw2 = m2 ? m2[1] : q2;
+        const alnum2 = raw2.replace(/[^A-Za-z0-9]/g, '');
+        const dig2 = q2.replace(/[^0-9]/g, '');
+        const onlyDigits = /^[0-9\s\-]+$/.test(q2);
+        if (!alnum2) {
+          return json({ ok: false, message: '认不出要查的内容：粘登记链接、填编码的一段、或填客户手机号的几位' }, 400);
+        }
+        if (alnum2.length < 3) {
+          return json({ ok: false, message: '太短了：编码或手机号至少填 3 位，太短会查出一堆无关链接' }, 400);
+        }
+        if (onlyDigits) {
+          const like2 = '%' + dig2 + '%';
+          w.push('(phone LIKE ? OR token LIKE ?)'); ps.push(like2, like2);
         } else {
-          return json({ ok: false, message: '认不出要查的内容：粘登记链接、填 8 位编码、或填客户手机号' }, 400);
+          w.push('token LIKE ?'); ps.push('%' + regNormCode(alnum2) + '%');
         }
       }
       const lim = Math.max(1, Math.min(300, Number(b2.limit) || 80));
@@ -8587,7 +8601,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <!-- 2026-11-11：链接查询（与 APK / EXE 同一套 q 参数）。粘整条链接、填 8 位编码、
          或填客户手机号都认；查询是服务端真查（编码走主键、手机号走 phone 条件），
          不是在这 25 条里过滤，老链接也查得到。 -->
-    <input id="rgQ" placeholder="查询：粘链接 / 编码 / 客户手机号" style="flex:1;min-width:190px;font-size:12px;padding:5px 8px;border:1px solid #ddd;border-radius:6px">
+    <input id="rgQ" placeholder="查询：粘链接 / 编码或手机号的任意几位（≥3 位）" style="flex:1;min-width:190px;font-size:12px;padding:5px 8px;border:1px solid #ddd;border-radius:6px">
     <button class="mini" id="rgQBt" style="margin-top:0">查询</button>
     <button class="mini gray" id="rgQAll" style="margin-top:0">显示全部</button>
   </div>
