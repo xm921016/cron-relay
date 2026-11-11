@@ -8424,7 +8424,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <button class="mini gray" id="btnOut">退出</button>
   </div>
   <div class="twrap"><table><thead><tr>
-    <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人">邮箱</th><th>绑定歌曲</th><th title="上=该号音乐人昵称（acc_meta），下=登记歌的歌手名（song_meta）。两个名字对上（绿色✓）= 歌挂在自己名下；对不上或不认识（红色✗）= 疑似绑错歌 / 非音乐人。数据由元数据同步回填，没同步到显示「未同步」">歌手 / 音乐人</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="笔记任务（发布图文笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">笔记<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成">备注</th><th>标记</th><th>操作</th>
+    <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人">邮箱</th><th>绑定歌曲</th><th title="该号自己的音乐人昵称（acc_meta 元数据回填；没同步到显示 —）。2026-11-11 起不再显示歌的歌手列表与 ✓/✗（共创人太多把行撑太高），绑错歌判定走标记列">音乐人</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="笔记任务（发布图文笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">笔记<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成">备注</th><th>标记</th><th>操作</th>
   </tr></thead><tbody id="tb"></tbody></table></div>
   <details class="deadbox" id="deadBox" hidden><summary>删号记录 / 待复核账号（最近 12 条，来自 D1 dead_log 与 accounts.suspect_at）</summary>
   <div class="muted" style="margin:6px 0 8px">原因：<b>手动删除</b>＝你在控制台/号池工具点的删除；<b>Cookie失效</b>＝播放前验活自动判死；<b>到期清理</b>＝账号有效期到了自动移除。已回池（迁移到另一群或当天重登）的号不算删号。<br>通知：<b>已通知</b>＝确认发出；<b>已回池·不发</b>＝号还在跑；<b>无邮箱·不发</b>＝没登记邮箱；<b>待判·12h</b>＝删后满 12 小时才判定该不该发；<b>自动判死·run.py 发信</b>＝早期记录，发信由播放任务临时触发，发没发事后查不到。</div><div id="deadList"></div></details>
@@ -9035,9 +9035,8 @@ function computeMarks(r, susSet){
 // 2026-10-27 21:05：日期框改成筛入池日期后，650 两列固定「昨天 vs 今天」，名字不再变。
 // 保留这个函数只为把真实日期写进表头 title（鼠标悬停能确认看的是哪两天）。
 var LB_A='昨日650',LB_B='今日650',LB_D='较昨日';
-// 2026-11-11：「歌手 / 音乐人」列的数据组装。上行 = 该号音乐人昵称（acc_meta， artist_id='' 为已确认非音乐人），
-// 下行 = 登记歌的歌手名（song_meta.ns 全部歌手 / 老数据退回第一艺人名 f）。两个名字对上给绿 ✓，对不上给红 ✗，
-// 让「歌挂没挂在自己名下」不用点开歌就能人眼核对。r.ai 同时喂给搜索框（搜歌手名 / 音乐人名都能命中行）。
+// 2026-11-11：「歌手 / 音乐人」列的数据组装。mus = 该号音乐人昵称（acc_meta，artist_id='' 为已确认非音乐人）。
+// 当晚简化：sns/hit（歌的歌手列表、同名比对）不再上屏 —— 共创人太多把行撑太高；保留计算只为搜索框命中（搜歌手名/音乐人名）。
 function artistInfo(e){
   var am=(DATA.artists)?DATA.artists[String(e.uid)]:null;
   var sm=(e.song&&DATA.songs)?DATA.songs[String(e.song)]:null;
@@ -9225,23 +9224,14 @@ function render(){
         plCell+='<span class="badge b-yellow" style="margin-left:4px" title="套餐记的是「'+esc(e.plan)+'」（'+(_pd?(_pd+' 天'):'永久')+'），但按入池日算有效期实际是 '+(_ad?(_ad+' 天'):'永久')+'。两个字段互相独立：套餐只影响统计口径，卡时长的是有效期；改一边不会自动改另一边。">≠</span>';
       }
     }
-    // 2026-11-11：歌手 / 音乐人列。上行音乐人昵称、下行歌的歌手名；同名绿✓、异名红✗、
-    // 非音乐人红标、元数据没同步灰字。只读展示不改任何数据 —— 真正的绑错判定仍走 A 组标记（按 artist id），
-    // 这里的人眼核对只是辅助：名字对上但 id 对不上（重名艺人）以 A 组标记为准。
+    // 2026-11-11（当晚简化）：只显示该号自己的音乐人昵称，一行、不换行。
+    // 不再显示歌的歌手列表（共创人太多把行撑得很高）、不再显示 ✓/✗ 与「非音乐人/未同步」徽标
+    // —— 非音乐人/绑错歌判定都在右侧「标记」列（按 artist id 判，比人眼核对名字可靠）。
+    // artistInfo 仍保留：mus 喂给搜索框（搜音乐人名能命中行）。
     var ai=r.ai||artistInfo(e);
-    var artCell='';
-    if(ai.am&&ai.am[0]===''){
-      artCell='<span class="badge b-red" title="账号元数据已确认该号没有音乐人身份：拿普通用户号登记的歌，播放永远不会计入 650">非音乐人</span>';
-    }else{
-      var _same=(ai.hit?'<span class="badge b-green" style="margin-left:4px" title="歌的歌手名里有该号的音乐人昵称：歌大概率挂在自己名下（真伪以「绑错歌」标记为准，那边按 artist id 判）">✓</span>':'');
-      if(!ai.mus&&!ai.sns){artCell='<span style="color:#bbb" title="账号/歌曲元数据还没同步到（新号等元数据回填，或手动跑 tmp/sync_song_meta.py）">未同步</span>';}
-      else{
-        var _tip='音乐人昵称：'+(ai.mus||'未同步')+'\\n歌的歌手：'+(ai.sns||'未同步')+'（'+(e.song||'')+'）';
-        artCell='<div title="'+esc(_tip)+'" style="line-height:1.3"><b>'+(ai.mus?esc(ai.mus):'<span style="color:#bbb">音乐人未同步</span>')+'</b>'
-          +_same
-          +'<div class="snap-at">'+(ai.sns?esc(ai.sns):'<span style="color:#bbb">歌手未同步</span>')+'</div></div>';
-      }
-    }
+    var artCell=ai.mus
+      ? '<span title="音乐人昵称（uid '+esc(e.uid)+'）">'+esc(ai.mus)+'</span>'
+      : '<span style="color:#bbb">—</span>';
     var opCell=(ROLE==='full')
       ? '<button class="mini" style="padding:4px 10px;font-size:12px" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'">编辑</button>'
       : '<span style="color:#c9ced6;font-size:12px">只读</span>';
