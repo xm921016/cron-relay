@@ -8276,7 +8276,7 @@ button.gray{background:#888}button.warn{background:#a32d2d}button:disabled{opaci
 .tab{padding:8px 14px;border-radius:8px;background:#eee;color:#555;cursor:pointer;font-size:13px}
 .tab.on{background:#3b6d11;color:#fff}
 .twrap{overflow:auto;max-height:calc(100vh - 170px);border:1px solid #eee;border-radius:10px}
-table{border-collapse:collapse;width:100%;font-size:12.5px;white-space:nowrap}
+table{border-collapse:collapse;width:auto;max-width:none;font-size:12.5px;white-space:nowrap}
 th{background:#f5f6f8;text-align:left;padding:8px 9px;color:#444;border-bottom:1px solid #eee}
 .twrap th{position:sticky;top:0;z-index:3;box-shadow:inset 0 -1px 0 #eee,0 1px 4px rgba(0,0,0,.05)}
 td{padding:7px 9px;border-bottom:1px solid #f2f2f2}
