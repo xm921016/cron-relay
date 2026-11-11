@@ -1846,12 +1846,14 @@ async function saveRegCfg(o) {
 }
 
 // 把客户端传来的「套餐」（key 或显示名都认）解析成 {key,label,exp}
+// 2026-11-11：返回值补 days（原始天数），join_manual 的「套餐与 exp 打架以套餐为准」
+// 兜底要用；只是加字段，老调用点不受影响。
 function planOf(cfg, x) {
   const s = String(x == null ? '' : x).trim();
   if (!s) return null;
   const p = (cfg.plans || []).find(it => it.key === s || it.label === s);
   if (!p) return null;
-  return { key: p.key, label: p.label, exp: (p.days > 0 ? beijingDatePlus(p.days) : 'forever') };
+  return { key: p.key, label: p.label, days: p.days, exp: (p.days > 0 ? beijingDatePlus(p.days) : 'forever') };
 }
 // 到期账号清理：删独立键 + 记墓碑 + 刷 master + 回推 GitHub Secrets（只在有过期时才写）
 // 到期处理：2026-11-05 起不再删号，改成「降级为公益号」保留在池子里。
@@ -5243,7 +5245,7 @@ async function handle(request) {
       }
       const song = await resolveSong(body.link);
       if (!song.ok) return json({ message: song.msg }, 400);
-      const expQ = parseExpInput(body.exp);
+      let expQ = parseExpInput(body.exp);
       if (!expQ.ok) return json({ message: '有效期格式不对：填天数(如730)、日期(2028-10-18)或不填（默认2年）' }, 400);
       const phoneIn = String(body.phone || '').trim();
       const phoneRaw = phoneIn.replace(/[^0-9]/g, '');
@@ -5267,6 +5269,19 @@ async function handle(request) {
       // 2026-10-27：客服 + 套餐（口径同 /api/join）
       const rc2 = await regCfg();
       const pl2 = planOf(rc2, body.plan);
+      /* 2026-11-11：套餐与 exp 打架时以套餐为准（只拦「张冠李戴」的情况）。
+         客户端的有效期框是套餐带出的只读框，但旧版 APK（v2.12 及之前）有 bug：
+         换套餐后 exp 框不重算（选 1年 还送 730 天），而下面 ent.exp 无条件信客户端
+         —— 显示 bug 直接变成入库 bug（客户买 1年 入库 730 天，或 2年 只给 365 天）。
+         这里只在「exp 是纯天数 + 恰好等于另一档套餐的天数 + 不等于所选套餐天数」
+         时改按所选套餐重算；手填任意天数（如 90）或具体日期、永久，一律照旧放行。 */
+      if (expQ.ok && pl2 && /^\d{1,4}$/.test(String(body.exp == null ? '' : body.exp).trim())) {
+        const dIn = parseInt(String(body.exp).trim(), 10);
+        if (dIn !== pl2.days && (rc2.plans || []).some(p => p.days === dIn)) {
+          console.warn('join_manual exp/plan 不符，按套餐重算:', dIn, '->', pl2.label);
+          expQ = { ok: true, exp: pl2.exp };
+        }
+      }
       const ent = { ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: phone || ('qr:' + v.uid), uid: v.uid, email: email, phone: phone, grp: isG2 ? 2 : 1, exp: expQ.exp || (pl2 ? pl2.exp : undefined),
         agent: normAgent(body.agent), plan: pl2 ? pl2.label : normAgent(body.plan).slice(0, 8) };
       /* 2026-11-10：客服端也可以指定这一单是「续费」还是「补登」（主界面下拉框）。
