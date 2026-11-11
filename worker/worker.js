@@ -4581,23 +4581,12 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
             <button id="b-new">换一张</button>
             <button id="b-save" class="pri">保存到相册</button>
           </div>
-          <div class="steps">
-            <b>怎么扫</b><br>
-            1. 打开手机上的<b>网易云音乐</b> APP<br>
-            2. 左上角「☰」→ <b>扫一扫</b><br>
-            3. 对着屏幕扫，手机上点「<b>确认登录</b>」<br>
-            <b>扫不动？</b>点「保存到相册」，再用 APP 扫一扫右上角的「相册」，选刚才那张图。
-          </div>
         </div>
       </div>
 
       <div>
-        <div class="card ph" id="ph-box">
-          左边扫码 → 手机上点「确认登录」<br>这里就会变成填写表单
-        </div>
-
-        <div class="card hide" id="f-box">
-          <div class="who" id="who"></div>
+        <div class="card" id="f-box">
+          <div class="who hide" id="who"></div>
           <label>歌曲链接（只能填单曲）</label>
           <input id="i-song" placeholder="APP：我的 → 顶上头像 → 歌曲 → 发布的歌" autocomplete="off">
           <p class="tip" style="text-align:left;margin:8px 0 0">怎么拿链接：网易云 APP → <b>我的</b> → 点顶上<b>头像</b> → <b>歌曲</b>标签页 → 我发布的歌 → 点那首歌的<b>分享</b> → 复制链接。</p>
@@ -4713,7 +4702,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
       if (st.tick <= 0) { stopWait('二维码已过期，点「换一张」'); return; }
       /* 2026-11-08：已扫码后不要让倒计时把「已扫码，请点确认」刷回「请扫码」，
          否则买家看到的就是「手机确认了、网页还是那句请扫码」。 */
-      if (!st.mu && !st.scanned && !st.neg) setTip('请用网易云 APP 扫码（' + st.tick + 's）');
+      if (!st.mu && !st.scanned && !st.neg) setTip('使用网易云 APP 扫一扫（' + st.tick + 's）');
     }, 1000);
   }
 
@@ -4769,7 +4758,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
             ? '还没收到确认：请回到手机上点「确认登录」，点了会自动跳转，不用刷新页面'
             : '已扫码，正在等你在手机上点「确认登录」');
         } else {
-          setTip('等待扫码…（' + Math.max(0, st.tick) + 's）');
+          setTip('使用网易云 APP 扫一扫（' + Math.max(0, st.tick) + 's）');
         }
       }
       else if (j.code < 0) {
@@ -4811,8 +4800,9 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
        所以「保存到相册」一起置灰，和「换一张」保持一致。 */
     try { E('b-save').disabled = true; } catch(e) {}
     E('who').textContent = '已识别账号：' + (j.nick || '网易云账号') + (j.uid ? '（uid ' + j.uid + '）' : '');
-    show('f-box', true);
-    show('ph-box', false);
+    /* 2026-11-11：表单改成进页面就全展示（买家扫完就关浏览器，以为登记完了），
+       扫码成功只要把「已识别账号」这条绿条补上即可，不用再切 f-box。 */
+    show('who', true);
     // 手机窄屏才滚（电脑上是左右两栏，滚一下反而把二维码滚走了）
     if (window.innerWidth < 780) {
       try { E('f-box').scrollIntoView({ behavior:'smooth', block:'start' }); } catch(e) {}
@@ -4846,7 +4836,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
 
   E('b-sub').onclick = function(){
     if (st.busy || st.done) return;
-    if (!st.mu) { E('sub-tip').textContent = '请先扫码登录'; return; }
+    if (!st.mu) { E('sub-tip').textContent = '还没扫码：请先用网易云 APP 扫页面上的二维码，并在手机上点「确认登录」，再回来点「完成登记」'; return; }
     var song = E('i-song').value.trim();
     var phone = E('i-phone').value.replace(/[^0-9]/g, '');
     var email = E('i-email').value.trim();
