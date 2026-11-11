@@ -9212,9 +9212,9 @@ function render(){
     var rateNow=a&&a.rate!=null?a.rate:'—',ratePrev=r.p&&r.p.rate!=null?r.p.rate:'—';
     var dCell=r.delta==null?'<span class="flat">—</span>':(r.reset?'<span class="badge b-gray" title="650 任务按 31 天一个周期结算：上一周期已结束、新周期从头计，所以今天变 0% 不是掉量（近30日播放量并没有塌）。不计入「今日下跌」，通常几天内会重新爬回">周期归零</span>':(r.delta>0?'<span class="up">+'+r.delta+'</span>':(r.delta<0?'<span class="down">'+r.delta+'</span>':'<span class="flat">0</span>')));
     var misCell=otherMis(a);
-    // 2026-11-01：公益号在歌曲列直接标出来 —— 它登记的歌不再分给别人听，
-    // 只看歌曲 ID 会误以为还在互听。普通号行为不变。
-    var song=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'+(e.pub?'<span class="badge b-gray" style="margin-left:4px" title="公益号：这首歌不再分给别的号听，只留作记录；改回普通号后第二天自动恢复">公益</span>':'')):'<span style="color:#bbb">公益</span>';
+    // 2026-11-11：歌曲列不再带「公益」徽标 —— 实测它会把整列撑宽 ~37px（列宽按最宽行算，
+    // 所有行的歌 ID 右边都跟着一大段空），且最右「标记」列已有完整的「公益号」徽标，属重复。
+    var song=e.song?'<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>':'<span style="color:#bbb">公益</span>';
     var dur=(DATA.durs||{})[r.pool+'|'+e.uid]||(DATA.durs||{})[e.uid]||((a&&a.dur)||0);
     var durCell='<span class="flat">—</span>';
     if(dur>0){var mm=Math.floor(dur/60),ss=('0'+(dur%60)).slice(-2);
