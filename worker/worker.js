@@ -8281,6 +8281,8 @@ tr:hover td{background:#fafdf5}
 .b-hz{background:#e8f2df;color:#3b6d11}.b-dz{background:#e3ecf7;color:#2d5aa3}
 /* 2026-11-02 控制台邮箱列：字号小一号；user-select:all 让单击即整段选中，方便复制去发信 */
 .mail{font-size:12px;color:#475569;user-select:all}
+/* 2026-11-11 音乐人列限宽：约 5 个汉字宽，超长截断成省略号，悬停看全名 —— 防止长昵称/宽字符把表格撑出横向滚动条 */
+td[data-l="歌手"] .mus{display:inline-block;max-width:5em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 .b-red{background:#fbe4e4;color:#a32d2d}.b-gray{background:#eee;color:#666}.b-yellow{background:#fdf3e3;color:#b06a00}
 .b-orange{background:#fdeee0;color:#b85c00}
 /* 2026-10-25 售后标签新增两色：绿=已完成不用管，蓝=刚入池正常等待 */
@@ -8424,7 +8426,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <button class="mini gray" id="btnOut">退出</button>
   </div>
   <div class="twrap"><table><thead><tr>
-    <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人">邮箱</th><th>绑定歌曲</th><th title="该号自己的音乐人昵称（acc_meta 元数据回填；没同步到显示 —）。2026-11-11 起不再显示歌的歌手列表与 ✓/✗（共创人太多把行撑太高），绑错歌判定走标记列">音乐人</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="笔记任务（发布图文笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">笔记<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成">备注</th><th>标记</th><th>操作</th>
+    <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人">邮箱</th><th>绑定歌曲</th><th title="该号自己的音乐人昵称（acc_meta 元数据回填；没同步到显示 —）。限宽约 5 个字，超长截断成 …，鼠标悬停看全名。2026-11-11 起不再显示歌的歌手列表与 ✓/✗（共创人太多把行撑太高），绑错歌判定走标记列">音乐人</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="笔记任务（发布图文笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">笔记<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成">备注</th><th>标记</th><th>操作</th>
   </tr></thead><tbody id="tb"></tbody></table></div>
   <details class="deadbox" id="deadBox" hidden><summary>删号记录 / 待复核账号（最近 12 条，来自 D1 dead_log 与 accounts.suspect_at）</summary>
   <div class="muted" style="margin:6px 0 8px">原因：<b>手动删除</b>＝你在控制台/号池工具点的删除；<b>Cookie失效</b>＝播放前验活自动判死；<b>到期清理</b>＝账号有效期到了自动移除。已回池（迁移到另一群或当天重登）的号不算删号。<br>通知：<b>已通知</b>＝确认发出；<b>已回池·不发</b>＝号还在跑；<b>无邮箱·不发</b>＝没登记邮箱；<b>待判·12h</b>＝删后满 12 小时才判定该不该发；<b>自动判死·run.py 发信</b>＝早期记录，发信由播放任务临时触发，发没发事后查不到。</div><div id="deadList"></div></details>
@@ -9230,7 +9232,7 @@ function render(){
     // artistInfo 仍保留：mus 喂给搜索框（搜音乐人名能命中行）。
     var ai=r.ai||artistInfo(e);
     var artCell=ai.mus
-      ? '<span title="音乐人昵称（uid '+esc(e.uid)+'）">'+esc(ai.mus)+'</span>'
+      ? '<span class="mus" title="'+esc(ai.mus)+'（音乐人昵称，uid '+esc(e.uid)+'）">'+esc(ai.mus)+'</span>'
       : '<span style="color:#bbb">—</span>';
     var opCell=(ROLE==='full')
       ? '<button class="mini" style="padding:4px 10px;font-size:12px" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'">编辑</button>'
