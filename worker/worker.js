@@ -4378,8 +4378,9 @@ async function regTokenNew(agent, plan, days, note, hours, kind, fixExp, fixRef,
   const code = regCode();
   const now = Date.now();
   const expAt = now + (hours || REG_TTL_H) * 3600 * 1000;
-  /* 2026-11-10：kind 决定这一单算新登记 / 续费 / 补登。老调用方不传 → 默认 new（行为不变）。 */
-  const k = (kind === 'fix' || kind === 'renew') ? kind : 'new';
+  /* 2026-11-10：kind 决定这一单算新登记 / 续费 / 补登。老调用方不传 → 默认 new（行为不变）。
+     2026-11-12：新增 ckswap（换绑登录）。 */
+  const k = (kind === 'fix' || kind === 'renew' || kind === 'ckswap') ? kind : 'new';
   const ok = await d1Run(
     'INSERT INTO reg_tokens (token,agent,plan,days,note,state,ctime,exp_at,kind,fix_exp,fix_ref,fix_name) ' +
     'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -4587,6 +4588,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
       <div>
         <div class="card" id="f-box">
           <div class="who hide" id="who"></div>
+          <div id="reg-fields">
           <label>歌曲链接（只能填单曲）</label>
           <input id="i-song" placeholder="APP：我的 → 顶上头像 → 歌曲 → 发布的歌" autocomplete="off">
           <p class="tip" style="text-align:left;margin:8px 0 0">怎么拿链接：网易云 APP → <b>我的</b> → 点顶上<b>头像</b> → <b>歌曲</b>标签页 → 我发布的歌 → 点那首歌的<b>分享</b> → 复制链接。</p>
@@ -4597,6 +4599,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
           <input id="i-phone" inputmode="numeric" maxlength="11" placeholder="18888888888" autocomplete="off">
           <label>通知邮箱（掉线或需要验证时邮件通知）</label>
           <input id="i-email" inputmode="email" placeholder="123456@qq.com" autocomplete="off">
+          </div>
           <div class="row" style="margin-top:18px"><button id="b-sub" class="pri">完成登记</button></div>
           <p class="tip" id="sub-tip" style="margin:12px 0 0"></p>
         </div>
@@ -4615,6 +4618,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
   var T = (location.pathname.split('/').pop() || '').toUpperCase();
   var E = function(id){ return document.getElementById(id); };
   var st = { key:'', dev:'', bag:'', mu:'', timer:0, tick:0, busy:false, done:false, scanned:false, weird:0, neg:0, dead:false, scanAt:0 };
+  var KIND = '';   /* 2026-11-12：链接类型（new/renew/fix/ckswap），step1 里从服务端拿 */
 
   function show(id, on){ if (on) E(id).classList.remove('hide'); else E(id).classList.add('hide'); }
   function setTip(s){ E('qr-tip').textContent = s; }
@@ -4667,6 +4671,14 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
       } else if (j.kind === 'renew') {
         sub = '这是续费链接（' + (j.planLabel || '套餐') + '，在原到期日基础上延长'
             + (j.fix_exp ? '，当前到期 ' + j.fix_exp : '') + '）· 本链接 ' + j.left_h + ' 小时内有效';
+      } else if (j.kind === 'ckswap') {
+        /* 2026-11-12：换绑登录 —— 只扫码换凭证，不需要填任何表单字段，全部隐藏 */
+        KIND = 'ckswap';
+        show('reg-fields', false);
+        try { E('b-sub').textContent = '完成换绑'; } catch(e) {}
+        sub = '这是「换绑登录」链接：给原来登记的号换一条全新的登录凭证（免费，有效期、歌曲、邮箱都不变'
+            + (j.fix_name_m ? '，原登记手机号 ' + j.fix_name_m : '')
+            + '）· 请用原来登记的那个网易云账号扫码 · 本链接 ' + j.left_h + ' 小时内有效';
       } else {
         sub = (j.planLabel ? '套餐：' + j.planLabel + ' · ' : '') + '本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
       }
@@ -4837,6 +4849,11 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
   E('b-sub').onclick = function(){
     if (st.busy || st.done) return;
     if (!st.mu) { E('sub-tip').textContent = '还没扫码：请先用网易云 APP 扫页面上的二维码，并在手机上点「确认登录」，再回来点「完成登记」'; return; }
+    /* 2026-11-12：换绑只交扫码拿到的凭证，没有歌曲/手机号/邮箱要填（服务端 ckswap 分支也不看它们） */
+    var payload;
+    if (KIND === 'ckswap') {
+      payload = { t: T, mu: st.mu };
+    } else {
     var song = E('i-song').value.trim();
     var phone = E('i-phone').value.replace(/[^0-9]/g, '');
     var email = E('i-email').value.trim();
@@ -4860,10 +4877,12 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
     if (!phone) { markBad('i-phone'); E('sub-tip').textContent = '请填手机号：登录网易云用的那个 11 位手机号'; return; }
     if (!/^1\\d{10}$/.test(phone)) { markBad('i-phone'); E('sub-tip').textContent = '手机号要 11 位、以 1 开头，请检查一下'; return; }
     if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) { markBad('i-email'); E('sub-tip').textContent = '请填一个能收到信的邮箱'; return; }
+    payload = { t: T, mu: st.mu, phone: phone, link: song, email: email };
+    }
     st.busy = true;
     E('b-sub').disabled = true;
-    E('sub-tip').textContent = '正在登记，请不要关页面…';
-    api('/api/r/submit', { t: T, mu: st.mu, phone: phone, link: song, email: email }).then(function(j){
+    E('sub-tip').textContent = KIND === 'ckswap' ? '正在换绑，请不要关页面…' : '正在登记，请不要关页面…';
+    api('/api/r/submit', payload).then(function(j){
       st.busy = false;
       if (!j.ok) {
         E('b-sub').disabled = false;
@@ -5512,6 +5531,64 @@ async function handle(request) {
       if (!row) return json({ ok: false, message: '链接无效，请找客服重新要一条' }, 404);
       if (regStateOf(row) !== 'unused') return json({ ok: false, message: '这个链接已经用过了，不能重复登记' }, 410);
 
+      /* ===== 2026-11-12：换绑登录（ckswap）=====
+         适用：号还在池里、CK 本身有效，但这条 CK 会话被网易单独标记（自动发动态 code=250）。
+         补登会被 addEntry 的「还在号池正常运行」拦住、续费要收钱——这个场景没有合适的旧链接，
+         所以单独开一型：只把这条会话原地换掉，不动套餐/有效期/歌曲/邮箱，不写台账。
+         安全设计：
+           · 必须用原来的网易云账号扫码 —— 新 CK 校验出的 uid 既要能在号池里找到号，
+             又要和链接上选的原单（fix_ref，手机号或 uid）对得上，扫别人的码换不了别人的号；
+           · 链接一次性 + 原子消耗 + IP/链接双频控，与登记链接完全同口径；
+           · d1Upsert 在 ck 变化时会自动清 relogin_at（D1 侧），KV 侧手动清 relogin 标记。 */
+      if (String(row.kind || '') === 'ckswap') {
+        const csMu = String(b0.mu || '').trim();
+        if (!csMu) return json({ ok: false, message: '没有拿到登录凭证，请重新扫码' }, 400);
+        const csV = await validateCookie(csMu);
+        if (!csV.ok) return json({ ok: false, message: csV.msg || '登录凭证已失效，请重新扫码' }, 400);
+        if (csV.provisional) {
+          return json({ ok: false, message: '网易校验接口暂时不可达（' + (csV.diag || '网络异常')
+            + '），没法核对账号，请稍后重试' }, 503);
+        }
+        const csMaster = await mergePool();
+        const csTgt = csMaster.find(e => e && e.uid != null && String(e.uid) === String(csV.uid)) || null;
+        if (!csTgt) {
+          return json({ ok: false, message: '这个网易云账号不在号池里（可能已掉线被清理）。'
+            + '换绑只给还在池里的号用，请联系客服走补登' }, 404);
+        }
+        const csRef = String(row.fix_ref || '');
+        if (csRef && String(csTgt.uid || '') !== csRef && String(csTgt.name || '') !== csRef) {
+          return json({ ok: false, message: '这次扫的不是这条链接对应的网易云账号（uid 对不上）。'
+            + '请确认用原来登记的那个账号扫码；确实换号了请联系客服' }, 400);
+        }
+        /* 原子抢 token：两个人同时提交同一条链接，只有一个能进来 */
+        const csIp = request.headers.get('cf-connecting-ip') || '';
+        const csUa = request.headers.get('user-agent') || '';
+        const csGrabbed = await regTokenUse(code, String(csV.uid), String(csTgt.name || ''),
+          String(row.fix_name || ''), csIp, csUa);
+        if (csGrabbed === -1) return json({ ok: false, message: '数据库暂时不可用，请稍后重试' }, 503);
+        if (csGrabbed === 0) return json({ ok: false, message: '这个链接刚刚已被使用，请联系客服' }, 410);
+        csTgt.ck = 'MUSIC_U=' + csMu;
+        if (csTgt.relogin) csTgt.relogin = 0;
+        let csKvOk = true;
+        try { await POOL.put(entryKeyOf(csTgt), JSON.stringify(csTgt)); }
+        catch (e) { csKvOk = false; console.error('换绑 KV 写失败（继续走 D1）:', e && e.message); }
+        let csD1Ok = false;
+        try { csD1Ok = await d1Upsert(csTgt, { keepEmpty: false }); }
+        catch (e) { console.error('换绑 D1 镜像失败:', e && e.message); }
+        if (!csKvOk && !csD1Ok) {
+          await regTokenUndo(code);
+          return json({ ok: false, message: '数据库暂时繁忙，换绑没有完成（链接已复位），请稍后再试一次' }, 503);
+        }
+        try { await pushPool(csMaster.map(e => (e === csTgt ? csTgt : e))); } catch (e) {}
+        try { await refreshPoolSnap(true); } catch (e) {}
+        console.log('换绑CK：' + String(csTgt.name || csV.uid) + ' 旧CK='
+          + String(csTgt.ck).slice(0, 20) + '…（uid ' + String(csV.uid) + '，D1 ' + (csD1Ok ? 'ok' : 'FAIL') + '）');
+        return json({ ok: true, uid: String(csV.uid), name: String(csTgt.name || ''), kind: 'ckswap',
+          message: '换绑成功：这个号的登录凭证已经换成全新的了（有效期、歌曲、邮箱都没动，听歌不受影响）。'
+            + '明天开始自动发动态就会用新凭证；建议你现在顺手在 App 里发一条图文笔记，'
+            + '如果网易弹了安全验证就顺手完成一下。' });
+      }
+
       const mu = String(b0.mu || '').trim();
       if (!mu) return json({ ok: false, message: '没有拿到登录凭证，请重新扫码' }, 400);
       const email = String(b0.email || '').trim();
@@ -5674,9 +5751,14 @@ async function handle(request) {
               （refresh_reg_cfg 只在启动时跑一次）→ 新链接 days=0 → 2 年。
          补登(fix)不读套餐（有效期继承原单），所以只拦 new/renew。
          放在吃配额之前：套餐不对不该白占一条/天的额度。 */
+      /* 2026-11-12：新增 ckswap（换绑登录）—— 号还在池里、CK 本身有效，但这条会话被网易
+         单独标记（自动发动态 code=250）。补登会被「还在号池正常运行」拦住、续费要收钱，
+         三个老链接都不贴切；ckswap 只把这条会话原地换新，不动套餐/有效期/台账。
+         和 fix 一样：不读套餐（没有时长概念）、必须选原单（fix_ref 定位 + uid 双重核对）。 */
       const tokKind = (String(b1.kind || '') === 'fix') ? 'fix'
-        : (String(b1.kind || '') === 'renew' ? 'renew' : 'new');
-      if (tokKind !== 'fix' && !pl2) {
+        : (String(b1.kind || '') === 'renew' ? 'renew'
+        : (String(b1.kind || '') === 'ckswap' ? 'ckswap' : 'new'));
+      if (tokKind !== 'fix' && tokKind !== 'ckswap' && !pl2) {
         return json({ ok: false, bad_plan: true, message:
           '套餐「' + String(b1.plan || '(空)') + '」不在服务器当前的套餐表里（可能已改名或下架）。'
           + '请在软件里重新选一次套餐；下拉里如果还是旧名字，重启软件刷新套餐列表。'
@@ -5720,7 +5802,8 @@ async function handle(request) {
         const ref = String(b1.fix_ref || b1.ref || '').replace(/[^0-9A-Za-z_-]/g, '').slice(0, 40);
         if (!ref) {
           return json({ ok: false,
-            message: (tokKind === 'fix' ? '补登' : '续费') + '链接必须先选原单（填客户的手机号或网易 UID）' }, 400);
+            message: (tokKind === 'fix' ? '补登' : (tokKind === 'ckswap' ? '换绑' : '续费'))
+              + '链接必须先选原单（填客户的手机号或网易 UID）' }, 400);
         }
         /* 2026-11-10 修 bug：原来用 `/^\d{6,}$/` 判断「这是 uid」，而手机号是纯数字、
            长度也 ≥6，于是客服填手机号时实际查的是 uid=手机号，必然查不到 → 一律报
@@ -5760,10 +5843,12 @@ async function handle(request) {
       }
       /* 2026-11-10：补登不存套餐 —— 补登继承原单到期日，套餐对它没有任何作用。
          前端也不再要求选套餐（选了也白选），这里直接写空，免得列表里出现
-         误导性的「套餐：1月」，让人以为补登还买了时长。 */
+         误导性的「套餐：1月」，让人以为补登还买了时长。
+         2026-11-12：换绑（ckswap）同理不存套餐 —— 只换会话，与时长完全无关。 */
+      const _tkNoPlan = (tokKind === 'fix' || tokKind === 'ckswap');
       const one = await regTokenNew(agent,
-        tokKind === 'fix' ? '' : (pl2 ? pl2.key : String(b1.plan || '').slice(0, 16)),
-        tokKind === 'fix' ? 0 : (pObj ? (Number(pObj.days) || 0) : 0),
+        _tkNoPlan ? '' : (pl2 ? pl2.key : String(b1.plan || '').slice(0, 16)),
+        _tkNoPlan ? 0 : (pObj ? (Number(pObj.days) || 0) : 0),
         b1.note, hours, tokKind, tokFixExp, tokFixRef, tokFixName);
       if (!one) return json({ ok: false, message: '生成失败（' + d1ErrHint() + '）' }, 503);
       const origin = url.origin;
@@ -8573,7 +8658,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   · <b>补登</b> —— 号掉线了，免费补回。不收钱、不算提成，到期日<b>继承原单</b>（不延长）。<br>
   ⚠ 续费和补登<b>必须先搜到原单</b>：类型是定在链接上的，客户后来换手机号、换网易号都不影响判定。原单已过期的不能补登（补登只在原套餐有效期内免费）。</p>
   <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:12px 0 6px;padding:10px 12px;background:#fffaf1;border:1px solid #f3e2c8;border-radius:9px">
-    <div><label style="margin-top:0">类型</label><select id="rgKind" style="width:120px"><option value="new">新登记</option><option value="renew">续费</option><option value="fix">补登（免费）</option></select></div>
+    <div><label style="margin-top:0">类型</label><select id="rgKind" style="width:120px"><option value="new">新登记</option><option value="renew">续费</option><option value="fix">补登（免费）</option><option value="ckswap">换绑登录（免费）</option></select></div>
     <div><label style="margin-top:0">客服</label><select id="rgAgent" style="width:110px"></select></div>
     <div><label style="margin-top:0">套餐</label><select id="rgPlan" style="width:110px"></select>
       <div id="rgPlanTip" hidden style="font-size:11px;color:#b06a00;margin-top:2px">补登继承原单，不用选</div></div>
@@ -9846,7 +9931,7 @@ $('dvBody').addEventListener('click',function(ev){
 var RG_REF = null;
 function rgTok(){ return JSON.parse(TOKEN||'{}'); }
 function rgKind(){ return $('rgKind').value||'new'; }
-function rgKindName(k){ return k==='fix'?'补登':(k==='renew'?'续费':'新登记'); }
+function rgKindName(k){ return k==='fix'?'补登':(k==='renew'?'续费':(k==='ckswap'?'换绑':'新登记')); }
 function rgSync(){
   var k=rgKind();
   $('rgRefBox').hidden=(k==='new');
@@ -9905,8 +9990,10 @@ $('rgGo').onclick=function(){
   var t=rgTok(), k=rgKind();
   if(k!=='new'&&!RG_REF){ $('rgm').textContent='先搜原单、点一行选中它，再生成'; $('rgm').className='msg err'; return; }
   if(k==='fix'&&RG_REF&&RG_REF.alive){ $('rgm').textContent='这个号还在号池里没掉线，不用补登（要延期请用「续费」）'; $('rgm').className='msg err'; return; }
+  /* 2026-11-12：换绑只给「还在池里」的号用 —— 号已掉线就走补登，别让客服发错类型 */
+  if(k==='ckswap'&&RG_REF&&!RG_REF.alive){ $('rgm').textContent='这个号已经不在号池里（掉线了），换绑用不了，请改发「补登」链接'; $('rgm').className='msg err'; return; }
   var body={user:t.user,pass:t.pass,kind:k,agent:$('rgAgent').value||'',
-    plan:(k==='fix'?'':($('rgPlan').value||'')),hours:parseInt($('rgHours').value,10)||24,
+    plan:((k==='fix'||k==='ckswap')?'':($('rgPlan').value||'')),hours:parseInt($('rgHours').value,10)||24,
     note:$('rgNote').value||''};
   if(k!=='new'){ body.fix_ref=RG_REF.ref; body.fix_exp=RG_REF.exp; }
   $('rgGo').disabled=true; $('rgm').textContent='生成中…'; $('rgm').className='msg';
@@ -9918,7 +10005,7 @@ $('rgGo').onclick=function(){
     $('rgOut').innerHTML='<div style="margin-top:8px;padding:10px 12px;background:#f2fbf4;border:1px solid #cfe8d6;border-radius:9px;font-size:12.5px;line-height:1.95">'
       +'链接：<input readonly value="'+esc(d.link||'')+'" style="width:auto;min-width:400px;font-family:ui-monospace,Consolas,monospace" onclick="this.select()">'
       +'<br>有效期至 '+esc(bjFull(d.exp_at))+'（'+(d.hours||24)+' 小时），一条链接只能用一次'
-      +(d.fix_exp?('<br>原单到期日：<b>'+esc(d.fix_exp)+'</b>'+(k==='fix'?'（补登后仍到这天，不延长）':'（续费在此基础上累加）')):'')
+      +(d.fix_exp?('<br>原单到期日：<b>'+esc(d.fix_exp)+'</b>'+(k==='fix'?'（补登后仍到这天，不延长）':(k==='ckswap'?'（换绑不改变有效期）':'（续费在此基础上累加）'))):'')
       +'<br><span style="color:#888">把链接发给客户，客户自己扫码登记，不用他给你密码。</span></div>';
     rgLoad();
   }).catch(function(){ $('rgGo').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
