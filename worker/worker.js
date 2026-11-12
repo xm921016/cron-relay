@@ -5728,14 +5728,20 @@ async function handle(request) {
       const pw = await regPass();
       /* 2026-11-10：控制台也能生成链接（管理员自己补发、发补登链接）。
          先按客服口令判，不对再按控制台满权限口令判 —— 客服请求不带 user 字段，
-         consoleRole 会立刻回 null，不产生额外 KV 读，客服这条路完全没变慢。 */
+         consoleRole 会立刻回 null，不产生额外 KV 读，客服这条路完全没变慢。
+         2026-11-12：记下来是不是控制台来的 —— 下面设备闸门要放行控制台：
+         网页没有机器码（dev 空），REG_REQUIRE_DEV=1 锁老版 EXE 时会把网页版
+         一起拦死（现象：控制台生成链接报「软件版本太旧」）。控制台本身有满权限
+         口令护着，不需要设备授权这层。 */
       let passOk = !!pw && String(b1.pass || '') === pw;
-      if (!passOk) passOk = await consoleAuthFull(b1);
+      const fromConsole = !passOk ? await consoleAuthFull(b1) : false;
+      if (!passOk) passOk = fromConsole;
       if (!passOk) {
         if (!pw) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
         return json({ ok: false, message: '生成口令不正确' }, 403);
       }
-      const agent = normAgent(b1.agent);
+      /* 2026-11-12：const → let —— 补登/换绑时客服归属要继承原单（见下方 fix_ref 段）。 */
+      let agent = normAgent(b1.agent);
       const rc2 = await regCfg();
       const pl2 = planOf(rc2, b1.plan);
       const pObj = (rc2.plans || []).find(it => it.key === String(b1.plan || '') || it.label === String(b1.plan || ''));
@@ -5771,7 +5777,11 @@ async function handle(request) {
          EXE 里的生成口令是硬编码的，EXE 一旦外流就等于谁都能造链接；配额把最坏情况
          压成「每天 200 条」，且异常量在 rate_limit 里一眼看得出来。计数不可用则放行。
          2026-11-10：60 → 200（生成≠成交，重发重试都占次数）；同时接入机器授权校验。 */
-      const dchk = await regDevCheck(b1.dev, agent);
+      /* 2026-11-12：控制台请求跳过设备闸门（见上面 fromConsole 注释）；
+         客服口令路径维持原校验 —— EXE 的机器授权、每日配额全都照旧。 */
+      const dchk = fromConsole
+        ? { ok: true, dev: '', quota: 0 }
+        : await regDevCheck(b1.dev, agent);
       if (!dchk.ok) {
         return json({ ok: false, need_auth: true, dev: dchk.dev || '', message: dchk.msg }, 403);
       }
@@ -5827,6 +5837,13 @@ async function handle(request) {
         }
         tokFixExp = String(hist.exp || '').slice(0, 10);
         tokFixRef = ref;
+        /* 2026-11-12：补登/换绑的客服归属继承原单 —— 「自己的客服给自己的客户补登」。
+           控制台生成时客服下拉已锁定（不传 agent），落账的提成归属必须跟原单走，
+           否则台账里这笔单没归属、提成统计少记。EXE 场景客服传了自己的 agent，
+           仍以传值为准（优先级：显式传值 > 原单归属）。 */
+        if (tokKind === 'fix' || tokKind === 'ckswap') {
+          if (!agent) agent = normAgent(hist.agent);
+        }
         /* 原单手机号：台账 name 是 11 位数字才认（老号可能存的是 qr:/manual: 占位名）。
            买家页拿它预填，客户手机号没换就不用再手打一遍。 */
         const hn = String(hist.name || '').replace(/[^0-9]/g, '');
@@ -8660,8 +8677,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:12px 0 6px;padding:10px 12px;background:#fffaf1;border:1px solid #f3e2c8;border-radius:9px">
     <div><label style="margin-top:0">类型</label><select id="rgKind" style="width:120px"><option value="new">新登记</option><option value="renew">续费</option><option value="fix">补登（免费）</option><option value="ckswap">换绑登录（免费）</option></select></div>
     <div><label style="margin-top:0">客服</label><select id="rgAgent" style="width:110px"></select></div>
-    <div><label style="margin-top:0">套餐</label><select id="rgPlan" style="width:110px"></select>
-      <div id="rgPlanTip" hidden style="font-size:11px;color:#b06a00;margin-top:2px">补登继承原单，不用选</div></div>
+    <div><label style="margin-top:0">套餐</label><select id="rgPlan" style="width:110px"></select></div>
     <div><label style="margin-top:0">链接有效期</label><select id="rgHours" style="width:110px"><option value="24">24 小时</option><option value="72">3 天</option></select></div>
   </div>
   <div id="rgRefBox" hidden style="margin:0 0 10px;padding:10px 12px;background:#f6f9ff;border:1px solid #dbe6fb;border-radius:9px">
@@ -9935,15 +9951,14 @@ function rgKindName(k){ return k==='fix'?'补登':(k==='renew'?'续费':(k==='ck
 function rgSync(){
   var k=rgKind();
   $('rgRefBox').hidden=(k==='new');
-  /* 2026-11-10：补登不需要选套餐 —— 有效期完全继承原单，选了也不生效。
-     禁用而不是隐藏，让人看得见「这里本来有套餐、补登用不上」。
-     2026-11-12：换绑登录同理且更彻底 —— 只换登录凭证，套餐不存（days=0），
-     客服归属也沿用原单不动（后端 ckswap 分支根本不读这两项），禁用防误选。 */
-  var swap=(k==='ckswap');
-  $('rgPlan').disabled=(k==='fix'||swap);
-  $('rgAgent').disabled=swap;
-  $('rgPlanTip').hidden=!(k==='fix'||swap);
-  $('rgPlanTip').textContent=(k==='fix')?'补登继承原单，不用选':'换绑不动套餐和客服，全部沿用原单';
+  /* 2026-11-12：补登/换绑都锁定客服和套餐 —— 补登与换绑都是「继承原单」的操作：
+     有效期继承原单（不存套餐），客服归属也继承原单（后端自动取原单的 agent，
+     「自己的客服给自己的客户补登」）。禁用而不是隐藏，让人看得见这两项用不上；
+     原来那行黄色 tip 删掉了 —— 多一行字把弹窗布局撑乱了。
+     禁用状态在选完原单后也不影响：rgGo 只读值，读不到 disabled 的值照样发空。 */
+  var inh=(k==='fix'||k==='ckswap');
+  $('rgPlan').disabled=inh;
+  $('rgAgent').disabled=inh;
 }
 $('rgKind').onchange=function(){ RG_REF=null; $('rgRefOut').innerHTML=''; rgSync(); };
 /* 2026-11-10：按状态看链接（尤其「已过期」）。过期链接仍然是 unused，作废按钮照样给。 */
