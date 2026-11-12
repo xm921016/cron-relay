@@ -9936,9 +9936,14 @@ function rgSync(){
   var k=rgKind();
   $('rgRefBox').hidden=(k==='new');
   /* 2026-11-10：补登不需要选套餐 —— 有效期完全继承原单，选了也不生效。
-     禁用而不是隐藏，让人看得见「这里本来有套餐、补登用不上」。 */
-  $('rgPlan').disabled=(k==='fix');
-  $('rgPlanTip').hidden=(k!=='fix');
+     禁用而不是隐藏，让人看得见「这里本来有套餐、补登用不上」。
+     2026-11-12：换绑登录同理且更彻底 —— 只换登录凭证，套餐不存（days=0），
+     客服归属也沿用原单不动（后端 ckswap 分支根本不读这两项），禁用防误选。 */
+  var swap=(k==='ckswap');
+  $('rgPlan').disabled=(k==='fix'||swap);
+  $('rgAgent').disabled=swap;
+  $('rgPlanTip').hidden=!(k==='fix'||swap);
+  $('rgPlanTip').textContent=(k==='fix')?'补登继承原单，不用选':'换绑不动套餐和客服，全部沿用原单';
 }
 $('rgKind').onchange=function(){ RG_REF=null; $('rgRefOut').innerHTML=''; rgSync(); };
 /* 2026-11-10：按状态看链接（尤其「已过期」）。过期链接仍然是 unused，作废按钮照样给。 */
