@@ -1427,7 +1427,7 @@ async function cfg() {
   if (!_cfg || Date.now() - _cfgAt > 300000) {
     // 2026-10-23：原来这里是 8 个串行 await（每个都是一次 KV get），冷启动时白白叠加 8 次 rtt。
     // 改成一次并发读取；语义完全不变（同样的键、同样的默认值、同样的 5 分钟缓存）。
-    const [ghToken, groupPass, groupPass2, adminPass, assignPass, lim, limG1, limG2, consolePass, consoleRoPass] = await Promise.all([
+    const [ghToken, groupPass, groupPass2, adminPass, assignPass, lim, limG1, limG2, consolePass, consoleRoPass, egressKey, egressPct] = await Promise.all([
       POOL.get('GH_TOKEN').catch(() => null),
       POOL.get('GROUP_PASS').catch(() => null),
       POOL.get('GROUP_PASS2').catch(() => null),
@@ -1442,6 +1442,9 @@ async function cfg() {
       // 同一个口令在控制台能看数据，在 APK 号池页却报「管理密码错误」太分裂。只加读、不加写。
       POOL.get('CONSOLE_PASS').catch(() => null),
       POOL.get('CONSOLE_RO_PASS').catch(() => null),
+      // 2026-11-12 扫码家宽出口灰度：EGRESS_KEY=本机转发服务口令，EGRESS_PCT=0 关/1~100 按设备哈希放量
+      POOL.get('EGRESS_KEY').catch(() => null),
+      POOL.get('EGRESS_PCT').catch(() => null),
     ]);
     _cfg = {
       ghToken: cleanKV(ghToken),
@@ -1451,6 +1454,9 @@ async function cfg() {
       assignPass: cleanKV(assignPass),
       consolePass: cleanKV(consolePass),
       consoleRoPass: cleanKV(consoleRoPass),
+      // 2026-11-12 扫码家宽出口灰度（方案A）：EGRESS_PCT 缺省=0=全走 CF 直连（行为与现网一致）
+      egressKey: cleanKV(egressKey),
+      egressPct: cleanKV(egressPct),
       // 分群上限：2026-10-22 默认 500 → 1500，同日晚按「20 并发 + 24h 排队上限」下调到 1200
       // （KV 里 POOL_LIMIT_G1 / POOL_LIMIT_G2 仍可覆盖，改数字即时生效不用改代码）
       poolLimit: parseInt(cleanKV(lim), 10) || 1200,
@@ -4484,17 +4490,52 @@ function ncDecBag(s) {
     return JSON.parse(decodeURIComponent(escape(atob(b)))) || {};
   } catch (e) { return {}; }
 }
+/* ===== 2026-11-12：扫码家宽出口灰度（方案A，用户拍板）=====
+   出口 = 用户家宽 PC（cloudflared tunnel → egress.xx1031.xyz → 本机 relay.js → music.163.com）。
+   基线实测（23:23 本机 10/10 全 801，零 -462）证明家宽 IP 比 CF 数据中心干净。
+   铁律 9e 约束下的单变量实验：UA/Cookie/路径/参数逐字节透传，只换出口 IP；
+   KV `EGRESS_PCT`=0（缺省）全走 CF 直连（行为与现网一致），1~100 按 sDeviceId 哈希放量；
+   隧道超时/5xx/异常自动回退直连 —— CF 兜底永不下线（用户 22:36 口径）。 */
+async function ncEgressMode(bag) {
+  try {
+    const c = await cfg();
+    const pct = parseInt(c.egressPct, 10) || 0;
+    if (pct <= 0 || pct > 100 || !c.egressKey) return null;
+    const dev = String((bag && bag.sDeviceId) || '');
+    let h = 0;
+    for (let i = 0; i < dev.length; i++) h = (h * 31 + dev.charCodeAt(i)) >>> 0;
+    if ((h % 100) >= pct) return null;
+    return { base: 'https://egress.xx1031.xyz', key: c.egressKey };
+  } catch (e) { return null; }
+}
+async function ncFetch(path, opts, eg) {
+  if (eg) {
+    const headers = Object.assign({}, opts.headers || {}, { 'X-Egress-Key': eg.key });
+    try {
+      const r = await fetch(eg.base + path, Object.assign({}, opts, {
+        headers,
+        signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(8000) : undefined,
+      }));
+      if (r && r.status < 500) return r;
+      console.error('ncFetch egress 上游异常，回退直连', path, r && r.status);
+    } catch (e) {
+      console.error('ncFetch egress 失败，回退直连', path, e && e.message);
+    }
+  }
+  return fetch(NC_BASE + path, Object.assign({}, opts, { headers: opts.headers || {} }));
+}
 /* 申请 unikey：预热首页拿 NMTID → POST /api/login/qrcode/unikey?type=3 */
 async function ncNewKey(bag) {
+  const eg = await ncEgressMode(bag);
   try {
-    const w = await fetch(NC_BASE + '/', { headers: ncHdr(bag), redirect: 'follow' });
+    const w = await ncFetch('/', { headers: ncHdr(bag), redirect: 'follow' }, eg);
     ncAbsorb(bag, ncSetCookies(w));
   } catch (e) { /* 预热失败不致命 */ }
-  const r = await fetch(NC_BASE + '/api/login/qrcode/unikey?type=' + NC_QTYPE, {
+  const r = await ncFetch('/api/login/qrcode/unikey?type=' + NC_QTYPE, {
     method: 'POST',
     headers: Object.assign(ncHdr(bag), { 'Content-Type': 'application/x-www-form-urlencoded' }),
     body: 'type=' + NC_QTYPE,
-  });
+  }, eg);
   const txt = await r.text();
   ncAbsorb(bag, ncSetCookies(r));
   let j = null;
@@ -4503,8 +4544,8 @@ async function ncNewKey(bag) {
   return { key: String(j.unikey || '').trim(), code: j.code, message: j.message || '' };
 }
 async function ncPollOnce(bag, key) {
-  const u = NC_BASE + '/api/login/qrcode/client/login?key=' + encodeURIComponent(key) + '&type=' + NC_QTYPE;
-  const r = await fetch(u, { headers: ncHdr(bag) });
+  const u = '/api/login/qrcode/client/login?key=' + encodeURIComponent(key) + '&type=' + NC_QTYPE;
+  const r = await ncFetch(u, { headers: ncHdr(bag) }, await ncEgressMode(bag));
   const txt = await r.text();
   const scs = ncSetCookies(r);
   ncAbsorb(bag, scs);
