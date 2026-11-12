@@ -1207,22 +1207,18 @@ const b64dec = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 const utf8 = (s) => new TextEncoder().encode(s);
 
 // ---- AES-CBC (WebCrypto) ----
-// 2026-11-12 修复：旧版在 WebCrypto 之前手动补 PKCS#7 位，而 crypto.subtle 的
-// AES-CBC 本身还会再加一层 PKCS#7 —— 双重 padding，网易按标准解密后 JSON 尾部
-// 带垃圾字节，JSON.parse 必失败（tmp/_test_weapi_padding_1112.mjs 实测：
-// 旧版 FAIL / 修正版 OK）。WebCrypto 自动补位即标准 PKCS#7，手动补位必须去掉。
-// 此函数此前无任何调用者（weapi 2026-11-12 才第一次被用上），不影响存量功能。
 async function aesCbc(dataU8, keyStr) {
   const key = await crypto.subtle.importKey('raw', utf8(keyStr), { name: 'AES-CBC' }, false, ['encrypt']);
-  const ct = await crypto.subtle.encrypt({ name: 'AES-CBC', iv: utf8(VI) }, key, dataU8);
+  const n = 16 - dataU8.length % 16;
+  const pad = new Uint8Array(dataU8.length + n);
+  pad.set(dataU8); pad.fill(n, dataU8.length);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-CBC', iv: utf8(VI) }, key, pad);
   return new Uint8Array(ct);
 }
-// weapi 标准实现：
+// weapi 标准实现（2026-10-10 实测修复）：
 //   json → AES(NONCE) → base64 → AES(随机16字符key) → base64 = params
 //   encSecKey = RSA(随机key 反转后按 ASCII 转 hex, e=010001) 转 hex 补零到 256 位
-// 2026-11-12：aesCbc 双重 padding 修复后才真正可用；本函数在 worker 内首次
-// 被扫码链（ncNewKey/ncPollOnce）调用。加密格式已用 tmp/_test_weapi_padding_1112.mjs
-// 按网易端标准解密路径验证：JSON 完整还原、无垃圾尾部。
+// 旧实现漏了中间 base64 且 encSecKey 固定不匹配，导致网易解不开、返回空 200。
 const RSA_MODULUS = '00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7';
 function modPow(b, e, m) { let r = 1n; b %= m; while (e > 0n) { if (e & 1n) r = r * b % m; b = b * b % m; e >>= 1n; } return r; }
 async function weapi(data) {
@@ -1392,7 +1388,6 @@ async function resolveSong(link) {
   if (COLLECT.test(url)) {
     return { ok: false, msg: '只收单曲链接：专辑 / 歌单 / 电台 / 排行榜 / MV 都不能登记。请在网易云 APP 里打开【那首歌】→ 分享 → 复制链接' };
   }
-  let diag = '';
   try {
     const r = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': UA } });
     // 短链跳转后仍必须是网易自家域名，否则说明这个「163cn.tv」指到了外面的站点
@@ -1400,48 +1395,13 @@ async function resolveSong(link) {
       return { ok: false, msg: '这个链接跳到了非网易云的站点，已拒绝。请在 APP 里重新分享那首歌的链接' };
     }
     url = r.url;
-  } catch (e) {
-    diag = 'fetch 异常：' + ((e && e.message) || e);
-  }
-  // 2026-11-12：短链解析兜底。此前 fetch 抛错被静默吞掉、或 163cn.tv 对数据中心请求
-  // 不回 302 时，url 停在短链上 → 误报「链接里没找到歌曲 id」（bkNIU2s2 实测，本地 302 正常）。
-  // 补：重试一次 follow + manual 模式直读 Location 头，报错时附带诊断信息。
-  if (!m) m = url.match(/[?&]id=(\d+)/);
-  if (!m) {
-    await new Promise(res => setTimeout(res, 800));
-    try {
-      const r = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': UA } });
-      if (!songHostOk(hostOf(r.url))) {
-        return { ok: false, msg: '这个链接跳到了非网易云的站点，已拒绝。请在 APP 里重新分享那首歌的链接' };
-      }
-      url = r.url;
-    } catch (e) {
-      diag = diag || ('重试 fetch 异常：' + ((e && e.message) || e));
-    }
-  }
-  if (!m) {
-    try {
-      const r2 = await fetch(url, { redirect: 'manual', headers: { 'User-Agent': UA } });
-      const loc = r2.headers.get('location') || '';
-      if (loc && songHostOk(hostOf(loc))) {
-        url = loc;
-        m = loc.match(/[?&]id=(\d+)/);
-        if (!m) diag = 'Location 无 id：' + loc.slice(0, 80);
-      } else if (loc) {
-        return { ok: false, msg: '这个链接跳到了非网易云的站点，已拒绝。请在 APP 里重新分享那首歌的链接' };
-      } else {
-        diag = diag || ('未返回 Location，HTTP ' + r2.status);
-      }
-    } catch (e) {
-      diag = diag || ('manual fetch 异常：' + ((e && e.message) || e));
-    }
-  }
+  } catch (e) {}
   if (COLLECT.test(url)) {
     return { ok: false, msg: '只收单曲链接：专辑 / 歌单 / 电台 / 排行榜 / MV 都不能登记。请在网易云 APP 里打开【那首歌】→ 分享 → 复制链接' };
   }
   // 原链接没带 id（如 163cn.tv 短链）时，用跟随重定向后的 r.url 兜底匹配一次
   if (!m) m = url.match(/[?&]id=(\d+)/);
-  if (!m) return { ok: false, msg: '链接里没找到歌曲 id：识别到 ' + url.slice(0, 80) + (diag ? '（诊断：' + diag + '）' : '') + '。请在网易云 APP 里点「分享→复制链接」，把 http 开头的完整链接粘过来' };
+  if (!m) return { ok: false, msg: '链接里没找到歌曲 id：识别到 ' + url.slice(0, 80) + '。请在网易云 APP 里点「分享→复制链接」，把 http 开头的完整链接粘过来' };
   // 双保险：调网易歌曲详情接口确认这个 id 确实是一首歌（防歌单/电台 id 伪装混入）
   try {
     const r = await fetch(`${BASE}/api/song/detail?id=${m[1]}&ids=%5B${m[1]}%5D`, { headers: { 'User-Agent': UA, Referer: BASE + '/' } });
@@ -4460,17 +4420,9 @@ async function regTokenUse(code, uid, uname, phone, ip, ua) {
 }
 
 /* ================= 网易云扫码（无状态会话，cookie 由浏览器回传） ================= */
-/* 2026-11-12：扫码链 UA 从 iPhone 换成 Windows Chrome 网页版 —— st/platform/scanlogin
-   的 chainId 后缀本来就是 _web_login_，伪造对象应是「网页扫码会话」，UA/cookie 要自洽。
-   NC_UA 保留给 validateCookie/ncProfile 等其它网易出站用（改动最小化，不波及）。 */
 const NC_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
-const NC_WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const NC_BASE = 'https://music.163.com';
 const NC_QTYPE = '3';                    /* 3 = 官方 st/platform 扫码；1 = 老接口（会被判环境异常） */
-/* 2026-11-12 对症 -462「请完成验证操作」：社区实测（ts-dev-kits/netease-music、waylyrics 等）
-   一致结论 —— 匿名请求不带 os/appver 基础 cookie 就会被风控判 -462；官方网页匿名访客
-   下发的就是 os=pc; appver=2.9.7。ncHdr 拼接时若 bag 里已有同名键（网易 Set-Cookie 下发）
-   则以 bag 为准，避免重复。 */
 
 function ncSetCookies(r) {
   let out = [];
@@ -4495,16 +4447,10 @@ function ncAbsorb(bag, lines) {
   }
   return bag;
 }
-/* 2026-11-12：基础 cookie（os=pc; appver=2.9.7）+ 网页 UA + Referer /login，
-   只服务扫码三连（预热/unikey/client/login），validateCookie 等不走这里不受影响。 */
 function ncHdr(bag) {
-  const b = bag || {};
-  const parts = [];
-  if (!b.os) parts.push('os=pc');
-  if (!b.appver) parts.push('appver=2.9.7');
-  for (const k of Object.keys(b)) parts.push(k + '=' + b[k]);
-  const h = { 'User-Agent': NC_WEB_UA, 'Referer': NC_BASE + '/login', 'Accept-Language': 'zh-CN,zh;q=0.9' };
-  h['Cookie'] = parts.join('; ');
+  const h = { 'User-Agent': NC_UA, 'Referer': NC_BASE + '/', 'Accept-Language': 'zh-CN,zh;q=0.9' };
+  const ks = Object.keys(bag || {});
+  if (ks.length) h['Cookie'] = ks.map(k => k + '=' + bag[k]).join('; ');
   return h;
 }
 function ncEncBag(bag) {
@@ -4519,30 +4465,12 @@ function ncDecBag(s) {
     return JSON.parse(decodeURIComponent(escape(atob(b)))) || {};
   } catch (e) { return {}; }
 }
-/* 申请 unikey：预热首页拿 NMTID → weapi /weapi/login/qrcode/unikey（2026-11-12 改造）
-   为什么换 weapi：老明文 /api/ 通道 + 裸 cookie 是 -462 风控的典型样本；官方网页走的就是
-   weapi 加密通道，weapi() 复用 1224 行的实测实现。双通道保险：weapi 拿不到 unikey
-   （非 JSON/异常/空回包）自动回退老明文通道，最坏情况等于改造前。 */
+/* 申请 unikey：预热首页拿 NMTID → POST /api/login/qrcode/unikey?type=3 */
 async function ncNewKey(bag) {
   try {
     const w = await fetch(NC_BASE + '/', { headers: ncHdr(bag), redirect: 'follow' });
     ncAbsorb(bag, ncSetCookies(w));
   } catch (e) { /* 预热失败不致命 */ }
-  const csrf = bag.__csrf || bag.__csrf_token || '';
-  try {
-    const enc = await weapi({ type: NC_QTYPE, csrf_token: csrf });
-    const r = await fetch(NC_BASE + '/weapi/login/qrcode/unikey', {
-      method: 'POST',
-      headers: Object.assign(ncHdr(bag), { 'Content-Type': 'application/x-www-form-urlencoded' }),
-      body: 'params=' + encodeURIComponent(enc.params) + '&encSecKey=' + encodeURIComponent(enc.encSecKey),
-    });
-    const txt = await r.text();
-    ncAbsorb(bag, ncSetCookies(r));
-    let jw = null;
-    try { jw = JSON.parse(txt); } catch (e) {}
-    if (jw && jw.unikey) return { key: String(jw.unikey || '').trim(), code: jw.code, message: jw.message || '' };
-    /* 没拿到 unikey → 落到下面的老通道重试 */
-  } catch (e) { /* weapi 通道网络异常 → 老通道 */ }
   const r = await fetch(NC_BASE + '/api/login/qrcode/unikey?type=' + NC_QTYPE, {
     method: 'POST',
     headers: Object.assign(ncHdr(bag), { 'Content-Type': 'application/x-www-form-urlencoded' }),
@@ -4556,8 +4484,15 @@ async function ncNewKey(bag) {
   return { key: String(j.unikey || '').trim(), code: j.code, message: j.message || '' };
 }
 async function ncPollOnce(bag, key) {
-  const mk = (st, j, scs, txt) => ({
-    status: st,
+  const u = NC_BASE + '/api/login/qrcode/client/login?key=' + encodeURIComponent(key) + '&type=' + NC_QTYPE;
+  const r = await fetch(u, { headers: ncHdr(bag) });
+  const txt = await r.text();
+  const scs = ncSetCookies(r);
+  ncAbsorb(bag, scs);
+  let j = null;
+  try { j = JSON.parse(txt); } catch (e) {}
+  return {
+    status: r.status,
     code: (j && j.code) || 0,
     message: (j && j.message) || '',
     musicU: ncPickCookie(scs, 'MUSIC_U'),
@@ -4567,34 +4502,7 @@ async function ncPollOnce(bag, key) {
        网易没下发、还是字段被改了。正常扫码用不到这两个字段。 */
     cookieNames: scs.map(x => String(x || '').split('=')[0].trim()).filter(Boolean),
     raw: txt.slice(0, 120),
-  });
-  /* 2026-11-12：weapi 优先（与官方网页同款加密通道 + os/appver cookie），异常或
-     非 JSON 回退老明文 GET —— 双通道，最坏情况等于改造前。MUSIC_U 都从
-     Set-Cookie 提取，weapi 的返回 code 体系（800/801/802/803）与明文一致。 */
-  try {
-    const csrf = bag.__csrf || bag.__csrf_token || '';
-    const enc = await weapi({ key: key, type: NC_QTYPE, csrf_token: csrf });
-    const rw = await fetch(NC_BASE + '/weapi/login/qrcode/client/login', {
-      method: 'POST',
-      headers: Object.assign(ncHdr(bag), { 'Content-Type': 'application/x-www-form-urlencoded' }),
-      body: 'params=' + encodeURIComponent(enc.params) + '&encSecKey=' + encodeURIComponent(enc.encSecKey),
-    });
-    const scsW = ncSetCookies(rw);
-    ncAbsorb(bag, scsW);
-    const txtW = await rw.text();
-    let jw = null;
-    try { jw = JSON.parse(txtW); } catch (e) {}
-    if (jw && jw.code) return mk(rw.status, jw, scsW, txtW);
-    /* weapi 通道没给出 code → 落到老通道再试一次 */
-  } catch (e) { /* weapi 通道网络异常 → 老通道 */ }
-  const u = NC_BASE + '/api/login/qrcode/client/login?key=' + encodeURIComponent(key) + '&type=' + NC_QTYPE;
-  const r = await fetch(u, { headers: ncHdr(bag) });
-  const txt = await r.text();
-  const scs = ncSetCookies(r);
-  ncAbsorb(bag, scs);
-  let j = null;
-  try { j = JSON.parse(txt); } catch (e) {}
-  return mk(r.status, j, scs, txt);
+  };
 }
 /* 官方扫码页地址：chainId 必须与申请/轮询用同一个 sDeviceId，否则 803 会变 8821 */
 function ncScanUrl(key, dev) {
