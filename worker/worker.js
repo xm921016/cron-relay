@@ -2382,7 +2382,7 @@ async function addEntry(entry) {
       // 只有真要推 Secrets 时才做「全池 + 新号」合并（那是一次全表读）——
       // 默认关闭推送后，这里不该再为一份没人读的分片白跑一次查询。
       if (await pushPoolEnabled()) await pushPool(await mergePoolEntry(entry, ekey));
-      try { await refreshPoolSnap(true); } catch (e) {}   // 新增/续费号：必须立刻进灾备快照
+      try { await refreshPoolSnap(true, 300000); } catch (e) {}   // 新增/续费号进灾备快照（2026-11-12 加 5 分钟节流：连着登记只刷第一次）
       // 2026-11-10：把类型与最终有效期回给调用方，页面/EXE 才能显示
       // 「续费成功，到期日 2026-12-10（在原基础上 +30 天）」而不是一律「登记成功」。
       const _k = String(kind || 'new');
@@ -3281,14 +3281,19 @@ async function d1QuotaProbe(force) {
 //   /api/d1_sync 全表重写。删号不需要 force：墓碑 dead_log 会在 mergePoolKV 里过滤掉残留条目。
 const SNAP_MIN_GAP = 1800000;   // 30 分钟
 
-async function refreshPoolSnap(force) {
+async function refreshPoolSnap(force, forceGapMs) {
   if (!d1ok()) return false;
   // 2026-11-09：额度闸门 —— 这一步本身要全池读 682 行（只为写 1 次 KV），≥95% 时跳过。
   if (await d1ReadBlocked()) return false;
-  if (!force) {
+  /* force=true 默认完全跳过节流（改 CK / d1_sync 等必须立刻刷，行为不变）。
+     2026-11-12：登记链路（addEntry）传 forceGapMs=5 分钟 —— 原来每单登记都 force，
+     940 行全池读 + 200KB 大键写跟着白跑 N 遍。加窗口后高峰期连续登记只刷第一次，
+     新号最多晚 5 分钟进灾备快照，且下一笔任意登记/控制台写会自动补上。 */
+  const _gap = force ? (Number(forceGapMs) || 0) : SNAP_MIN_GAP;
+  if (_gap) {
     try {
       const last = Number(await caGet('poolsnap:at')) || 0;
-      if (last && Date.now() - last < SNAP_MIN_GAP) return false;
+      if (last && Date.now() - last < _gap) return false;
     } catch (e) { /* 读不到时间戳就照常刷：宁可多写一次，也不能让灾备快照悄悄变旧 */ }
   }
   // 2026-11-08：同样去掉 ORDER BY（改 JS 排，见 d1PoolCmp），省一半读行数；快照内容顺序不变。
@@ -4240,7 +4245,20 @@ async function regTokenGet(code) {
      regtoken_void 都已经写过镜像，读路径本来就是兜底，不需要每次读都重写一遍。 */
   try {
     const kv = await POOL.get('regtok:' + c);
-    if (!kv) await POOL.put('regtok:' + c, JSON.stringify(rows[0]), { expirationTtl: 259200 });
+    if (!kv) {
+      /* 2026-11-12：镜像真缺失时，买家页 qrcheck 每 2 秒轮询一次 /api/r/state，
+         原来这里每次轮询都 put —— 实测一场扫码（12:40-12:45）烧掉 64 次 KV 写。
+         KV 免费档「写」1000/天，与删/列共用，一场风暴就吃掉 6%。加 60 秒 Cache API
+         节流：同一条 token 60 秒内只回填一次，一场扫码风暴从 ~64 次降到 ≤5 次。
+         镜像只是 D1 读额度打满时的兜底，晚写 ≤60 秒无实际影响（生成/使用/作废
+         时 regTokenMirror 都会主动写，正常路径根本走不到这里）。 */
+      let _bf = false;
+      try { _bf = !!(await caGet('regtok:bf:' + c)); } catch (_e0) {}
+      if (!_bf) {
+        try { await caPut('regtok:bf:' + c, '1', 60); } catch (_e0) {}
+        await POOL.put('regtok:' + c, JSON.stringify(rows[0]), { expirationTtl: 259200 });
+      }
+    }
   } catch (e) {}
   return rows[0];
 }
