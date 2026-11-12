@@ -4900,7 +4900,21 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
       if (j.uid) {
         E('d-uid').textContent = '你的网易号 UID：' + j.uid + '（截图存一下；以后号掉线找客服补号，报这个最快）';
       }
-    }).catch(function(e){ st.busy = false; E('b-sub').disabled = false; E('sub-tip').textContent = e.message || '网络异常'; });
+    }).catch(function(e){
+      st.busy = false; E('b-sub').disabled = false;
+      /* 2026-11-12：网络断 ≠ 登记失败。这条链路要打 3~4 次网易接口 + 整池灾备快照，
+         弱网时成功回执送不回浏览器（页面显示 Failed to fetch），但服务端其实已经
+         写库、token 已经消耗 —— 买家再点一次就会撞「链接已用过」。
+         回查一次 state：链接已 used = 刚才那次其实成功了，直接按成功展示。 */
+      api('/api/r/state?t=' + encodeURIComponent(T)).then(function(s){
+        if (s && s.used) {
+          st.done = true;
+          finished('登记成功：刚才那条报错只是网络没等到回执，数据已经写进去了，无需重复登记。');
+          return;
+        }
+        E('sub-tip').textContent = (e.message || '网络异常') + '（如果再点提示链接已用过，说明其实已经登记成功了）';
+      }).catch(function(){ E('sub-tip').textContent = e.message || '网络异常'; });
+    });
   };
 
   if (!/^[A-Z0-9]{6,12}$/.test(T)) { fail('链接不完整，请复制客服发的完整链接'); return; }
