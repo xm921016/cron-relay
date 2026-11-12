@@ -1,0 +1,62 @@
+name: egress-watch
+
+# 2026-11-13 新增：家宽扫码出口（CF Tunnel -> 用户本机 relay.js -> 网易）每日看门狗。
+# 背景：KV EGRESS_PCT=100 后所有买家扫码请求走家宽隧道，故障自动回退 CF 直连兜底，
+# 但「回退成功」意味着家宽出口静默失效 —— 没有看门狗的话可能失效几天都没人发现。
+#
+# 每天北京 09:30（UTC 01:30，本仓库 cron 实测延迟 1~5h）：
+#   1) 隧道健康：用 EGRESS_KEY 实测 egress.xx1031.xyz 出码（一次 unikey，量极小）
+#   2) 登记质量：D1 rate_limit 近 7 天 rqc/rtok/rsub 统计死会话率（egress_watch.py）
+#   3) 无论好坏发日报邮件到 ALERT_TO；异常时主题带【异常】
+#
+# 额度注意：D1 只跑 3 条前缀 LIKE（走主键索引）+ 1 次 unikey，每天一次，量极小。
+
+on:
+  schedule:
+    - cron: '30 1 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: egress-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 隧道健康检查（实测出码）
+        env:
+          EGRESS_KEY: ${{ secrets.EGRESS_KEY }}
+        run: |
+          UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+          body=$(curl -s --max-time 20 -X POST \
+            -H "X-Egress-Key: $EGRESS_KEY" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -H "User-Agent: $UA" \
+            -H "Referer: https://music.163.com/" \
+            -d "type=3" \
+            "https://egress.xx1031.xyz/api/login/qrcode/unikey?type=3") || true
+          echo "出码响应: $(echo "$body" | head -c 200)"
+          if echo "$body" | grep -q '"code":200'; then
+            echo "TUNNEL=OK" >> "$GITHUB_ENV"
+          else
+            echo "TUNNEL=FAIL" >> "$GITHUB_ENV"
+            echo "::warning::家宽隧道出码失败，买家正在走 CF 直连兜底"
+          fi
+
+      - name: 登记质量统计 + 日报邮件
+        if: always()
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          KV_NS: 12aac9fba6a04b8fb19ee88ffac7fc7a
+          TUNNEL: ${{ env.TUNNEL }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: python3 egress_watch.py
