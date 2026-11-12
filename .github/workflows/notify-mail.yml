@@ -53,6 +53,9 @@ jobs:
       EMAIL_AUTH_CODE5: ${{ secrets.EMAIL_AUTH_CODE5 }}
       EMAIL_FROM6: ${{ secrets.EMAIL_FROM6 }}
       EMAIL_AUTH_CODE6: ${{ secrets.EMAIL_AUTH_CODE6 }}
+      # 2026-11-12：第七发信通道（七通道轮发 ≈ 3500 封/日余量）
+      EMAIL_FROM7: ${{ secrets.EMAIL_FROM7 }}
+      EMAIL_AUTH_CODE7: ${{ secrets.EMAIL_AUTH_CODE7 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

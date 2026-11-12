@@ -6822,6 +6822,19 @@ async function handle(request) {
       if (rows) { await caPut(k, JSON.stringify(rows), isToday ? 1800 : 86400); }
       return rows;
     }
+    // 2026-11-12 优化1d：「14 天前快照」（两周平均日增/回吐估算的数据源）单独缓存 24h。
+    // 那一天的快照早已定格（快照只在当天写），每次控制台回源都重查约 700 行纯属浪费。
+    // 键按被查日期分（cc14:<day>），不同结束日共用同一份；Cache API 落盘，不占 KV 写额度。
+    async function snap14Cached(date) {
+      const d14 = dateMinusN(date, 14);
+      if (!d1ok()) return readSnapDay(d14);
+      const k = 'cc14:' + d14;
+      const hit = await caGet(k);
+      if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+      const rows = await readSnapDay(d14);
+      if (rows) { await caPut(k, JSON.stringify(rows), 86400); }
+      return rows;
+    }
     if (url.pathname === '/api/console/data' && request.method === 'POST') {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let body;
@@ -6842,6 +6855,10 @@ async function handle(request) {
       //   语义不变：命中 0 行 D1 读、版本号即时失效、TTL 按日期分档。
       let _ccSkip = false;
       try { _ccSkip = body.nocache === 1; } catch (e) {}
+      // 2026-11-12 优化1：双轨 max_age —— 打开页面的自动登录传 max_age=60，允许吃 60 秒短窗缓存；
+      // 点刷新 / 手动登录成功仍传 nocache=1 强制回源（用户底线：登记完点刷新必须立即看到最新）。
+      let _ccShort = false;
+      try { const _ma = Number(body.max_age); _ccShort = !_ccSkip && _ma > 0 && _ma <= 60; } catch (e) {}
       let _ccKey = '';
       let _ccTtl = 300;
       let _ccVerOut = '';   // 只用于响应头排障：看 cc:ver 是否在两次请求之间抖动
@@ -6882,7 +6899,8 @@ async function handle(request) {
         readSnapDay(prevDate),
         // 2026-11-07：14 天前快照 —— 给「今日零增长 / 净增≤0」标记算两周平均日增与回吐估算。
         // 只在 KV 缓存（TTL 5 分钟）未命中时跑这一次 SELECT（约 700 行 = 免费额度的 0.014%），命中时 0 开销。
-        readSnapDay(dateMinusN(date, 14)),
+        // 2026-11-12 优化1d：改走 snap14Cached（24h 缓存），见 streakCached 下方说明。
+        snap14Cached(date),
         d1ok() ? d1All('SELECT pool,uid,dur FROM durs') : Promise.resolve(null),
         POOL.get('PEER_URL').catch(() => null),
         buildPlan(date).catch(() => null),
@@ -7100,7 +7118,14 @@ async function handle(request) {
       //   起因：实测连续 4 次请求全是 miss、每次都跑满 10 秒全量查询 —— 说明这份缓存从来没命中过，
       //   需要区分「写失败」（Cache API 拒收 818KB 响应？）和「key 不一致」（cc:ver 抖动）。
       let _ccPutOk = false;
-      if (!_ccSkip && _ccKey) { _ccPutOk = await caPut(_ccKey, _body, _ccTtl); }
+      if (!_ccSkip && _ccKey) {
+        _ccPutOk = await caPut(_ccKey, _body, _ccTtl);
+        // 2026-11-12 优化1：短窗（max_age）回源后把同一份结果再落常规键 cc:，
+        // 这样写操作后的自动 reload / 免密登录（走 cc:）也能直接命中，不再重复烧 8,200 行。
+        if (_ccShort) {
+          try { await caPut('cc:' + _ccVerOut + ':' + role + ':' + date + ':' + (prevDate || ''), _body, date !== beijingDate() ? 3600 : 300); } catch (e) {}
+        }
+      }
       return new Response(_body, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json' }, CORS, {
         'X-Cache': _ccSkip ? 'bypass' : (_ccPutOk ? 'miss-stored' : 'miss-storefail'),
         'X-CCVer': _ccVerOut.slice(0, 16),
@@ -8955,7 +8980,8 @@ function loadData(force){
   // 数据一格都不会变（用户反馈「刷新没用」）。
   // 现在的分工：点刷新 / 登录进来 = 强制取最新；登记、改配置、删号后的自动 reload 走缓存
   // （那些动作本身会 bump cc:ver，该失效的照样失效）。
-  if(force)q.nocache=1;
+  if(force===true)q.nocache=1;          // 点刷新/手动登录成功 = 强制回源（底线：登记完点刷新立即看到最新）
+  else if(force==='auto')q.max_age=60;  // 2026-11-12 优化1：打开页面的自动登录 = 允许 60 秒短窗缓存
   // 2026-10-27 21:05：不传 date/prevDate —— 后端默认就是「昨天 vs 今天」。
   // 日期框改成筛入池日期了，再往这里塞会把筛选值污染成快照日期。
   api('/api/console/data',q).then(function(o){
@@ -10245,7 +10271,9 @@ $('btnCsv').onclick=function(){
   window.addEventListener('hashchange',function(){hashLogin();});
   if(hashLogin())return;                    // 带 #pw= 时优先免密，不看缓存
   var s=load();
-  if(s){TOKEN=s.t;applyRole(s.role);$('loginBox').hidden=true;$('mainBox').hidden=false;loadData(true);}
+  // 2026-11-12 优化1：打开页面恢复会话的自动登录改走 60 秒短窗缓存（不再每次开页强制回源烧约 8,200 行）；
+  // 点「刷新」按钮仍是强制回源（loadData(true)），登记完点一下就能看到最新名单。
+  if(s){TOKEN=s.t;applyRole(s.role);$('loginBox').hidden=true;$('mainBox').hidden=false;loadData('auto');}
 })();
 </script></body></html>`;
 
