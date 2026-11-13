@@ -1352,7 +1352,7 @@ async function validateCookie(musicU) {
       let j = null;
       try { j = JSON.parse(txt); } catch (e) {}
       if (j && j.code === 200 && (j.profile || {}).userId) return { ok: true, uid: j.profile.userId };
-      if (j) return { ok: false, msg: 'MUSIC_U 无效或已失效（code=' + j.code + '，请重新从浏览器复制）' };
+      if (j) return { ok: false, msg: '网络波动了一下，没有识别成功：请稍等几秒再重试一次；如果反复出现这个提示，请联系客服处理' };
       lastDiag = 'HTTP ' + r.status + '，响应非 JSON：' + txt.slice(0, 60);
     } catch (e) {
       lastDiag = '网络异常：' + ((e && e.message) || e);
