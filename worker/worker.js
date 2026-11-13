@@ -2666,6 +2666,49 @@ async function mailEnqueue(pool, uid, kind, ref, email, name, agent, exp) {
      'pending', bjStamp()]);
 }
 
+// 2026-11-13：查艺人名下歌曲，挑「本人独创独唱」换歌候选（mail_scan 冻结歌自动处置用）。
+// 接口 POST /weapi/v1/artist/{aid} 为公开艺人页（无需 CK），2026-11-13 本机实测 200。
+// 候选条件：作者仅本人一人、时长≥90s、不在 usedSet（池内其他号在用）、不在 excludeList
+// （该号之前被判过冻结的歌）；fee=0 优先于 fee>0（VIP 试听歌听众播不动，雨季 fee=8 即此类）。
+async function artistSwapCandidate(aid, excludeSong, usedSet, excludeList) {
+  const ctl = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(10000) : undefined;
+  try {
+    const p = await weapi({});
+    const r = await fetch(BASE + '/weapi/v1/artist/' + encodeURIComponent(String(aid)), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        // 固定桌面 Chrome UA（与 live650 一致；全局 UA 是 iPhone 的，别混用）
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://music.163.com',
+      },
+      body: 'params=' + encodeURIComponent(p.params) + '&encSecKey=' + encodeURIComponent(p.encSecKey),
+      signal: ctl,
+    });
+    const d = await r.json();
+    if (!d || d.code !== 200) return null;
+    const songs = d.hotSongs || [];
+    let best = null;
+    for (const sg of songs) {
+      const id = String((sg && sg.id) || '');
+      if (!id || id === String(excludeSong)) continue;
+      if ((excludeList || []).indexOf(id) >= 0) continue;
+      if (usedSet && usedSet.has && usedSet.has(id)) continue;
+      const ar = sg.artists || sg.ar || [];
+      if (ar.length !== 1) continue;
+      if (String((ar[0] && ar[0].id) || '') !== String(aid)) continue;
+      const dur = Math.round(Number(sg.dt || sg.duration || 0) / 1000);
+      if (dur < 90) continue;
+      const score = Number(sg.fee || 0) === 0 ? 0 : 1;
+      if (!best || score < best.score) {
+        best = { id: id, name: String(sg.name || ''), dur: dur, fee: Number(sg.fee || 0),
+          artistName: String((ar[0] && ar[0].name) || ''), score: score };
+      }
+    }
+    return best;
+  } catch (e) { return null; }
+}
+
 async function d1Run(sql, params) {
   if (!d1ok()) { if (!_d1LastErr) _d1LastErr = 'D1 未绑定（DB 为空）'; return false; }
   try {
@@ -6527,19 +6570,25 @@ async function handle(request) {
       for (const w of will) {
         try { await mailEnqueue(w.pool, w.uid, w.kind, w.ref, w.email, w.name, w.agent, w.exp); } catch (e) {}
       }
-      // —— 2026-11-13 固化：共创歌换歌提醒检测（kind=songfix）——
-      // 口径：最近两个有快照的日期任务进度 rate 相等且 <95（冻结），歌为共创
-      //      （song_meta.n_artists>1），pub=0、在池、有邮箱。唯一键 (pool,uid,kind,ref)
-      //      天然去重；号主换歌后 ref（歌 id）变化，新歌若仍冻结会再次提醒。
-      // 读范围只取最近 3 个自然日的 snapshots，rows_read ≈ 快照 3 天 + accounts/song_meta/队列小表。
+      // —— 2026-11-13 固化：冻结歌自动处置（v2：先查名下独创歌自动换，没有才发邮件）——
+      // 口径：最近两个有快照的日期任务进度 rate 相等且 <95（冻结）、pub=0、在池、有邮箱、
+      //      登记日早于较旧那个快照日（新号头两天不算，避免误伤还没起量的号）。
+      // 处置流程（用户 11-13 指定）：
+      //   ① 查该号艺人名下有没有其他「本人独创独唱」（作者=本人、独唱、时长≥90s、不在池内
+      //      其他号手里、也不是该号之前被判冻结过的歌）→ 有：直接换歌（accounts.song +
+      //      song_meta + durs 三处同步写），并入队 songchange 通知（ref=旧歌id:新歌id）
+      //   ② 没有可换的：共创/本人不在作者列 → songfix 邮件；本人独创独唱被冻结 → songfix2 邮件
+      // 唯一键 (pool,uid,kind,ref) 天然去重（含已 sent 行）。weapi 艺人查询每班上限 20 次。
+      // 读范围只取最近 3 个自然日的 snapshots，rows_read ≈ 快照 3 天 + accounts/song_meta/acc_meta/队列小表。
       // 铁律 3c：任一读失败不落闸门，30 分钟后下一班整体重扫（到期部分幂等不重发）。
       const sfSnap = await d1All('SELECT uid,day,rate FROM snapshots WHERE day>=? AND day<=? AND rate IS NOT NULL',
         [new Date(Date.parse(today + 'T00:00:00Z') - 2 * 86400000).toISOString().slice(0, 10), today]);
-      const sfAccs = await d1All("SELECT pool,uid,name,email,agent,exp,song FROM accounts WHERE pool=? AND pub=0 AND email<>'' AND song<>''", [POOL_NAME]);
-      const sfMeta = await d1All('SELECT song,n_artists FROM song_meta WHERE n_artists>1', []);
-      const sfQ = await d1All("SELECT uid,ref FROM mail_queue WHERE kind='songfix' AND pool=?", [POOL_NAME]);
-      let sfFound = 0, sfEnq = 0;
-      const sfOk = sfSnap !== null && sfAccs !== null && sfMeta !== null && sfQ !== null;
+      const sfAccs = await d1All("SELECT pool,uid,name,email,agent,exp,song,added FROM accounts WHERE pool=? AND pub=0 AND email<>'' AND song<>''", [POOL_NAME]);
+      const sfMeta = await d1All('SELECT song,name,dur,n_artists,artists,first_artist,gone FROM song_meta', []);
+      const sfQ = await d1All("SELECT uid,kind,ref FROM mail_queue WHERE kind IN ('songfix','songfix2','songchange') AND pool=?", [POOL_NAME]);
+      const sfArt = await d1All('SELECT uid,artist_id FROM acc_meta', []);
+      let sfFound = 0, sfEnq = 0, sfSwapped = 0, sfApiCalls = 0;
+      const sfOk = sfSnap !== null && sfAccs !== null && sfMeta !== null && sfQ !== null && sfArt !== null;
       if (sfOk) {
         const sfByDay = {};
         for (const s of sfSnap) { const d = String(s.day || ''); (sfByDay[d] = sfByDay[d] || []).push(s); }
@@ -6550,21 +6599,67 @@ async function handle(request) {
           for (const s of sfByDay[sfD2]) sfOld[String(s.uid)] = Number(s.rate);
           const sfAccMap = {};
           for (const a of sfAccs) sfAccMap[String(a.uid)] = a;
-          const sfCo = {};
-          for (const m of sfMeta) sfCo[String(m.song)] = Number(m.n_artists) || 0;
+          const sfMetaMap = {};
+          for (const m of sfMeta) sfMetaMap[String(m.song)] = m;
+          const sfArtMap = {};
+          for (const a of sfArt) sfArtMap[String(a.uid)] = String(a.artist_id || '');
+          const sfFrozenBefore = {};   // 该号历史上被判过冻结的歌（ref），换歌候选要避开
           const sfQueued = {};
-          for (const q of sfQ) sfQueued[String(q.uid) + '|' + String(q.ref || '')] = 1;
+          for (const q of sfQ) {
+            sfQueued[String(q.uid) + '|' + String(q.kind || '') + '|' + String(q.ref || '')] = 1;
+            (sfFrozenBefore[String(q.uid)] = sfFrozenBefore[String(q.uid)] || []).push(String(q.ref || ''));
+          }
+          const usedSongs = new Set();
+          for (const a of sfAccs) { const sg = String(a.song || ''); if (sg) usedSongs.add(sg); }
           for (const s of sfByDay[sfD1]) {
             const uid = String(s.uid);
             const old = sfOld[uid];
             if (old === undefined || old !== Number(s.rate) || Number(s.rate) >= 95) continue;
             const a = sfAccMap[uid];
             if (!a) continue;
+            const added = String(a.added || '').slice(0, 10);
+            if (added && added >= sfD2) continue;   // 新号头两天，跳过（起量慢≠冻结）
             const song = String(a.song || '');
-            if (!song || !(sfCo[song] > 1)) continue;
-            if (sfQueued[uid + '|' + song]) continue;
+            const sm = sfMetaMap[song];
+            if (!sm || !String(a.email || '').trim()) continue;   // song_meta 缺则等 sync 回填，下班再判
+            let artistIds = [];
+            try { artistIds = (JSON.parse(sm.artists || '[]') || []).map(x => String(Array.isArray(x) ? x[0] : x)); } catch (e) {}
+            const mine = sfArtMap[uid] || '';
+            const co = Number(sm.n_artists) > 1;
+            const owned = !!mine && artistIds.indexOf(mine) >= 0;
+            if (!co && !owned) continue;             // 既非共创、也确认不了是本人的歌 → 不动
             sfFound++;
-            try { if (await mailEnqueue(POOL_NAME, uid, 'songfix', song, String(a.email || ''), String(a.name || ''), String(a.agent || ''), String(a.exp || ''))) sfEnq++; } catch (e) {}
+            // ① 先试自动换歌：名下有没有其他本人独创独唱（每班 weapi 上限 20 次）
+            let cand = null;
+            if (owned && mine && sfApiCalls < 20) {
+              sfApiCalls++;
+              cand = await artistSwapCandidate(mine, song, usedSongs, sfFrozenBefore[uid] || []);
+            }
+            if (cand) {
+              const now = new Date().toISOString();
+              const okU = await d1Run('UPDATE accounts SET song=? WHERE pool=? AND uid=?', [cand.id, POOL_NAME, uid]);
+              const okM = await d1Run('INSERT OR REPLACE INTO song_meta(song,name,dur,n_artists,artists,first_artist,gone,updated_at) VALUES (?,?,?,?,?,?,0,?)',
+                [cand.id, cand.name || '', cand.dur, 1, JSON.stringify([[mine, cand.artistName || '']]), String(mine), now]);
+              const okD = await d1Run('INSERT INTO durs (pool,uid,dur,updated_at) VALUES (?,?,?,?) ' +
+                'ON CONFLICT(pool,uid) DO UPDATE SET dur=excluded.dur, updated_at=excluded.updated_at',
+                [POOL_NAME, uid, cand.dur, now]);
+              if (okU) {
+                usedSongs.delete(song); usedSongs.add(cand.id);
+                sfSwapped++;
+                const scRef = song + ':' + cand.id;
+                if (!sfQueued[uid + '|songchange|' + scRef]) {
+                  sfQueued[uid + '|songchange|' + scRef] = 1;
+                  try { if (await mailEnqueue(POOL_NAME, uid, 'songchange', scRef, String(a.email || ''), String(a.name || ''), String(a.agent || ''), String(a.exp || ''))) sfEnq++; } catch (e) {}
+                }
+                continue;
+              }
+              // accounts.song 写失败（理论罕见）：不换，走邮件兜底
+            }
+            // ② 没得换 → 发提醒邮件
+            const kind = (co || !owned) ? 'songfix' : 'songfix2';
+            if (sfQueued[uid + '|' + kind + '|' + song]) continue;
+            sfQueued[uid + '|' + kind + '|' + song] = 1;
+            try { if (await mailEnqueue(POOL_NAME, uid, kind, song, String(a.email || ''), String(a.name || ''), String(a.agent || ''), String(a.exp || ''))) sfEnq++; } catch (e) {}
           }
         }
       }
@@ -6574,7 +6669,8 @@ async function handle(request) {
       }
       try { await POOL.put('MAIL_SCAN_DAY', today); } catch (e) {}
       return json({ ok: true, dry: false, day: today, scanned: rows.length, will_enqueue: will.length,
-        dropped_stale: dropped, songfix_found: sfFound, songfix_enqueued: sfEnq });
+        dropped_stale: dropped, songfix_found: sfFound, songfix_enqueued: sfEnq,
+        songfix_swapped: sfSwapped, songfix_api: sfApiCalls });
     }
     if (url.pathname === '/api/mail_pending' && request.method === 'POST') {
       let body;
@@ -6607,6 +6703,21 @@ async function handle(request) {
       const accMap = new Map();
       for (const a of accs) accMap.set(String(a.pool || '') + '|' + String(a.uid != null ? a.uid : ''), a);
       const rc = await regCfg();
+      // 2026-11-13：songchange 需要新旧歌名（ref=旧歌id:新歌id），一次 IN 查询取齐 song_meta
+      const scNames = {};
+      const scIds = [];
+      for (const p of pend) {
+        if (String(p.kind || '') !== 'songchange') continue;
+        for (const x of String(p.ref || '').split(':')) {
+          if (/^\d+$/.test(x) && !scIds.includes(x)) scIds.push(x);
+        }
+      }
+      if (scIds.length) {
+        const scPh = scIds.map(() => '?').join(',');
+        const sm2 = await d1All('SELECT song,name FROM song_meta WHERE song IN (' + scPh + ')', scIds);
+        if (sm2 === null) return json({ ok: false, message: '读 song_meta 失败（' + (_d1LastErr || 'D1 异常') + '），本轮不发放' }, 503);
+        for (const m of sm2) scNames[String(m.song)] = String(m.name || '');
+      }
       const toSend = [], skipped = [];
       for (const p of pend) {
         const key = String(p.pool || '') + '|' + String(p.uid != null ? p.uid : '');
@@ -6630,6 +6741,12 @@ async function handle(request) {
         const item = { pool: String(p.pool || ''), uid: String(p.uid != null ? p.uid : ''), kind: String(p.kind || ''),
           ref: String(p.ref || ''), email: String(a.email || '').trim(), name: String(a.name || ''), agent: agent,
           group: grp, exp: String(a.exp || '').slice(0, 10), created_at: String(p.created_at || '') };
+        if (String(p.kind || '') === 'songchange') {
+          // 2026-11-13：songchange 附带新旧歌名（查不到 song_meta 的用「歌+id」兜底）
+          const scParts = String(p.ref || '').split(':');
+          item.song_old = scNames[scParts[0]] || ('歌' + (scParts[0] || '?'));
+          item.song_new = scNames[scParts[1]] || ('歌' + (scParts[1] || '?'));
+        }
         toSend.push(item);
         if (!dry) await d1Run("UPDATE mail_queue SET state='claimed',claimed_at=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='pending'",
           [stamp, item.pool, item.uid, item.kind, item.ref]);
@@ -10173,9 +10290,12 @@ function rgSync(){
   $('rgRefBox').hidden=(k==='new');
   /* 2026-11-12：补登/换绑都锁定客服和套餐 —— 补登与换绑都是「继承原单」的操作：
      有效期继承原单（不存套餐），客服归属也继承原单（后端自动取原单的 agent，
-     「自己的客服给自己的客户补登」）。禁用而不是隐藏，让人看得见这两项用不上；
-     原来那行黄色 tip 删掉了 —— 多一行字把弹窗布局撑乱了。
-     禁用状态在选完原单后也不影响：rgGo 只读值，读不到 disabled 的值照样发空。 */
+     「自己的客服给自己的客户补登」）。     禁用而不是隐藏，让人看得见这两项用不上；原来那行黄色 tip 删掉了 —— 多一行字把弹窗布局撑乱了。
+     2026-11-13 修 bug：disabled 的 select 在 JS 里照样能读到 .value（disabled 只挡交互不挡读取），
+     旧写法 rgGo 直接读 $('rgAgent').value，把下拉默认第一项（如「徐」）当显式传值发了上去，
+     后端「显式传值 > 原单归属」就丢了原单客服（曾W）→ 换绑/补登链接客服全落成下拉第一项。
+     所以 rgGo 对 fix/ckswap 必须传空 agent，让后端走「继承原单」分支；
+     EXE 不禁用下拉、客服显式选了名字，按传值走，两边互不影响。 */
   var inh=(k==='fix'||k==='ckswap');
   $('rgPlan').disabled=inh;
   $('rgAgent').disabled=inh;
@@ -10232,7 +10352,8 @@ $('rgGo').onclick=function(){
   if(k==='fix'&&RG_REF&&RG_REF.alive){ $('rgm').textContent='这个号还在号池里没掉线，不用补登（要延期请用「续费」）'; $('rgm').className='msg err'; return; }
   /* 2026-11-12：换绑只给「还在池里」的号用 —— 号已掉线就走补登，别让客服发错类型 */
   if(k==='ckswap'&&RG_REF&&!RG_REF.alive){ $('rgm').textContent='这个号已经不在号池里（掉线了），换绑用不了，请改发「补登」链接'; $('rgm').className='msg err'; return; }
-  var body={user:t.user,pass:t.pass,kind:k,agent:$('rgAgent').value||'',
+  var body={user:t.user,pass:t.pass,kind:k,
+    agent:((k==='fix'||k==='ckswap')?'':($('rgAgent').value||'')),
     plan:((k==='fix'||k==='ckswap')?'':($('rgPlan').value||'')),hours:parseInt($('rgHours').value,10)||24,
     note:$('rgNote').value||''};
   if(k!=='new'){ body.fix_ref=RG_REF.ref; body.fix_exp=RG_REF.exp; }
