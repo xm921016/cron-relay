@@ -9697,15 +9697,17 @@ function render(){
       +(o.title?o.title+'。':'')+'点一下按「'+label+'」筛选表格，再点一次取消">'
       +'<b'+(o.color?' style="color:'+o.color+'"':'')+'>'+val+'</b><span>'+label+'</span></div>';
   };
-  // 2026-11-13 晚：全项目容量卡（非筛选卡，不带 data-sv，点了没反应是刻意的）。
+  // 2026-11-13 晚：号池容量卡（非筛选卡，不带 data-sv，点了没反应是刻意的）。
+  // 字段与服务端 poolUsageSummary() 对齐：totalCap/totalUsed（21:24 修复首版 total/used 写错的 ?/0）。
   // DATA.cap 缺失（旧缓存/接口异常）就不渲染，页面其余部分不受影响。
   var capHtml='';
   if(DATA.cap){
-    var cu=(DATA.cap.used==null)?'?':DATA.cap.used;
-    capHtml='<div class="stat" title="全项目 = 所有号池仓库合计（公益号、过期号不占名额）。明细：'+esc(String((DATA.cap.list||[]).join('，')||'暂无'))+'"><b>'+cu+'/'+(DATA.cap.total||0)+'</b><span>全项目容量</span></div>';
+    var cu=(DATA.cap.totalUsed==null)?'?':DATA.cap.totalUsed;
+    capHtml='<div class="stat" title="号池容量 = 已登记人数/登记上限（公益号、过期号不占名额）。明细：'+esc(String((DATA.cap.list||[]).join('，')||'暂无'))+'"><b>'+cu+'/'+(DATA.cap.totalCap||0)+'</b><span>号池容量</span></div>';
   }
   $('stats').innerHTML=
-    statCard('__all',baseRows.length,'账号总数',{title:'当前筛选条件下的全部账号。点一下把池/客服/套餐/日期/搜索一起清掉'})
+    capHtml
+   +statCard('__all',baseRows.length,'账号总数',{title:'当前筛选条件下的全部账号。点一下把池/客服/套餐/日期/搜索一起清掉'})
    +statCard('__data',withData.length,'今日有数据',{title:'今天这一轮快照采到了该号数据的号'})
    +statCard('__up',ups,'今日上涨',{color:'#c0392b',title:'650 进度比昨天高的号'})
    +statCard('__down',downs,'今日下跌',{color:'#1e8449',title:'650 进度比昨天低、且不是周期归零的号'})
@@ -9721,7 +9723,6 @@ function render(){
    +statCard('歌曲无效',svcWrong,'歌曲无效',{warn:true,color:'#a32d2d',title:'歌曲无效 = 绑错歌（歌的作者里没有他）或 查无此歌（已下架/删除）：刷多少都不会涨，必须改绑'})
    +statCard('共创歌曲',svcCoop,'共创歌曲',{warn:true,color:'#b85c00',title:'共创歌曲 = 多人合唱：播放会被分摊给其他艺人，非主艺的号实测恒定 0%'})
    +statCard('已达100%',done100,'已达100%',{title:'本周期已做满 100% 的号：继续刷没有额外收益，等下个 31 天周期归零重爬'})
-   +capHtml
    ;
   // ===== 2026-10-27：套餐汇总 =====
   // 口径：按「登记时买的套餐」（accounts.plan）统计，不按剩余天数反推 —— exp 可改可续，反推会漂。
