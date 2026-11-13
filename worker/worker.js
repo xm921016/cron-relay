@@ -10142,18 +10142,35 @@ $('rgGo').onclick=function(){
     if(!(r.ok&&r.d&&r.d.ok)){ $('rgm').textContent=(r.d&&r.d.message)||'生成失败'; $('rgm').className='msg err'; return; }
     var d=r.d;
     $('rgm').textContent='已生成（'+rgKindName(k)+'）'; $('rgm').className='msg ok';
+    /* 2026-11-13：链接展示去掉 https:// 前缀，并在旁边加「复制链接」按钮。
+       注意：模板字符串里正则的斜杠转义会被吃掉，这里用 indexOf 截断，不要改成正则。 */
+    var SHORT_LINK=String(d.short||d.link||'');
+    if(SHORT_LINK.indexOf('https://')===0){ SHORT_LINK=SHORT_LINK.slice(8); }
+    else if(SHORT_LINK.indexOf('http://')===0){ SHORT_LINK=SHORT_LINK.slice(7); }
     $('rgOut').innerHTML='<div style="margin-top:8px;padding:10px 12px;background:#f2fbf4;border:1px solid #cfe8d6;border-radius:9px;font-size:12.5px;line-height:1.95">'
-      +'链接：<input readonly value="'+esc(d.link||'')+'" style="width:auto;min-width:400px;font-family:ui-monospace,Consolas,monospace" onclick="this.select()">'
+      +'链接：<input readonly value="'+esc(SHORT_LINK)+'" style="width:auto;min-width:280px;font-family:ui-monospace,Consolas,monospace" onclick="this.select()">'
+      +'<button class="mini" type="button" id="rgCpBt" style="margin-left:8px;padding:6px 12px">复制链接</button>'
       +'<br>有效期至 '+esc(bjFull(d.exp_at))+'（'+(d.hours||24)+' 小时），一条链接只能用一次'
       +(d.fix_exp?('<br>原单到期日：<b>'+esc(d.fix_exp)+'</b>'+(k==='fix'?'（补登后仍到这天，不延长）':(k==='ckswap'?'（换绑不改变有效期）':'（续费在此基础上累加）'))):'')
       +'<br><span style="color:#888">把链接发给客户，客户自己扫码登记，不用他给你密码。</span></div>';
+    var cpb=$('rgCpBt');
+    if(cpb) cpb.onclick=function(){
+      var done=function(){ cpb.textContent='已复制'; setTimeout(function(){ cpb.textContent='复制链接'; },1200); };
+      var ret=rgCp(SHORT_LINK);
+      if(ret&&ret.then){ ret.then(function(ok){ if(ok) done(); }); } else { done(); }
+    };
     rgLoad();
   }).catch(function(){ $('rgGo').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
 };
 function rgCp(url){
-  /* 点编码复制整条链接；剪贴板 API 只在 https 下有，失败就弹框让用户手动复制 */
-  if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(url); }
-  else{ window.prompt('完整链接（手动复制）：', url); }
+  /* 点编码复制整条链接；剪贴板 API 只在 https 下有，失败就弹框让用户手动复制。
+     2026-11-13：改成返回 promise（true=真的写进剪贴板），供「复制链接」按钮提示状态。 */
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(url).then(function(){ return true; })
+      .catch(function(){ window.prompt('完整链接（手动复制）：', url); return false; });
+  }
+  window.prompt('完整链接（手动复制）：', url);
+  return Promise.resolve(false);
 }
 function rgLoad(){
   var t=rgTok();
