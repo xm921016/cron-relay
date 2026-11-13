@@ -38,7 +38,9 @@ DRY = "--dry" in sys.argv
 
 
 def call(path, payload, timeout=60):
-    r = requests.post(WORKER + path, json=payload, timeout=timeout)
+    # 2026-11-13：铁律 6 —— 调 xx1031.xyz 必带浏览器 UA（同 notify_mail.py 口径）
+    r = requests.post(WORKER + path, json=payload, timeout=timeout,
+                      headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
     try:
         return r.status_code, r.json()
     except Exception:

@@ -298,12 +298,15 @@ class NeteaseClient:
     def login_check(self, name):
         """返回 True=有效 / False=失效 / None=网络异常。
 
-        2026-11-03 加固 A：P1「每日日常」(/weapi/point/dailyTask) 是网易的死接口，
-        对活号也常回 301/其他业务码；原来只要它和 signin/v2/progress 都不到 200 就判
-        False，等于把风控响应当成死号。现在补两条独立链路，任一通过即算活：
+        2026-11-13 对齐 run.py login_by_cookie 的三态口径（11-03 误杀修复的完整版）：
+          ① dailyTask 200/-2 → 有效（签到场景快捷通道）；
+          ② 签到进度 v2/progress 200 → 有效；
           ③ weapi/w/nuser/account/get 拿到 profile.userId（最强证据）；
           ④ api v1 discovery/recommend 每日推荐有歌（活号 30+ 首、死号/匿名 0 首，10-11 实测）。
-        全部失败才算失效；只有请求层失败（code=-1）返回 None。
+        关键差异（原版漏洞）：dailyTask 回 301（限流）时若最强证据 ③ 恰好请求层失败
+        （code=-1，网络/HTTP 错误），原逻辑会一路落到「全部业务码非 200」判死 ——
+        一次网络抖动 + 一次限流就把活号误杀。现在 ③ 请求层失败直接返回 None（无法判定，
+        明天重试）；④ 请求异常同样返回 None。只有业务码层面的失败才走 ④ 用歌数定生死。
         """
         body = self.weapi_post("/weapi/point/dailyTask", {"type": 1})
         code = body.get("code", -1)
@@ -319,7 +322,7 @@ class NeteaseClient:
         if body2.get("code") == 200:
             logger.info(f"[{name}] Cookie 有效（备用校验通过）")
             return True
-        # 备用验证 ②：账号信息（2026-11-03 新增，最强证据）
+        # 备用验证 ②（最强证据）：账号信息。请求层失败 → 无法判定，绝不判死
         b3 = self.weapi_post("/weapi/w/nuser/account/get", {})
         prof = (b3.get("profile") or b3.get("data", {}).get("profile") or {})
         if b3.get("code") == 200 and prof.get("userId"):
@@ -327,21 +330,23 @@ class NeteaseClient:
             self.nickname = prof.get("nickname")
             logger.info(f"[{name}] Cookie 有效（账号信息校验通过，用户 {self.nickname}）")
             return True
-        # 备用验证 ③：每日推荐首数（2026-11-03 新增；必须用 v1 明文接口，v3 对死号也有歌）
+        if b3.get("code", -1) == -1:
+            logger.warning(f"[{name}] 账号信息链路请求层失败（dailyTask={code} progress={body2.get('code')}），"
+                           f"网络异常无法判定 cookie 状态（明天重试）")
+            return None
+        # 备用验证 ③：每日推荐首数（必须用 v1 明文接口，v3 对死号也有歌）
         try:
             d1 = self.s.get(f"{BASE_URL}/api/v1/discovery/recommend/songs", timeout=20).json()
-            if d1.get("code") == 200 and len((d1.get("data") or {}).get("dailySongs") or []) > 0:
-                logger.info(f"[{name}] Cookie 有效（每日推荐校验通过）")
-                return True
         except Exception:
-            pass
-        # 全部请求都 code=-1 = 请求层失败（网络/HTTP 错误），不是 cookie 本身的问题，
-        # 返回 None 让主程序跳过本次而非误判过期（2026-10-13 修复）
-        if code == -1 and body2.get("code", -1) == -1 and b3.get("code", -1) == -1:
-            logger.warning(f"[{name}] 网络异常，无法判定 cookie 状态（明天重试）")
+            logger.warning(f"[{name}] 每日推荐链路网络异常，无法判定 cookie 状态（明天重试）")
             return None
-        logger.error(f"[{name}] Cookie 无效或已过期: dailyTask={code} progress={body2.get('code')} account={b3.get('code')}")
-        return False
+        alive = d1.get("code") == 200 and len((d1.get("data") or {}).get("dailySongs") or []) > 0
+        if alive:
+            logger.info(f"[{name}] Cookie 有效（每日推荐校验通过）")
+        else:
+            logger.error(f"[{name}] Cookie 无效或已过期: dailyTask={code} progress={body2.get('code')} "
+                         f"account={b3.get('code')} recommend={d1.get('code')}")
+        return alive
 
     def p1_do(self, name):
         body = self.weapi_post("/weapi/point/dailyTask", {"type": 1})

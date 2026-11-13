@@ -514,7 +514,8 @@ def _mark_dead_mailed(names):
         return
     try:
         r = requests.post(WORKER_URL.rstrip("/") + "/api/dead_mailed",
-                          json={"pass": REPORT_PASS, "pool": POOL_TAG, "names": lst}, timeout=20)
+                          json={"pass": REPORT_PASS, "pool": POOL_TAG, "names": lst}, timeout=20,
+                          headers={"User-Agent": BROWSER_UA})  # 2026-11-13：铁律 6，调 xx1031.xyz 必带浏览器 UA
         print(f"  直邮回执已回写 {len(lst)} 个（HTTP {r.status_code}）：{'、'.join(lst)}")
     except Exception as e:
         print(f"  直邮回执回写失败（次日可能多收一封，不影响主流程）: {e}")
@@ -533,7 +534,8 @@ def _mark_relogin_mailed(names):
         return
     try:
         r = requests.post(WORKER_URL.rstrip("/") + "/api/relogin_mailed",
-                          json={"pass": REPORT_PASS, "names": lst}, timeout=20)
+                          json={"pass": REPORT_PASS, "names": lst}, timeout=20,
+                          headers={"User-Agent": BROWSER_UA})  # 2026-11-13：铁律 6
         _nm = "、".join(lst)
         print(f"  重登提醒回执已回写 {len(lst)} 个（HTTP {r.status_code}）：{_nm}")
     except Exception as e:
@@ -577,7 +579,8 @@ def fetch_run_done(day):
             time.sleep((2, 5, 10)[i - 1])
         try:
             r = requests.get(SNAP_URL.rstrip("/") + "/api/run_done",
-                             params={"pass": ASSIGN_PASS, "pool": POOL_TAG, "day": day}, timeout=20)
+                             params={"pass": ASSIGN_PASS, "pool": POOL_TAG, "day": day}, timeout=20,
+                             headers={"User-Agent": BROWSER_UA})  # 2026-11-13：铁律 6
             d = r.json() or {}
             if d.get("ok"):
                 return {str(u) for u in (d.get("uids") or [])}
@@ -600,7 +603,8 @@ def mark_run_done(day, uid, slice_idx):
     try:
         r = requests.post(SNAP_URL.rstrip("/") + "/api/run_mark", json={
             "pass": ASSIGN_PASS, "pool": POOL_TAG, "day": day,
-            "uids": [str(uid)], "slice": slice_idx}, timeout=15)
+            "uids": [str(uid)], "slice": slice_idx}, timeout=15,
+            headers={"User-Agent": BROWSER_UA})  # 2026-11-13：铁律 6
         if r.status_code != 200 and not _RUN_MARK_WARNED[0]:
             _RUN_MARK_WARNED[0] = True
             print("::warning::已跑标记写入失败 HTTP %s %s（只影响断点续跑，不影响播放）"
@@ -1001,7 +1005,7 @@ def main():
                 "pass": REPORT_PASS,
                 "dead": dead_names,
                 "confirm": True,
-            }, timeout=30)
+            }, timeout=30, headers={"User-Agent": BROWSER_UA})  # 2026-11-13：铁律 6
             print(f"[slice {slice_idx}] 失效账号清理上报 {len(dead_names)} 个: HTTP {r.status_code} {r.text[:120]}")
             try:
                 _j = r.json() or {}
@@ -1054,7 +1058,7 @@ def main():
                 "accs": metrics,
                 "ran": ran_uids,
                 "durs": slice_durs,
-            }, timeout=30)
+            }, timeout=30, headers={"User-Agent": BROWSER_UA})  # 2026-11-13：铁律 6
             print(f"[slice {slice_idx}] 每日快照上报 {len(metrics)} 个号 / 实跑 {len(ran_uids)} 个"
                   f" / 时长 {len(slice_durs)} 个（锚点 {snap_day}）: HTTP {r.status_code} {r.text[:100]}")
         except Exception as e:

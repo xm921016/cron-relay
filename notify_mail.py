@@ -58,7 +58,10 @@ def email_ok(addr):
 
 
 def call(path, payload, timeout=60):
-    r = requests.post(WORKER + path, json=payload, timeout=timeout)
+    # 2026-11-13：铁律 6 —— 调 xx1031.xyz 必带浏览器 UA，否则 CF 完整性检查会拦默认
+    # python-requests UA（403/1010）。与 make_accounts.py / notes_exp.py 的 BROWSER_UA 同口径。
+    r = requests.post(WORKER + path, json=payload, timeout=timeout,
+                      headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
     try:
         return r.status_code, r.json()
     except Exception:

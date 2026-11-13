@@ -1305,8 +1305,11 @@ async function live650Batch(list) {
   try {
     const rs = await d1All('SELECT pool,uid,ck FROM accounts WHERE uid IN (' + todo.map(() => '?').join(',') + ')',
                            todo.map(c => String(c.uid)));
-    if (!rs) console.error('[console] 650 复核的 CK 补查失败，这批号本次按快照显示');
-    for (const r of (rs || [])) {
+    // 2026-11-13 修（铁律 3c：读失败≠读到空）：原来 rs=null 只打日志继续跑，cks 全空
+    //   → 这批号全部静默按快照旧值显示，还把「没复核过」的空状态回写缓存。
+    //   现在读失败直接返回已命中的缓存部分，不撞 weapi、不回写，下轮刷新再试。
+    if (!rs) { console.error('[console] 650 复核的 CK 补查失败（' + (_d1LastErr || 'D1 异常') + '），这批号本次按快照显示且不回写缓存'); return out; }
+    for (const r of rs) {
       cks[(r.pool === 'dz' ? 'dz' : 'hz') + '|' + String(r.uid)] = r.ck || '';
     }
   } catch (e) { return out; }
@@ -2720,6 +2723,28 @@ async function d1Run(sql, params) {
   } catch (e) {
     _d1LastErr = String((e && e.message) || e);
     console.error('D1 run 失败:', e && e.message); return false;
+  }
+}
+// 2026-11-13：D1 批量写 —— 把多条语句攒成一次 DB.batch（= 1 个子请求）。
+// 背景：mail_scan 的到期入队/作废循环逐号 d1Run，到期号多的日子（几十上百条）
+//   直接顶穿 Free 版「单次 invocation 50 子请求」红线，而且 MAIL_SCAN_DAY 闸门
+//   在末尾才落 → 抛 Too many subrequests 后闸门永落不成，每班重试每班超限，
+//   到期/登记/换歌邮件全链路停摆。批量后同样的量只需 1~2 个子请求。
+// 入参 [{sql, params}]；铁律 5 照守：单语句参数 ≤100、单 batch 语句数 ≤1000。
+// 全批原子（一条失败整批回滚）—— 调用方把「整批失败」当「这轮没写成」即可，幂等重扫兜底。
+async function d1Batch(list) {
+  if (!d1ok()) { if (!_d1LastErr) _d1LastErr = 'D1 未绑定（DB 为空）'; return false; }
+  if (!list || !list.length) return true;
+  try {
+    const stmts = list.map(x => {
+      const st = DB.prepare(x.sql);
+      return (x.params && x.params.length) ? st.bind(...x.params) : st;
+    });
+    await DB.batch(stmts);
+    return true;
+  } catch (e) {
+    _d1LastErr = String((e && e.message) || e);
+    console.error('D1 batch 失败:', e && e.message); return false;
   }
 }
 // 2026-11-06：同 d1Run，但返回「实际改动行数」。d1Run 只回布尔，而客服改名要把
@@ -6563,17 +6588,8 @@ async function handle(request) {
         return json({ ok: true, dry: true, day: today, scanned: rows.length, will_enqueue: will.length,
           will: will.slice(0, 50) });
       }
-      for (const p of pend) {
-        if (curExp.get(String(p.pool || '') + '|' + String(p.uid || '')) === String(p.ref || '')) continue;
-        const okD = await d1Run("UPDATE mail_queue SET state='dropped',skip_reason=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='pending'",
-          ['exp 已变更（续费/降级），旧提醒作废', String(p.pool || ''), String(p.uid || ''), String(p.kind || ''), String(p.ref || '')]);
-        if (okD) dropped++;
-      }
-      for (const w of will) {
-        try { await mailEnqueue(w.pool, w.uid, w.kind, w.ref, w.email, w.name, w.agent, w.exp); } catch (e) {}
-      }
       // —— 2026-11-13 固化：冻结歌自动处置（v2：先查名下独创歌自动换，没有才发邮件）——
-      // 口径：最近两个有快照的日期任务进度 rate 相等且 <95（冻结）、pub=0、在池、有邮箱、
+      // 口径：最近两个有快照的日期任务进度 rate 相等且<95（冻结）、pub=0、在池、有邮箱、
       //      登记日早于较旧那个快照日（新号头两天不算，避免误伤还没起量的号）。
       // 处置流程（用户 11-13 指定）：
       //   ① 查该号艺人名下有没有其他「本人独创独唱」（作者=本人、独唱、时长≥90s、不在池内
@@ -6583,14 +6599,52 @@ async function handle(request) {
       // 唯一键 (pool,uid,kind,ref) 天然去重（含已 sent 行）。weapi 艺人查询每班上限 20 次。
       // 读范围只取最近 3 个自然日的 snapshots，rows_read ≈ 快照 3 天 + accounts/song_meta/acc_meta/队列小表。
       // 铁律 3c：任一读失败不落闸门，30 分钟后下一班整体重扫（到期部分幂等不重发）。
+      // 2026-11-13 修：songfix 的 5 个读提前到闸门/写循环之前 —— 先把所有读做完，
+      //   读全成功才落闸门、才开写；读失败整轮返回重试（下面 batch 后子请求已大幅下降）。
       const sfSnap = await d1All('SELECT uid,day,rate FROM snapshots WHERE day>=? AND day<=? AND rate IS NOT NULL',
         [new Date(Date.parse(today + 'T00:00:00Z') - 2 * 86400000).toISOString().slice(0, 10), today]);
       const sfAccs = await d1All("SELECT pool,uid,name,email,agent,exp,song,added FROM accounts WHERE pool=? AND pub=0 AND email<>'' AND song<>''", [POOL_NAME]);
       const sfMeta = await d1All('SELECT song,name,dur,n_artists,artists,first_artist,gone FROM song_meta', []);
       const sfQ = await d1All("SELECT uid,kind,ref FROM mail_queue WHERE kind IN ('songfix','songfix2','songchange') AND pool=?", [POOL_NAME]);
       const sfArt = await d1All('SELECT uid,artist_id FROM acc_meta', []);
-      let sfFound = 0, sfEnq = 0, sfSwapped = 0, sfApiCalls = 0;
       const sfOk = sfSnap !== null && sfAccs !== null && sfMeta !== null && sfQ !== null && sfArt !== null;
+      if (!sfOk) {
+        return json({ ok: true, dry: false, day: today, scanned: rows.length, will_enqueue: will.length,
+          dropped_stale: 0, songfix: 'read失败（' + (_d1LastErr || 'D1 异常') + '），未落闸门下班重试' });
+      }
+      // 闸门提前落（2026-11-13 修）：原来在全部写循环之后，到期号一多撞 Too many subrequests
+      //   时闸门永落不成 → 每班重试每班超限，邮件队列永久停摆。提前后最坏情况也只是
+      //   「今天后面的写没跑完、明天接着补」，换来的是死循环消失（唯一键保证明天不重发）。
+      try { await POOL.put('MAIL_SCAN_DAY', today); } catch (e) {}
+      // 作废旧 pending（2026-11-13 改 batch：N 号逐条 UPDATE → 1 个子请求）
+      {
+        const dropStmts = [];
+        for (const p of pend) {
+          if (curExp.get(String(p.pool || '') + '|' + String(p.uid || '')) === String(p.ref || '')) continue;
+          dropStmts.push({ sql: "UPDATE mail_queue SET state='dropped',skip_reason=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='pending'",
+            params: ['exp 已变更（续费/降级），旧提醒作废', String(p.pool || ''), String(p.uid || ''), String(p.kind || ''), String(p.ref || '')] });
+        }
+        if (dropStmts.length && await d1Batch(dropStmts)) dropped = dropStmts.length;
+      }
+      // 到期入队（2026-11-13 改 batch：与 mailEnqueue 同一条 INSERT OR IGNORE 语句，
+      //   每语句 10 行 × 10 参数 = 100 参数正踩铁律单语句上限，语句数进同一 batch = 1 个子请求）
+      {
+        const enqStmts = [];
+        for (let i = 0; i < will.length; i += 10) {
+          const chunk = will.slice(i, i + 10);
+          const vals = [], ps = [];
+          for (const w of chunk) {
+            vals.push('(?,?,?,?,?,?,?,?,?,?)');
+            // 与 mailEnqueue 同口径：剥掉 qr:/manual:/name: 占位名前缀
+            const nm = String(w.name || '').replace(/^(?:qr|manual|name):[0-9A-Za-z_-]*$/i, '');
+            ps.push(String(w.pool || ''), String(w.uid != null ? w.uid : ''), String(w.kind || ''), String(w.ref || ''),
+              String(w.email || '').trim(), nm, String(w.agent || ''), String(w.exp || ''), 'pending', bjStamp());
+          }
+          enqStmts.push({ sql: 'INSERT OR IGNORE INTO mail_queue (pool,uid,kind,ref,email,name,agent,exp,state,created_at) VALUES ' + vals.join(','), params: ps });
+        }
+        if (enqStmts.length) await d1Batch(enqStmts);
+      }
+      let sfFound = 0, sfEnq = 0, sfSwapped = 0, sfApiCalls = 0;
       if (sfOk) {
         const sfByDay = {};
         for (const s of sfSnap) { const d = String(s.day || ''); (sfByDay[d] = sfByDay[d] || []).push(s); }
@@ -6665,11 +6719,7 @@ async function handle(request) {
           }
         }
       }
-      if (!sfOk) {
-        return json({ ok: true, dry: false, day: today, scanned: rows.length, will_enqueue: will.length,
-          dropped_stale: dropped, songfix: 'read失败（' + (_d1LastErr || 'D1 异常') + '），未落闸门下班重试' });
-      }
-      try { await POOL.put('MAIL_SCAN_DAY', today); } catch (e) {}
+      // 2026-11-13：闸门已前置（读全成功后立即落），走到这里说明本轮读写都完成。
       return json({ ok: true, dry: false, day: today, scanned: rows.length, will_enqueue: will.length,
         dropped_stale: dropped, songfix_found: sfFound, songfix_enqueued: sfEnq,
         songfix_swapped: sfSwapped, songfix_api: sfApiCalls });
