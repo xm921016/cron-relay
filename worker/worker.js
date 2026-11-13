@@ -6671,15 +6671,21 @@ async function handle(request) {
         return json({ ok: true, dry: true, day: today, scanned: rows.length, will_enqueue: will.length,
           will: will.slice(0, 50) });
       }
-      // —— 2026-11-13 固化：冻结歌自动处置（v2：先查名下独创歌自动换，没有才发邮件）——
+      // —— 2026-11-13 固化：冻结歌自动处置（v3：先查名下独创歌自动换，没有才发邮件）——
       // 口径：最近两个有快照的日期任务进度 rate 相等且<95（冻结）、pub=0、在池、有邮箱、
-      //      登记日早于较旧那个快照日（新号头两天不算，避免误伤还没起量的号）。
+      //      登记日早于较旧那个快照日（新号头两天不算，避免误伤还没起量的号）、
+      //      近 3 天没有过换歌处置（冷却期：rate 快照滞后，刚换的歌读数还冻着，不能动）。
+      // 覆盖类型（v3，2026-11-14 扩）：共创（含非主艺/作者列没他）、本人独唱被平台冻结、
+      //      绑错歌（独唱但唯一作者不是他）、查无此歌（gone=1，即时处置不等两天冻结）。
       // 处置流程（用户 11-13 指定）：
-      //   ① 查该号艺人名下有没有其他「本人独创独唱」（作者=本人、独唱、时长≥90s、不在池内
-      //      其他号手里、也不是该号之前被判冻结过的歌）→ 有：直接换歌（accounts.song +
-      //      song_meta + durs 三处同步写），并入队 songchange 通知（ref=旧歌id:新歌id）
-      //   ② 没有可换的：共创/本人不在作者列 → songfix 邮件；本人独创独唱被冻结 → songfix2 邮件
-      // 唯一键 (pool,uid,kind,ref) 天然去重（含已 sent 行）。weapi 艺人查询每班上限 20 次。
+      //   ① 查该号艺人名下有没有其他「本人独创独唱」（作者=本人、独唱、时长不设门槛——
+      //      池内 10s 歌照常记账、不在池内其他号手里、也不是该号之前处理过的歌）→ 有：
+      //      直接换歌（accounts.song + song_meta + durs 三处同步写），并入队 songchange
+      //      通知（ref=旧歌id:新歌id，旧歌非本人作品时第三段带 B 走「不是你的歌」文案）
+      //   ② 没有可换的：共创 → songfix 邮件；本人独创独唱被冻结 → songfix2；
+      //      绑错歌/查无此歌 → songfix3（不是你名下作品文案）
+      // 唯一键 (pool,uid,kind,ref) 天然去重（含已 sent 行）；同一首歌已用别的 songfix 类型
+      // 触达过不再换文案重发。weapi 艺人查询每班上限 20 次。
       // 读范围只取最近 3 个自然日的 snapshots，rows_read ≈ 快照 3 天 + accounts/song_meta/acc_meta/队列小表。
       // 铁律 3c：任一读失败不落闸门，30 分钟后下一班整体重扫（到期部分幂等不重发）。
       // 2026-11-13 修：songfix 的 5 个读提前到闸门/写循环之前 —— 先把所有读做完，
@@ -6688,7 +6694,7 @@ async function handle(request) {
         [new Date(Date.parse(today + 'T00:00:00Z') - 2 * 86400000).toISOString().slice(0, 10), today]);
       const sfAccs = await d1All("SELECT pool,uid,name,email,agent,exp,song,added FROM accounts WHERE pool=? AND pub=0 AND email<>'' AND song<>''", [POOL_NAME]);
       const sfMeta = await d1All('SELECT song,name,dur,n_artists,artists,first_artist,gone FROM song_meta', []);
-      const sfQ = await d1All("SELECT uid,kind,ref FROM mail_queue WHERE kind IN ('songfix','songfix2','songfix3','songchange') AND pool=?", [POOL_NAME]);
+      const sfQ = await d1All("SELECT uid,kind,ref,created_at FROM mail_queue WHERE kind IN ('songfix','songfix2','songfix3','songchange') AND pool=?", [POOL_NAME]);
       const sfArt = await d1All('SELECT uid,artist_id FROM acc_meta', []);
       const sfOk = sfSnap !== null && sfAccs !== null && sfMeta !== null && sfQ !== null && sfArt !== null;
       if (!sfOk) {
@@ -6742,11 +6748,14 @@ async function handle(request) {
         const sfArtMap = {};
         for (const a of sfArt) sfArtMap[String(a.uid)] = String(a.artist_id || '');
         const sfFrozenBefore = {};   // 该号历史上处理过的旧歌 id，换歌候选要避开
+        const sfLastTouch = {};      // 该号最近一次换歌处置时间（冷却期用）
         const sfQueued = {};
         for (const q of sfQ) {
           sfQueued[String(q.uid) + '|' + String(q.kind || '') + '|' + String(q.ref || '')] = 1;
           const fr = String(q.ref || '').split(':')[0];   // songchange ref=旧:新[:B]，取旧歌 id
           if (fr) (sfFrozenBefore[String(q.uid)] = sfFrozenBefore[String(q.uid)] || []).push(fr);
+          const ca = String(q.created_at || '');
+          if (ca && (!sfLastTouch[String(q.uid)] || ca > sfLastTouch[String(q.uid)])) sfLastTouch[String(q.uid)] = ca;
         }
         const usedSongs = new Set();
         for (const a of sfAccs) { const sg = String(a.song || ''); if (sg) usedSongs.add(sg); }
@@ -6778,6 +6787,11 @@ async function handle(request) {
           for (const s of sfByDay[sfD1]) {
             const uid = String(s.uid);
             if (sfHandled.has(uid)) continue;
+            // v3 冷却期（2026-11-14 加）：3 天内有过换歌/换歌邮件处置的号先观察。
+            // 原因：rate 快照滞后 1 天，刚换的歌会连着两天显示旧歌的冻结读数，
+            // 不冷却会把号主（或我们）刚换上的新歌又换掉（11-14 凌晨实弹翻车教训）。
+            const lt = sfLastTouch[uid];
+            if (lt && Date.parse(today + 'T00:00:00Z') - Date.parse(lt.slice(0, 10) + 'T00:00:00Z') < 3 * 86400000) continue;
             const old = sfOld[uid];
             if (old === undefined || old !== Number(s.rate) || Number(s.rate) >= 95) continue;
             const a = sfAccMap[uid];
