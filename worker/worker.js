@@ -9759,7 +9759,7 @@ function render(){
     var cu=(DATA.cap.totalUsed==null)?'?':DATA.cap.totalUsed;
     var capVal=cu+'/'+(DATA.cap.totalCap||0);
     var fs=capVal.length>=12?9:(capVal.length>=8?11:16);
-    capHtml='<div class="stat" title="号池容量 = 已登记人数/登记上限（公益号、过期号不占名额）。明细：'+esc(String((DATA.cap.list||[]).join('，')||'暂无'))+'"><b style="font-size:'+fs+'px;white-space:nowrap">'+capVal+'</b><span>号池容量</span></div>';
+    capHtml='<div class="stat" title="号池容量 = 已登记人数/登记上限（公益号、过期号不占名额）。明细：'+esc(String((DATA.cap.list||[]).join('，')||'暂无'))+'"><b style="font-size:'+fs+'px;line-height:21.6px;white-space:nowrap">'+capVal+'</b><span>号池容量</span></div>';
   }
   $('stats').innerHTML=
     capHtml
