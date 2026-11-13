@@ -2668,8 +2668,10 @@ async function mailEnqueue(pool, uid, kind, ref, email, name, agent, exp) {
 
 // 2026-11-13：查艺人名下歌曲，挑「本人独创独唱」换歌候选（mail_scan 冻结歌自动处置用）。
 // 接口 POST /weapi/v1/artist/{aid} 为公开艺人页（无需 CK），2026-11-13 本机实测 200。
-// 候选条件：作者仅本人一人、时长≥90s、不在 usedSet（池内其他号在用）、不在 excludeList
+// 候选条件：作者仅本人一人、不在 usedSet（池内其他号在用）、不在 excludeList
 // （该号之前被判过冻结的歌）；fee=0 优先于 fee>0（VIP 试听歌听众播不动，雨季 fee=8 即此类）。
+// 时长不设门槛（2026-11-13 用户口径）：池内最短 10s 歌照常记账，≥90s 门槛会挡掉
+// 池内一半以上有效候选（song_meta 1318 首里 661 首 <90s），只排除时长取不到(0)的坏数据。
 async function artistSwapCandidate(aid, excludeSong, usedSet, excludeList) {
   const ctl = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(10000) : undefined;
   try {
@@ -2698,7 +2700,7 @@ async function artistSwapCandidate(aid, excludeSong, usedSet, excludeList) {
       if (ar.length !== 1) continue;
       if (String((ar[0] && ar[0].id) || '') !== String(aid)) continue;
       const dur = Math.round(Number(sg.dt || sg.duration || 0) / 1000);
-      if (dur < 90) continue;
+      if (!dur) continue;
       const score = Number(sg.fee || 0) === 0 ? 0 : 1;
       if (!best || score < best.score) {
         best = { id: id, name: String(sg.name || ''), dur: dur, fee: Number(sg.fee || 0),
