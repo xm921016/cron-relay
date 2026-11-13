@@ -7489,7 +7489,10 @@ async function handle(request) {
       // /api/console/data（或改页面 DOM）也拿不到链接。满权限（role==='full'）原样返回。
       const actionsOut = (actions || []).map(function (x) {
         if (!x || role === 'full') return x;
-        return Object.assign({}, x, { url: '' });
+        const y = Object.assign({}, x, { url: '' });
+        // 2026-11-14：节点仓日志链接同样只给满权限——只读拿同一份数据也拿不到 url
+        if (Array.isArray(y.nodes)) y.nodes = y.nodes.map(function (n) { return Object.assign({}, n, { url: '' }); });
+        return y;
       });
       const _out = { ok: true, date: date, prevDate: prevDate, oldDate: dateMinusN(date, 14), hz: hz, dz: dz, durs: durs, snap: { cur: cur, prev: prev, old: old },
                     coverage: cov, actions: actionsOut, dead: dead, deadToday: deadToday, suspects: suspects, fresh: fresh,
@@ -8091,6 +8094,33 @@ async function fetchActionsStatus() {
       return { pool: r.pool, ok: false, note: String((e && e.message) || e).slice(0, 60) };
     }
   }));
+  // 2026-11-14：follower 节点仓（xm921015/014/013 的 relay-node）也跑主群分片，但主群作业卡
+  // 只有主仓日志入口，节点的运行记录没地方点。给 hz 条目附 nodes[]：每仓只拉最近 1 轮
+  //（1 个子请求，不拉 job 明细——分片进度主仓卡已有，这里只提供日志入口）。
+  // GH_TOKEN(xm921016) 实测对节点仓 runs 可读（200，2026-11-14 验证）；没跑过记录的节点不返回。
+  const NODE_REPOS = [
+    { name: '015', owner: 'xm921015', repo: 'relay-node' },
+    { name: '014', owner: 'xm921014', repo: 'relay-node' },
+    { name: '013', owner: 'xm921013', repo: 'relay-node' },
+  ];
+  const hzOut = out.find(x => x && x.pool === 'hz');
+  if (hzOut && hzOut.ok) {
+    const NH = { Authorization: 'Bearer ' + c.ghToken, Accept: 'application/vnd.github+json',
+                 'User-Agent': 'cron-relay-worker' };
+    hzOut.nodes = (await Promise.all(NODE_REPOS.map(async (n) => {
+      try {
+        const rr = await Promise.race([fetch('https://api.github.com/repos/' + n.owner + '/' + n.repo +
+          '/actions/workflows/run.yml/runs?per_page=1', { headers: NH }),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 6000))]);
+        if (!rr.ok) return null;
+        const rd = await rr.json();
+        const run = (rd.workflow_runs || [])[0];
+        if (!run) return null;
+        return { name: n.name, status: run.status || '', conclusion: run.conclusion || '',
+                 created: run.created_at || '', url: run.html_url || '' };
+      } catch (e) { return null; }
+    }))).filter(Boolean);
+  }
   // 2026-11-04：有 run 在跑时缓存只留 60 秒（进度要看得见在动）；全部结束才用 5 分钟，
   // 避免控制台每刷一次就去打 2 个仓库 x (1 次 runs + 1~3 次 jobs) 的 GitHub 接口。
   // 2026-11-10：落 Cache API（不占 KV 写额度）。跑批时 60 秒刷新依旧保留。
@@ -9943,8 +9973,16 @@ function renderRunbar(){
       // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，
       // 这里再按 ROLE 兜一层（缓存里的旧数据 / 将来字段改名时不至于漏出链接）。
       var logLink=((ROLE==='full')&&a.url)?' · <a href="'+esc(a.url)+'" target="_blank">日志</a>':'';
+      // 2026-11-14：follower 节点仓日志入口（015/014/013，服务端已附 nodes[]，只读无 url 不渲染）。
+      // 主群分片现在由主仓+节点仓一起跑，只看主仓日志会漏掉节点那几片的成败。
+      var nodeLinks='';
+      if((ROLE==='full')&&Array.isArray(a.nodes)){
+        a.nodes.forEach(function(n){
+          if(n&&n.url)nodeLinks+=' · <a href="'+esc(n.url)+'" target="_blank" style="color:#8aa54b">'+esc(n.name)+'日志</a>';
+        });
+      }
       h+='<div class="rb"><b>'+label+'</b> '+head+'<br>'
-        +'<span class="muted">'+bjTime(a.created)+logLink+'</span></div>';
+        +'<span class="muted">'+bjTime(a.created)+logLink+nodeLinks+'</span></div>';
     }else{
       h+='<div class="rb"><b>'+label+'</b> <span class="muted">'+(a.note?esc(a.note):'未配置')+'</span></div>';
     }
