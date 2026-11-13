@@ -1507,6 +1507,25 @@ async function peerPassOk(pass) {
 // ---- 分群计数辅助：历史条目没有 grp 字段的一律算一群 ----
 const grpOf = e => (Number(e && e.grp) === 2 ? 2 : 1);
 const groupLimitOf = (c, isG2) => (isG2 ? c.poolLimitG2 : c.poolLimitG1);
+
+// 2026-11-13：全项目登记容量汇总。每仓一个独立号池、各卡各的上限（hz=POOL_LIMIT_G1 默认 1440，
+// dz=POOL_LIMIT_G2 默认 500；relay-nodes 是「分片执行节点」不新增号池，不占登记名额）。
+// 上限来源两处：① 代码兜底 POOLS_BASE_CAPS（新仓库上线时在此加一行）；② 共享 D1 kv_misc 的
+// k='pool_cap:<pool>'（各仓 addEntry 时自写真实生效值，KV 改上限后随下一次登记自动同步；
+// 每池只写自己的键，多仓无竞态）。总上限 = 各池之和 → 每加一个仓库自动 +该仓名额。
+const POOLS_BASE_CAPS = { hz: 1440, dz: 500 };
+async function poolCaps() {
+  const caps = Object.assign({}, POOLS_BASE_CAPS);
+  try {
+    const rows = d1ok() ? await d1All("SELECT k,v FROM kv_misc WHERE k LIKE 'pool_cap:%'", []) : null;
+    if (rows) for (const r of rows) {
+      const p = String(r.k || '').slice(9);              // 'pool_cap:'.length === 9
+      const n = parseInt(String(r.v || ''), 10);
+      if (p && n > 0) caps[p] = n;
+    }
+  } catch (e) {}
+  return caps;
+}
 // 满员闸口的计数口径（2026-10-26 修复）：排除「已过期但还没被 pruneExpired 清掉」的号。
 // 这些号到期后已不参与轮转，却仍然占着人数上限，导致满员提示比实际可登记名额早出现。
 // 口径：exp 为空 / forever → 在册；形如 YYYY-MM-DD 且 < 今天 → 不计；其它异常格式按在册处理（保守）。
@@ -2186,6 +2205,16 @@ async function d1FindLastOrder(uidKey, name, exp) {
 async function addEntry(entry) {
   // 有效期默认 2 年（730 天），管理端可随时修改（exp=YYYY-MM-DD，forever=永久）
   if (!entry.exp) entry.exp = beijingDatePlus(730);
+  // 2026-11-13：自登记本仓登记上限到共享 D1（kv_misc k='pool_cap:hz'，汇总见 poolCaps()）。
+  //   每次登记幂等覆写一次：KV 改 POOL_LIMIT_G1 后，下一次登记自动把真实生效值同步给
+  //   后台「全项目容量」卡片；只写自己的键，多仓无竞态。失败只少一次同步，绝不影响登记。
+  try {
+    if (d1ok()) {
+      const _c = await cfg();
+      await d1Run('INSERT OR REPLACE INTO kv_misc (k,v,updated_at) VALUES (?,?,?)',
+        ['pool_cap:' + POOL_NAME, String(groupLimitOf(_c, false)), bjStamp()]);
+    }
+  } catch (e) {}
   const ekey = entryKeyOf(entry);
   const uidKey = entry.uid != null ? String(entry.uid) : null;
 
@@ -5114,7 +5143,7 @@ async function handle(request) {
       // 2026-10-22：页面里「号池上限 N 人」原来硬编码 200、再靠字符串替换成 KV 里的值 ——
       // 文案一改就静默失效。改成模板占位符 __POOL_LIMIT__，只替换占位符，文案随便改都不影响。
       let lim = 1200;
-      try { lim = parseInt(cleanKV(await POOL.get('POOL_LIMIT_G1')), 10) || 1200; } catch (e) {}
+      try { lim = parseInt(cleanKV(await POOL.get('POOL_LIMIT_G1')), 10) || 1440; } catch (e) {}
       return new Response(INDEX_HTML.replace('__POOL_LIMIT__', String(lim)),
         { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
     }
@@ -5213,6 +5242,32 @@ async function handle(request) {
         limit: c.poolLimitG1,
         remain: Math.max(0, c.poolLimitG1 - entries.length),
       };
+      /* 2026-11-13：全项目登记容量（多仓口径）——每仓一个独立号池、各卡各的上限，
+         总上限 = 各池之和，每加一个仓库自动 +该仓名额。上限来源见 poolCaps() 注释
+         （代码兜底 + 共享 D1 kv_misc pool_cap:<pool>）。used 口径与满员闸口的
+         activePoolSize 逐字一致：pub=1 不计、exp 是过去日期不计、异常格式保守计入。 */
+      const _caps = await poolCaps();
+      const _capRows = d1ok()
+        ? await d1All("SELECT pool, COUNT(*) AS n FROM accounts WHERE pub=0 AND " +
+            "(exp IS NULL OR exp='' OR exp='forever' OR exp NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' OR exp >= ?) GROUP BY pool",
+            [beijingDate()])
+        : null;
+      const _readFail = _capRows === null;      // 铁律 3c：读失败≠读到空，used 显示 ? 而不是 0
+      const _used = {};
+      if (_capRows) for (const r of _capRows) _used[String(r.pool || '')] = Number(r.n) || 0;
+      let _totalCap = 0, _totalUsed = 0;
+      const _capList = [];
+      for (const p of Object.keys(_caps)) {
+        const u = _used[p] != null ? _used[p] : (_readFail ? null : 0);
+        _totalCap += _caps[p];
+        if (u != null) _totalUsed += u;
+        _capList.push(p + ' ' + (u == null ? '?' : u) + '/' + _caps[p]);
+        delete _used[p];
+      }
+      for (const p of Object.keys(_used)) { _totalUsed += _used[p]; _capList.push(p + ' ' + _used[p] + '/?'); }
+      stats.totalCap = _totalCap;
+      stats.totalUsed = _readFail ? null : _totalUsed;
+      stats.poolCaps = _capList;
       return json({ ok: true, stats: stats, entries: entries }, 200, CORS);
     }
     // ---- 跨群互听歌单（2026-10-20）：只回"可以被听到的歌曲 id"，绝不回任何账号/cookie 信息。
@@ -8689,8 +8744,10 @@ function render(){
    +'<div class="stat'+(STATS.noMail?' warn':'')+'"><b>'+STATS.noMail+'</b><span>未绑邮箱</span></div>'
    +'<div class="stat'+(STATS.noListen?' warn':'')+'"><b>'+STATS.noListen+'</b><span>只收号</span></div>'
    +'<div class="stat"><b>'+STATS.public+'</b><span>公益号</span></div>'
-   +'<div class="stat"><b>'+(STATS.limit||1200)+'</b><span>人数上限</span></div>'
-   +'<div class="stat'+(STATS.remain<=20?' warn':'')+'"><b>'+STATS.remain+'</b><span>剩余名额</span></div>'
+   +'<div class="stat"><b>'+(STATS.limit||1440)+'</b><span>本仓上限</span></div>'
+   +'<div class="stat'+(STATS.remain<=20?' warn':'')+'"><b>'+STATS.remain+'</b><span>本仓剩余</span></div>'
+   +'<div class="stat"><b>'+((STATS.totalUsed==null)?'?':STATS.totalUsed)+'/'+(STATS.totalCap||0)+'</b><span>全项目容量</span></div>'
+   +'<div class="stat" title="'+esc((STATS.poolCaps||[]).join('，'))+'"><b>'+(STATS.poolCaps||[]).length+'</b><span>号池仓库数</span></div>'
    +'<div class="stat"><b>'+(list.length)+'</b><span>当前筛选</span></div>';
   var h='';
   list.forEach(function(e,i){
