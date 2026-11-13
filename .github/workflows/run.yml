@@ -2,12 +2,15 @@ name: relay
 
 on:
   schedule:
-    # 2026-11-04：北京 22:23 → 20:20（UTC 12:20）。GitHub schedule 实测延迟 +4h13~+8h24
-    # （中位 +5h10），所以真正开跑落在次日 00:33~04:44。提前这 2 小时是为了让 8.6h 的一轮
-    # 能在北京 11:40 的采集门闩之前收尾（22:23 时代实测拖到 13:05，快照与日增量整体延后）。
-    # ⚠ 延迟若小于 3h40 就会跨零点（日增量被劈成两天）——实测最小 +4h13，目前仍有 33 分钟余量；
-    # 若哪天观测到 relay 在 00:00 前开跑，把本行往回调 30 分钟（如 '50 12 * * *'）。
-    - cron: '20 12 * * *'      # UTC 12:20 ≈ 北京 20:20，错峰
+    # 2026-11-13：北京 20:20 → 16:30（UTC 08:30）+ plan 阶段「0 点闸门」。
+    # GitHub schedule 延迟不可控（实测 +4h13~+8h24，中位 +5h10），与其赌延迟，
+    # 不如把 cron 提前、让 plan job 自己等到北京时间 0:00~0:30 的随机点再放行，
+    # 把每晚真正开跑钉死在 0 点后一小段时间（播放落在当天 0 点起的新窗口）。
+    # cron 取 16:30 而不是 17:00：最坏触发 20:43（延迟最小 +4h13），闸门最多等 3h17m；
+    # 即使哪天延迟缩到 2.5h，也在 plan 的 5h 保险丝内，不会撞单 job 6h 硬上限。
+    # 一轮 ≈8.6h，0:30 前开跑 → 09:10 前收工，距 11:40 快照门闩仍有 2.5h 余量。
+    # 手动 dispatch（补跑/排查）不受闸门影响，白天照常秒跑。
+    - cron: '30 8 * * *'       # UTC 08:30 ≈ 北京 16:30；闸门负责等到 0 点后随机点
   # 2026-11-02：定向补跑入口（backfill.yml 与人工共用）。
   # 为什么不用 rerun-failed-jobs：它跑的是「失败那一刻的旧 commit」，而且单 job 重跑拿不到
   # plan 的输出（ASSIGN_DAY / NS 全空）→ 既用不到新代码，也会按执行当天重算分片。
@@ -45,12 +48,46 @@ jobs:
       par: ${{ steps.plan.outputs.par }}
       day: ${{ steps.plan.outputs.day }}
     steps:
+      # 2026-11-13 新增：0 点闸门（只对 schedule 定时触发生效）。
+      # 作用：把每晚真正开跑钉死在北京时间 0:00~0:30 的随机点，播放全部落在 0 点后的新窗口。
+      # 规则：
+      #   · 触发落在 20:00~23:59（延迟正常）→ 等到今晚 24:00 + 随机 0~30 分钟再放行；
+      #   · 触发已过北京 0 点（延迟超过 7.5h）→ 当晚轮次已在 0 点后，直接放行；
+      #   · 保险丝：最多等 300 分钟，防止 GitHub 延迟哪天变得极小把 plan job 顶过 6h 硬上限。
+      #     到点没过 0 点也照常放行并打 warning（宁可早一点，不丢整晚）。
+      # 手动 workflow_dispatch（补跑/排查）不带本步骤，白天随时秒跑。
+      - name: 0点闸门（schedule 专用：等到北京时间 0:00~0:30 随机点）
+        if: github.event_name == 'schedule'
+        run: |
+          set -e
+          bj_hour=$(TZ=Asia/Shanghai date +%H | sed 's/^0//')
+          if [ "$bj_hour" -lt 6 ]; then
+            echo "北京时间已过 0 点（当前 $(TZ=Asia/Shanghai date '+%F %T')），本轮属于当晚轮次，直接放行"
+            exit 0
+          fi
+          bj_today=$(TZ=Asia/Shanghai date +%F)
+          mid=$(date -u -d "$bj_today 16:00" +%s)   # 北京今天 24:00 == UTC 同日 16:00
+          target=$((mid + (RANDOM % 1800)))          # 随机 0~30 分钟，避免每晚整点卡点
+          now=$(date -u +%s)
+          if [ "$target" -le "$now" ]; then
+            echo "已过今晚随机放行点，直接开跑"
+            exit 0
+          fi
+          cap=$((now + 300 * 60))
+          if [ "$target" -gt "$cap" ]; then
+            echo "::warning::触发过早，闸门最多等 300 分钟，提前放行（不等到 0 点）"
+            target=$cap
+          fi
+          echo "今晚放行点：北京时间 $(TZ=Asia/Shanghai date -d "@$target" '+%F %T')"
+          while [ "$(date -u +%s)" -lt "$target" ]; do sleep 60; done
+          echo "闸门放行：$(TZ=Asia/Shanghai date '+%F %T')"
       # 2026-10-28 新增：每轮 relay 开跑前，先把 D1 账号池（accounts/snapshots/kv_misc/dead_log）
       # 全量导出一份加密快照。放在 plan 阶段 = 一定早于所有 brush 分片的验活/删号/发邮件，
       # 万一哪天大批误判，能拿这份回滚到本轮之前（d1_restore.py 吃 .enc 文件）。
       # 落地方式选 artifact 而不是 commit：每天 264KB 二进制进 git，一年近 100MB，
       # 70 个分片每天都要 clone 一遍。git 里的长期备份交给每周的 d1-backup.yml。
       # 失败只告警不拦路，备份不能挡住当天播放。
+      # 2026-11-13：闸门放行后才跑备份，快照更贴近实际开跑时刻。
       - uses: actions/checkout@v4
       - name: D1 全量备份（删号/发邮件之前）
         id: d1bak
