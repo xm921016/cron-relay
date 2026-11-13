@@ -9700,10 +9700,12 @@ function render(){
   // 2026-11-13 晚：号池容量卡（非筛选卡，不带 data-sv，点了没反应是刻意的）。
   // 字段与服务端 poolUsageSummary() 对齐：totalCap/totalUsed（21:24 修复首版 total/used 写错的 ?/0）。
   // DATA.cap 缺失（旧缓存/接口异常）就不渲染，页面其余部分不受影响。
+  // 2026-11-13 深夜：数值拆两排——大字=已登记人数，小字一排「/上限 · 号池容量」。
+  // 原来整串 1223/10499 用 18px 渲染，卡片窄会被截成 1223/1049；拆排后上限再涨位数也不撑宽卡片。
   var capHtml='';
   if(DATA.cap){
     var cu=(DATA.cap.totalUsed==null)?'?':DATA.cap.totalUsed;
-    capHtml='<div class="stat" title="号池容量 = 已登记人数/登记上限（公益号、过期号不占名额）。明细：'+esc(String((DATA.cap.list||[]).join('，')||'暂无'))+'"><b>'+cu+'/'+(DATA.cap.totalCap||0)+'</b><span>号池容量</span></div>';
+    capHtml='<div class="stat" title="号池容量 = 已登记人数/登记上限（公益号、过期号不占名额）。明细：'+esc(String((DATA.cap.list||[]).join('，')||'暂无'))+'"><b>'+cu+'</b><span>/'+(DATA.cap.totalCap||0)+' · 号池容量</span></div>';
   }
   $('stats').innerHTML=
     capHtml
@@ -9908,9 +9910,11 @@ function renderRunbar(){
   if(R){
     var accTxt=R.perDay?('加速档 '+R.perDay+' 首/天'+(R.days?(' · 入池 '+R.days+' 天'):'')):'';
     if(R.capped)accTxt='<span class="bad">加速档被稀释（'+R.perDay+' 首/天）</span>';
-    h+='<div class="rb"><b>今晚听歌</b><br><span class="'+(R.capped?'bad':'muted')+'">每号约 '+R.p+' 首</span>'
-      +'<div class="snap-at">'+accTxt+'</div>'
-      +(R.max?'<div class="snap-at">最慢号 '+R.max+' 首</div>':'')+'</div>';
+    // 2026-11-13 晚：压成固定 2 行（标题+数值同行、明细一行）。今晚数据多时（加速档+最慢号）
+    // 原来堆到 4 行，把整排运行状态卡都撑高，页面跳动。明细合并后窄卡内自动折行也只在卡内。
+    var maxTxt=R.max?(' · 最慢 '+R.max+' 首'):'';
+    h+='<div class="rb"><b>今晚听歌</b> <span class="'+(R.capped?'bad':'muted')+'">每号约 '+R.p+' 首</span>'
+      +'<div class="snap-at">'+accTxt+maxTxt+'</div></div>';
   }
   var fr='';
   ['hz','dz'].forEach(function(p){if(F[p])fr+='<span class="muted">'+(p==='hz'?'主群':'定制群')+' '+bjTime(F[p])+'</span> ';});
