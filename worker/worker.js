@@ -1521,10 +1521,18 @@ function activePoolSize(arr, today) {
   }
   return n;
 }
+// 2026-11-13：公钥缓存 1 小时。原实现每写一片 Secret 都重新 fetch 公钥，
+// 一次 pushPool N 片 = 2N 个子请求；号池涨到 1024 号时 N≈25，2N+1 超过 Free 版
+// 50 子请求上限，/api/resync 报 "Too many subrequests"（11-13 03:00 每日 resync 首次爆）。
+// 缓存后 N 片 = N+1 个子请求。公钥只在仓库 Secrets 密钥轮换时才变，1h TTL 足够安全。
+let _ghPk = null, _ghPkAt = 0;
 async function ghPublicKey() {
+  if (_ghPk && _ghPk.key && _ghPk.key_id && Date.now() - _ghPkAt < 3600000) return _ghPk;
   const g = await GH();
   const r = await fetch(`https://api.github.com/repos/${g.owner}/${g.repo}/actions/secrets/public-key`, { headers: { Authorization: `token ${g.token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'cron-relay-worker' } });
-  return r.json();
+  const pk = await r.json();
+  if (pk && pk.key && pk.key_id) { _ghPk = pk; _ghPkAt = Date.now(); }
+  return pk;
 }
 // ---- blake2b (RFC 7693, BigInt 实现) ----
 // GitHub Secrets API 要求 libsodium sealed box 格式：ephPub(32) || box(msg, nonce=blake2b24(ephPub||recipPub))
@@ -2002,11 +2010,16 @@ async function pushPoolEnabled() {
 
 async function pushPool(entries, force) {
   if (!force && !(await pushPoolEnabled())) return { skipped: true, count: entries.length };
-  const CHUNK_MAX = 40000;  // 单片原始 JSON 字符数；实测 gzip≈0.52 字节/字符（CK hex 不可压缩），b64+sealed 后 ~37KB < 48KB
+  // 2026-11-13：40000 → 55000。Free 版 Worker 单次调用 50 子请求是真正的天花板：
+  // 每片 1 次 PUT（公钥已缓存，见 ghPublicKey）+ mergePool 1 次 D1 + 读写 KV。
+  // 1024 号（CK 均长 866，单条 JSON ≈1000 字符）→ 19 片 ≈ 22 个子请求；
+  // 登记上限 1200 号 → 22 片仍安全。55000 取的是 gzip 最差压缩比 0.62 下的安全值：
+  // 55000×0.62+48 → b64 ≈ 45.6KB < GitHub Secret 48KB 上限（实测 CK hex ≈0.52）。
+  const CHUNK_MAX = 55000;
   // 2026-11-01：片数不再写死 12。按号池实际体积自动算（ceil(总字符 / CHUNK_MAX)）：
   // 池子涨多少片就自动多写几片，读取端（run.py / make_accounts.py / run.yml plan）改成动态扫 env，
   // 两端都不需要再改代码。SLOT_MAX 只是「异常数据别把 GitHub API 打爆」的护栏，
-  // 40 片 × 4 万字符 ≈ 160 万字符 ≈ 1700 号，远高于注册上限 1200，实际用不满。
+  // 40 片 × 5.5 万字符 ≈ 220 万字符 ≈ 2100 号，高于注册上限 1200，实际用不满。
   const SLOT_MAX = 40;
   const chunks = [];
   let cur = [];
@@ -4979,8 +4992,10 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
           finished('登记成功：刚才那条报错只是网络没等到回执，数据已经写进去了，无需重复登记。');
           return;
         }
-        E('sub-tip').textContent = (e.message || '网络异常') + '（如果再点提示链接已用过，说明其实已经登记成功了）';
-      }).catch(function(){ E('sub-tip').textContent = e.message || '网络异常'; });
+        /* 2026-11-13：fetch 抛错 = 请求根本没到服务器（买家侧网络抖动），别把 WebView 英文原文怼给买家，
+           下达明确指令：再点一次重试；撞「已用过」= 其实已成功。 */
+        E('sub-tip').textContent = '网络波动，刚才的请求没有送到服务器：请再点一次「完成登记」重试；如果提示链接已用过，说明其实已经登记成功了，无需重复操作';
+      }).catch(function(){ E('sub-tip').textContent = '网络异常，请检查手机网络后，再点一次「完成登记」重试'; });
     });
   };
 
