@@ -6624,7 +6624,12 @@ async function handle(request) {
           dropStmts.push({ sql: "UPDATE mail_queue SET state='dropped',skip_reason=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='pending'",
             params: ['exp 已变更（续费/降级），旧提醒作废', String(p.pool || ''), String(p.uid || ''), String(p.kind || ''), String(p.ref || '')] });
         }
-        if (dropStmts.length && await d1Batch(dropStmts)) dropped = dropStmts.length;
+        // 2026-11-13 复查补强：铁律 batch 单批 ≤1000 条语句；登记上限 1440 的极端积压日会顶穿，
+        //   按 500 条一片分多次 batch（每片仍是 1 个子请求，最多 3 片，预算内）。
+        for (let i = 0; i < dropStmts.length; i += 500) {
+          const chunk = dropStmts.slice(i, i + 500);
+          if (await d1Batch(chunk)) dropped += chunk.length;
+        }
       }
       // 到期入队（2026-11-13 改 batch：与 mailEnqueue 同一条 INSERT OR IGNORE 语句，
       //   每语句 10 行 × 10 参数 = 100 参数正踩铁律单语句上限，语句数进同一 batch = 1 个子请求）
