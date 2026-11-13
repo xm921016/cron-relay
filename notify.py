@@ -251,6 +251,30 @@ def notify_reg_ok(email, nickname, name, group=""):
     return send_user_email(email, subject, body)
 
 
+def notify_songfix(email, nickname, name, group=""):
+    """换歌提醒（2026-11-13 新增）：登记的歌是共创/非本人原创作品，平台不计入 650 有效播放。
+
+    触发：号主登记的歌经数据核查为共创作品（歌的作者列里没有本人，或作者数 >1），
+    且任务进度连续多天 0 增长 / 冻结。走 mail_queue 队列（kind=songfix，ref=歌曲 id）。
+    语气对齐既有文案：平和陈述、给可执行动作、不吓人。
+    """
+    if not (email or "").strip():
+        return False
+    subject = "【网易音乐人650任务】你登记的歌曲没有计入任务，请换一首歌"
+    body = (
+        f"你好，{_who(nickname, name)}：\n\n"
+        "跟你说一个数据核查结果：你的账号这几天的播放任务进度一直没有增长。\n"
+        "原因是目前登记的这首歌是「多人共创」作品——按平台规则，共创/合作发布的歌曲，\n"
+        "有效播放不计入 650 播放任务，所以不管每天播放多少，进度都不会涨。\n\n"
+        "处理办法：换成你自己上传的原创独唱歌曲（自己上传、自己演唱、不与他人合作发布），\n"
+        "然后到售后群联系客服重新登记新歌。换好之后，第二天的进度就会正常增长。\n\n"
+        "如果你已经换过歌了，请忽略这封邮件，或者到售后群跟客服说一声。\n\n"
+        + _group_line(group) + "\n\n"
+        "——" + SIGN
+    )
+    return send_user_email(email, subject, body)
+
+
 # 到期提醒 A 套（数字直给型）：标题直接给天数，语气逐档加急；
 # 用户 2026-11-06 要求：不说「在群里说一声」，统一「售后群联系客服」。
 _EXPIRE_TPL = {

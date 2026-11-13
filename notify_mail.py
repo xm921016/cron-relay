@@ -148,6 +148,9 @@ def main():
                     days = int(kind[3:]) if kind[3:].isdigit() else 30
                     ok = notify.notify_expire(t.get("email"), "", who, t.get("group") or "",
                                               t.get("exp") or t.get("ref") or "", days)
+                elif kind == "songfix":
+                    # 2026-11-13 新增：共创歌不计入任务的换歌提醒（ref=歌曲 id，仅用于去重）
+                    ok = notify.notify_songfix(t.get("email"), "", who, t.get("group") or "")
                 else:
                     print(f"   [{who}] 未知类型 {kind}，跳过")
                     ok = False
