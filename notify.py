@@ -304,26 +304,66 @@ def notify_songfix_solo(email, nickname, name, group=""):
     return send_user_email(email, subject, body)
 
 
-def notify_songchange(email, nickname, name, group="", song_old="", song_new=""):
+def notify_songfix_bad(email, nickname, name, group=""):
+    """绑错歌/查无此歌版换歌提醒（2026-11-13 新增，kind=songfix3）：
+
+    与 songfix（共创）/songfix2（本人独唱被冻结）的区别：登记的歌**根本不是他音乐人
+    名下的作品**（独唱但唯一作者是别人，即「绑错歌」），或歌已下架/删除（「查无此歌」）。
+    这是结构性问题，播放永远不计入他的 650，文案直接陈述「不是你的歌」，不提冻结。
+    走 mail_queue 队列（kind=songfix3，ref=歌曲 id）。
+    """
+    if not (email or "").strip():
+        return False
+    subject = "【网易音乐人650任务】你登记的歌曲不是你自己名下的作品，请换一首歌"
+    body = (
+        f"你好，{_who(nickname, name)}：\n\n"
+        "跟你说一个数据核查结果：你的账号这几天的播放任务进度一直没有增长。\n\n"
+        "原因是目前登记的这首歌不是你自己音乐人名下的作品（是其他艺人的歌，"
+        "或者该歌曲已下架/被删除）——平台只把音乐人本人作品的播放计入 650 任务，\n"
+        "所以不管每天播放多少，进度都不会涨。这不是你账号的问题"
+        "（我们这边每天都在正常安排播放）。\n\n"
+        "处理办法：换一首你自己上传、自己演唱、以你本人音乐人身份发布的原创独唱歌曲，\n"
+        "然后到售后群联系客服重新登记新歌。换好之后，第二天的进度就会正常增长。\n\n"
+        "如果你已经换过歌了，请忽略这封邮件，或者到售后群跟客服说一声。\n\n"
+        + _group_line(group) + "\n\n"
+        "——" + SIGN
+    )
+    return send_user_email(email, subject, body)
+
+
+def notify_songchange(email, nickname, name, group="", song_old="", song_new="", notmine=False):
     """主动换歌通知（2026-11-13 新增，kind=songchange）：
 
-    我们把号主登记的歌直接换掉后，向号主说明为什么换歌（原歌登记前已被平台冻结）。
+    我们把号主登记的歌直接换掉后，向号主说明为什么换歌。
     ref 编码为「旧歌id:新歌id」，歌名由 worker 在 mail_pending 时查 song_meta 附带
     （song_old/song_new），notify_mail 透传进来。
-    走 mail_queue 队列（kind=songchange，ref=旧歌id:新歌id，唯一键天然去重）。
+    notmine=True（ref 第三段为 B）时走「原歌不是你名下作品」文案——用于绑错歌/
+    查无此歌的自动换歌；默认文案是「原歌登记前已被平台冻结」。
+    走 mail_queue 队列（kind=songchange，ref=旧歌id:新歌id[:B]，唯一键天然去重）。
     """
     if not (email or "").strip():
         return False
     old = (song_old or "").strip() or "原歌曲"
     new = (song_new or "").strip() or "新歌曲"
     subject = "【网易音乐人650任务】你账号登记的歌曲已更换，说明一下原因"
+    if notmine:
+        reason = (
+            f"原因：原来的《{old}》不是你自己音乐人名下的作品（是其他艺人的歌，"
+            "或该歌曲已下架/被删除），平台不会把它的播放计入 650 任务数据，\n"
+            "这就是之前连续多天任务进度没有增长的原因。为了不让你的账号白白空转，\n"
+            f"我们把它换成了《{new}》。\n\n"
+        )
+    else:
+        reason = (
+            f"原因：原来的《{old}》在被登记使用之前，就已经因为之前的行为被平台冻结了——\n"
+            "我们拿来使用时它就是冻结状态，播放量一直不计入任务数据，\n"
+            "这就是之前连续多天任务进度没有增长的原因。为了不让你的账号白白空转，\n"
+            f"我们把它换成了《{new}》。\n\n"
+        )
     body = (
         f"你好，{_who(nickname, name)}：\n\n"
         f"跟你说明一下：你账号登记的歌曲，我们已经从《{old}》换成了《{new}》。\n\n"
-        f"原因：原来的《{old}》在被登记使用之前，就已经因为之前的行为被平台冻结了——\n"
-        "我们拿来使用时它就是冻结状态，播放量一直不计入任务数据，\n"
-        "这就是之前连续多天任务进度没有增长的原因。为了不让你的账号白白空转，\n"
-        f"我们把它换成了《{new}》。\n\n"
+        + reason +
         "换歌不影响你的账号状态和已有数据，只是登记的歌变了，换好后第二天的进度就会正常增长。\n\n"
         "如果你想换成自己上传的其他歌曲，到售后群联系客服说一声就行。\n\n"
         + _group_line(group) + "\n\n"

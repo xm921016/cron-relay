@@ -158,9 +158,14 @@ def main():
                     # 2026-11-13 新增：独唱但平台侧冻结不记账的换歌提醒（措辞不含共创）
                     ok = notify.notify_songfix_solo(t.get("email"), "", who, t.get("group") or "")
                 elif kind == "songchange":
-                    # 2026-11-13 新增：我们主动换歌后的通知（ref=旧歌id:新歌id，歌名由 worker 附带）
+                    # 2026-11-13 新增：我们主动换歌后的通知（ref=旧歌id:新歌id[:B]，歌名由 worker 附带）
+                    # 第三段 B = 旧歌不是本人作品（绑错歌/查无此歌），走「不是你的歌」文案而非「被冻结」
                     ok = notify.notify_songchange(t.get("email"), "", who, t.get("group") or "",
-                                                  t.get("song_old") or "", t.get("song_new") or "")
+                                                  t.get("song_old") or "", t.get("song_new") or "",
+                                                  bool(t.get("notmine")))
+                elif kind == "songfix3":
+                    # 2026-11-13 新增：绑错歌（独唱但唯一作者不是他）/查无此歌（下架删除）的换歌提醒
+                    ok = notify.notify_songfix_bad(t.get("email"), "", who, t.get("group") or "")
                 else:
                     print(f"   [{who}] 未知类型 {kind}，跳过")
                     ok = False

@@ -2730,6 +2730,28 @@ async function mailEnqueue(pool, uid, kind, ref, email, name, agent, exp) {
 // （该号之前被判过冻结的歌）；fee=0 优先于 fee>0（VIP 试听歌听众播不动，雨季 fee=8 即此类）。
 // 时长不设门槛（2026-11-13 用户口径）：池内最短 10s 歌照常记账，≥90s 门槛会挡掉
 // 池内一半以上有效候选（song_meta 1318 首里 661 首 <90s），只排除时长取不到(0)的坏数据。
+// 2026-11-13 v3：mail_scan 处置链的「执行换歌」步骤（三处同步写 + songchange 入队）。
+// 返回 true=已换（调用方计数并跳过邮件）；false=换失败（走邮件兜底）。
+// notMine=True 时 scRef 带第三段 B（旧歌不是本人作品：绑错歌/查无此歌），邮件文案走
+// 「不是你的歌」而非「登记前被冻结」。唯一键 (pool,uid,kind,ref) 天然去重。
+async function sfDoSwap(uid, song, cand, mine, email, name, agent, exp, notMine, sfQueued, usedSongs) {
+  const now = new Date().toISOString();
+  const okU = await d1Run('UPDATE accounts SET song=? WHERE pool=? AND uid=?', [cand.id, POOL_NAME, uid]);
+  if (!okU) return false;
+  await d1Run('INSERT OR REPLACE INTO song_meta(song,name,dur,n_artists,artists,first_artist,gone,updated_at) VALUES (?,?,?,?,?,?,0,?)',
+    [cand.id, cand.name || '', cand.dur, 1, JSON.stringify([[mine, cand.artistName || '']]), String(mine), now]);
+  await d1Run('INSERT INTO durs (pool,uid,dur,updated_at) VALUES (?,?,?,?) ' +
+    'ON CONFLICT(pool,uid) DO UPDATE SET dur=excluded.dur, updated_at=excluded.updated_at',
+    [POOL_NAME, uid, cand.dur, now]);
+  if (usedSongs) { usedSongs.delete(song); usedSongs.add(cand.id); }
+  const scRef = song + ':' + cand.id + (notMine ? ':B' : '');
+  if (sfQueued && !sfQueued[uid + '|songchange|' + scRef]) {
+    sfQueued[uid + '|songchange|' + scRef] = 1;
+    try { await mailEnqueue(POOL_NAME, uid, 'songchange', scRef, String(email || ''), String(name || ''), String(agent || ''), String(exp || '')); } catch (e) {}
+  }
+  return true;
+}
+
 async function artistSwapCandidate(aid, excludeSong, usedSet, excludeList) {
   const ctl = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(10000) : undefined;
   try {
@@ -6666,7 +6688,7 @@ async function handle(request) {
         [new Date(Date.parse(today + 'T00:00:00Z') - 2 * 86400000).toISOString().slice(0, 10), today]);
       const sfAccs = await d1All("SELECT pool,uid,name,email,agent,exp,song,added FROM accounts WHERE pool=? AND pub=0 AND email<>'' AND song<>''", [POOL_NAME]);
       const sfMeta = await d1All('SELECT song,name,dur,n_artists,artists,first_artist,gone FROM song_meta', []);
-      const sfQ = await d1All("SELECT uid,kind,ref FROM mail_queue WHERE kind IN ('songfix','songfix2','songchange') AND pool=?", [POOL_NAME]);
+      const sfQ = await d1All("SELECT uid,kind,ref FROM mail_queue WHERE kind IN ('songfix','songfix2','songfix3','songchange') AND pool=?", [POOL_NAME]);
       const sfArt = await d1All('SELECT uid,artist_id FROM acc_meta', []);
       const sfOk = sfSnap !== null && sfAccs !== null && sfMeta !== null && sfQ !== null && sfArt !== null;
       if (!sfOk) {
@@ -6710,8 +6732,42 @@ async function handle(request) {
         }
         if (enqStmts.length) await d1Batch(enqStmts);
       }
-      let sfFound = 0, sfEnq = 0, sfSwapped = 0, sfApiCalls = 0;
+      const sfCnt = { found: 0, enq: 0, swapped: 0, api: 0 };
       if (sfOk) {
+        // 地图统一提到这一层：冻结环和查无此歌环共用（v3，2026-11-13）
+        const sfAccMap = {};
+        for (const a of sfAccs) sfAccMap[String(a.uid)] = a;
+        const sfMetaMap = {};
+        for (const m of sfMeta) sfMetaMap[String(m.song)] = m;
+        const sfArtMap = {};
+        for (const a of sfArt) sfArtMap[String(a.uid)] = String(a.artist_id || '');
+        const sfFrozenBefore = {};   // 该号历史上处理过的旧歌 id，换歌候选要避开
+        const sfQueued = {};
+        for (const q of sfQ) {
+          sfQueued[String(q.uid) + '|' + String(q.kind || '') + '|' + String(q.ref || '')] = 1;
+          const fr = String(q.ref || '').split(':')[0];   // songchange ref=旧:新[:B]，取旧歌 id
+          if (fr) (sfFrozenBefore[String(q.uid)] = sfFrozenBefore[String(q.uid)] || []).push(fr);
+        }
+        const usedSongs = new Set();
+        for (const a of sfAccs) { const sg = String(a.song || ''); if (sg) usedSongs.add(sg); }
+        const sfHandled = new Set();  // 本轮已处置过的号（换歌或已入队），查无此歌环不再碰
+        const trySongfixMail = async (uid, kind, a, song) => {
+          if (sfQueued[uid + '|' + kind + '|' + song]) return;
+          // 同一首歌已用别的 songfix 类型触达过 → 不换文案重复打扰（songchange 不受限）
+          if (kind === 'songfix3' && (sfQueued[uid + '|songfix|' + song] || sfQueued[uid + '|songfix2|' + song])) return;
+          sfQueued[uid + '|' + kind + '|' + song] = 1;
+          try { if (await mailEnqueue(POOL_NAME, uid, kind, song, String(a.email || ''), String(a.name || ''), String(a.agent || ''), String(a.exp || ''))) sfCnt.enq++; } catch (e) {}
+        };
+        const trySwap = async (uid, a, song, mine, notMine) => {
+          if (!mine || sfCnt.api >= 20) return false;
+          sfCnt.api++;
+          const cand = await artistSwapCandidate(mine, song, usedSongs, sfFrozenBefore[uid] || []);
+          if (cand && await sfDoSwap(uid, song, cand, mine, a.email, a.name, a.agent, a.exp, notMine, sfQueued, usedSongs)) {
+            sfCnt.swapped++;
+            return true;
+          }
+          return false;   // 无候选或写失败 → 邮件兜底
+        };
         const sfByDay = {};
         for (const s of sfSnap) { const d = String(s.day || ''); (sfByDay[d] = sfByDay[d] || []).push(s); }
         const sfDays = Object.keys(sfByDay).sort();
@@ -6719,22 +6775,9 @@ async function handle(request) {
           const sfD2 = sfDays[sfDays.length - 2], sfD1 = sfDays[sfDays.length - 1];
           const sfOld = {};
           for (const s of sfByDay[sfD2]) sfOld[String(s.uid)] = Number(s.rate);
-          const sfAccMap = {};
-          for (const a of sfAccs) sfAccMap[String(a.uid)] = a;
-          const sfMetaMap = {};
-          for (const m of sfMeta) sfMetaMap[String(m.song)] = m;
-          const sfArtMap = {};
-          for (const a of sfArt) sfArtMap[String(a.uid)] = String(a.artist_id || '');
-          const sfFrozenBefore = {};   // 该号历史上被判过冻结的歌（ref），换歌候选要避开
-          const sfQueued = {};
-          for (const q of sfQ) {
-            sfQueued[String(q.uid) + '|' + String(q.kind || '') + '|' + String(q.ref || '')] = 1;
-            (sfFrozenBefore[String(q.uid)] = sfFrozenBefore[String(q.uid)] || []).push(String(q.ref || ''));
-          }
-          const usedSongs = new Set();
-          for (const a of sfAccs) { const sg = String(a.song || ''); if (sg) usedSongs.add(sg); }
           for (const s of sfByDay[sfD1]) {
             const uid = String(s.uid);
+            if (sfHandled.has(uid)) continue;
             const old = sfOld[uid];
             if (old === undefined || old !== Number(s.rate) || Number(s.rate) >= 95) continue;
             const a = sfAccMap[uid];
@@ -6749,46 +6792,36 @@ async function handle(request) {
             const mine = sfArtMap[uid] || '';
             const co = Number(sm.n_artists) > 1;
             const owned = !!mine && artistIds.indexOf(mine) >= 0;
-            if (!co && !owned) continue;             // 既非共创、也确认不了是本人的歌 → 不动
-            sfFound++;
-            // ① 先试自动换歌：名下有没有其他本人独创独唱（每班 weapi 上限 20 次）
-            let cand = null;
-            if (owned && mine && sfApiCalls < 20) {
-              sfApiCalls++;
-              cand = await artistSwapCandidate(mine, song, usedSongs, sfFrozenBefore[uid] || []);
-            }
-            if (cand) {
-              const now = new Date().toISOString();
-              const okU = await d1Run('UPDATE accounts SET song=? WHERE pool=? AND uid=?', [cand.id, POOL_NAME, uid]);
-              const okM = await d1Run('INSERT OR REPLACE INTO song_meta(song,name,dur,n_artists,artists,first_artist,gone,updated_at) VALUES (?,?,?,?,?,?,0,?)',
-                [cand.id, cand.name || '', cand.dur, 1, JSON.stringify([[mine, cand.artistName || '']]), String(mine), now]);
-              const okD = await d1Run('INSERT INTO durs (pool,uid,dur,updated_at) VALUES (?,?,?,?) ' +
-                'ON CONFLICT(pool,uid) DO UPDATE SET dur=excluded.dur, updated_at=excluded.updated_at',
-                [POOL_NAME, uid, cand.dur, now]);
-              if (okU) {
-                usedSongs.delete(song); usedSongs.add(cand.id);
-                sfSwapped++;
-                const scRef = song + ':' + cand.id;
-                if (!sfQueued[uid + '|songchange|' + scRef]) {
-                  sfQueued[uid + '|songchange|' + scRef] = 1;
-                  try { if (await mailEnqueue(POOL_NAME, uid, 'songchange', scRef, String(a.email || ''), String(a.name || ''), String(a.agent || ''), String(a.exp || ''))) sfEnq++; } catch (e) {}
-                }
-                continue;
-              }
-              // accounts.song 写失败（理论罕见）：不换，走邮件兜底
-            }
-            // ② 没得换 → 发提醒邮件
-            const kind = (co || !owned) ? 'songfix' : 'songfix2';
-            if (sfQueued[uid + '|' + kind + '|' + song]) continue;
-            sfQueued[uid + '|' + kind + '|' + song] = 1;
-            try { if (await mailEnqueue(POOL_NAME, uid, kind, song, String(a.email || ''), String(a.name || ''), String(a.agent || ''), String(a.exp || ''))) sfEnq++; } catch (e) {}
+            // v3：绑错歌（独唱但唯一作者不是他）也纳入——结构性问题，播放永远不算他头上
+            const soloNotHis = !co && artistIds.length > 0 && !!mine && !owned;
+            if (!co && !owned && !soloNotHis) continue;   // 待核/确认不了身份 → 不猜，等元数据
+            sfCnt.found++;
+            sfHandled.add(uid);
+            // ① 先试自动换歌：名下其他本人独创独唱（候选函数保证新歌必是本人独唱）
+            if (await trySwap(uid, a, song, mine, !owned)) continue;
+            // ② 没得换 → 发提醒邮件（共创 / 本人独唱被冻结 / 绑错歌，三套文案）
+            const kind = co ? 'songfix' : (owned ? 'songfix2' : 'songfix3');
+            await trySongfixMail(uid, kind, a, song);
           }
+        }
+        // —— v3：查无此歌（song_meta.gone=1）即时处置：歌都没了播放必空转，不等两天冻结 ——
+        for (const a of sfAccs) {
+          const uid = String(a.uid);
+          if (sfHandled.has(uid)) continue;
+          const song = String(a.song || '');
+          if (!song || !(sfMetaMap[song] && Number(sfMetaMap[song].gone) === 1)) continue;
+          if (!String(a.email || '').trim()) continue;
+          sfCnt.found++;
+          sfHandled.add(uid);
+          const mine = sfArtMap[uid] || '';
+          if (await trySwap(uid, a, song, mine, true)) continue;
+          await trySongfixMail(uid, 'songfix3', a, song);
         }
       }
       // 2026-11-13：闸门已前置（读全成功后立即落），走到这里说明本轮读写都完成。
       return json({ ok: true, dry: false, day: today, scanned: rows.length, will_enqueue: will.length,
-        dropped_stale: dropped, songfix_found: sfFound, songfix_enqueued: sfEnq,
-        songfix_swapped: sfSwapped, songfix_api: sfApiCalls });
+        dropped_stale: dropped, songfix_found: sfCnt.found, songfix_enqueued: sfCnt.enq,
+        songfix_swapped: sfCnt.swapped, songfix_api: sfCnt.api });
     }
     if (url.pathname === '/api/mail_pending' && request.method === 'POST') {
       let body;
@@ -6864,6 +6897,8 @@ async function handle(request) {
           const scParts = String(p.ref || '').split(':');
           item.song_old = scNames[scParts[0]] || ('歌' + (scParts[0] || '?'));
           item.song_new = scNames[scParts[1]] || ('歌' + (scParts[1] || '?'));
+          // 2026-11-13 v3：ref 第三段 B = 旧歌不是本人作品（绑错歌/查无此歌），邮件走「不是你的歌」文案
+          item.notmine = scParts[2] === 'B';
         }
         toSend.push(item);
         if (!dry) await d1Run("UPDATE mail_queue SET state='claimed',claimed_at=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='pending'",
@@ -9702,10 +9737,15 @@ function render(){
   // DATA.cap 缺失（旧缓存/接口异常）就不渲染，页面其余部分不受影响。
   // 2026-11-13 深夜：数值拆两排——大字=已登记人数，小字一排「/上限 · 号池容量」。
   // 原来整串 1223/10499 用 18px 渲染，卡片窄会被截成 1223/1049；拆排后上限再涨位数也不撑宽卡片。
+  // 2026-11-14 凌晨：回归与其他卡完全一致的 2 行结构（大字=完整 used/totalCap，小字=号池容量），
+  // 字号随位数自适应 + nowrap——之前「大字 used + 小字 /cap·名」会折成 3 行把整排卡撑高，
+  // 其他 2 行的卡被 flex 拉伸后底下空一截。字号档位按内宽最窄 ~66px、数字宽≈0.6×字号推算。
   var capHtml='';
   if(DATA.cap){
     var cu=(DATA.cap.totalUsed==null)?'?':DATA.cap.totalUsed;
-    capHtml='<div class="stat" title="号池容量 = 已登记人数/登记上限（公益号、过期号不占名额）。明细：'+esc(String((DATA.cap.list||[]).join('，')||'暂无'))+'"><b>'+cu+'</b><span>/'+(DATA.cap.totalCap||0)+' · 号池容量</span></div>';
+    var capVal=cu+'/'+(DATA.cap.totalCap||0);
+    var fs=capVal.length>=12?9:(capVal.length>=8?11:16);
+    capHtml='<div class="stat" title="号池容量 = 已登记人数/登记上限（公益号、过期号不占名额）。明细：'+esc(String((DATA.cap.list||[]).join('，')||'暂无'))+'"><b style="font-size:'+fs+'px;white-space:nowrap">'+capVal+'</b><span>号池容量</span></div>';
   }
   $('stats').innerHTML=
     capHtml
