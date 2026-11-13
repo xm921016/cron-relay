@@ -151,6 +151,9 @@ def main():
                 elif kind == "songfix":
                     # 2026-11-13 新增：共创歌不计入任务的换歌提醒（ref=歌曲 id，仅用于去重）
                     ok = notify.notify_songfix(t.get("email"), "", who, t.get("group") or "")
+                elif kind == "songfix2":
+                    # 2026-11-13 新增：独唱但平台侧冻结不记账的换歌提醒（措辞不含共创）
+                    ok = notify.notify_songfix_solo(t.get("email"), "", who, t.get("group") or "")
                 else:
                     print(f"   [{who}] 未知类型 {kind}，跳过")
                     ok = False

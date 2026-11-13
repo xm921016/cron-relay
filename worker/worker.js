@@ -6527,8 +6527,54 @@ async function handle(request) {
       for (const w of will) {
         try { await mailEnqueue(w.pool, w.uid, w.kind, w.ref, w.email, w.name, w.agent, w.exp); } catch (e) {}
       }
+      // —— 2026-11-13 固化：共创歌换歌提醒检测（kind=songfix）——
+      // 口径：最近两个有快照的日期任务进度 rate 相等且 <95（冻结），歌为共创
+      //      （song_meta.n_artists>1），pub=0、在池、有邮箱。唯一键 (pool,uid,kind,ref)
+      //      天然去重；号主换歌后 ref（歌 id）变化，新歌若仍冻结会再次提醒。
+      // 读范围只取最近 3 个自然日的 snapshots，rows_read ≈ 快照 3 天 + accounts/song_meta/队列小表。
+      // 铁律 3c：任一读失败不落闸门，30 分钟后下一班整体重扫（到期部分幂等不重发）。
+      const sfSnap = await d1All('SELECT uid,day,rate FROM snapshots WHERE day>=? AND day<=? AND rate IS NOT NULL',
+        [new Date(Date.parse(today + 'T00:00:00Z') - 2 * 86400000).toISOString().slice(0, 10), today]);
+      const sfAccs = await d1All("SELECT pool,uid,name,email,agent,exp,song FROM accounts WHERE pool=? AND pub=0 AND email<>'' AND song<>''", [POOL_NAME]);
+      const sfMeta = await d1All('SELECT song,n_artists FROM song_meta WHERE n_artists>1', []);
+      const sfQ = await d1All("SELECT uid,ref FROM mail_queue WHERE kind='songfix' AND pool=?", [POOL_NAME]);
+      let sfFound = 0, sfEnq = 0;
+      const sfOk = sfSnap !== null && sfAccs !== null && sfMeta !== null && sfQ !== null;
+      if (sfOk) {
+        const sfByDay = {};
+        for (const s of sfSnap) { const d = String(s.day || ''); (sfByDay[d] = sfByDay[d] || []).push(s); }
+        const sfDays = Object.keys(sfByDay).sort();
+        if (sfDays.length >= 2) {
+          const sfD2 = sfDays[sfDays.length - 2], sfD1 = sfDays[sfDays.length - 1];
+          const sfOld = {};
+          for (const s of sfByDay[sfD2]) sfOld[String(s.uid)] = Number(s.rate);
+          const sfAccMap = {};
+          for (const a of sfAccs) sfAccMap[String(a.uid)] = a;
+          const sfCo = {};
+          for (const m of sfMeta) sfCo[String(m.song)] = Number(m.n_artists) || 0;
+          const sfQueued = {};
+          for (const q of sfQ) sfQueued[String(q.uid) + '|' + String(q.ref || '')] = 1;
+          for (const s of sfByDay[sfD1]) {
+            const uid = String(s.uid);
+            const old = sfOld[uid];
+            if (old === undefined || old !== Number(s.rate) || Number(s.rate) >= 95) continue;
+            const a = sfAccMap[uid];
+            if (!a) continue;
+            const song = String(a.song || '');
+            if (!song || !(sfCo[song] > 1)) continue;
+            if (sfQueued[uid + '|' + song]) continue;
+            sfFound++;
+            try { if (await mailEnqueue(POOL_NAME, uid, 'songfix', song, String(a.email || ''), String(a.name || ''), String(a.agent || ''), String(a.exp || ''))) sfEnq++; } catch (e) {}
+          }
+        }
+      }
+      if (!sfOk) {
+        return json({ ok: true, dry: false, day: today, scanned: rows.length, will_enqueue: will.length,
+          dropped_stale: dropped, songfix: 'read失败（' + (_d1LastErr || 'D1 异常') + '），未落闸门下班重试' });
+      }
       try { await POOL.put('MAIL_SCAN_DAY', today); } catch (e) {}
-      return json({ ok: true, dry: false, day: today, scanned: rows.length, will_enqueue: will.length, dropped_stale: dropped });
+      return json({ ok: true, dry: false, day: today, scanned: rows.length, will_enqueue: will.length,
+        dropped_stale: dropped, songfix_found: sfFound, songfix_enqueued: sfEnq });
     }
     if (url.pathname === '/api/mail_pending' && request.method === 'POST') {
       let body;

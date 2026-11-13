@@ -275,6 +275,32 @@ def notify_songfix(email, nickname, name, group=""):
     return send_user_email(email, subject, body)
 
 
+def notify_songfix_solo(email, nickname, name, group=""):
+    """独唱冻结版换歌提醒（2026-11-13 新增，kind=songfix2）：
+
+    与 notify_songfix 的区别：登记的歌**是**本人原创独唱（不是共创），
+    但平台侧连续多天不把播放计入任务数据（我方派歌正常、平台侧数据冻结）。
+    文案不能提「共创」，只陈述事实 + 给换歌动作。
+    走 mail_queue 队列（kind=songfix2，ref=歌曲 id）。
+    """
+    if not (email or "").strip():
+        return False
+    subject = "【网易音乐人650任务】你登记的歌曲连续多日没有计入任务进度，建议换一首歌"
+    body = (
+        f"你好，{_who(nickname, name)}：\n\n"
+        "跟你说一个数据核查结果：你的账号这几天一直在正常安排播放，但任务进度连续多天没有增长。\n"
+        "经排查，是目前登记的这首歌在平台侧没有被计入任务数据（播放执行了，平台不记账）。\n"
+        "这类情况一般是歌曲被平台限流/审核冻结，或者歌曲带有收费/VIP 试听标记导致普通听众的播放\n"
+        "不计入有效播放——总之是歌曲本身的问题，不是账号问题。\n\n"
+        "处理办法：重新上传/发布一首新的本人原创独唱歌曲（自己上传、自己演唱），\n"
+        "然后到售后群联系客服把登记的歌换成新歌。换好之后，第二天的进度就会正常增长。\n\n"
+        "如果你已经换过歌了，请忽略这封邮件，或者到售后群跟客服说一声。\n\n"
+        + _group_line(group) + "\n\n"
+        "——" + SIGN
+    )
+    return send_user_email(email, subject, body)
+
+
 # 到期提醒 A 套（数字直给型）：标题直接给天数，语气逐档加急；
 # 用户 2026-11-06 要求：不说「在群里说一声」，统一「售后群联系客服」。
 _EXPIRE_TPL = {
