@@ -8873,7 +8873,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
 <!-- ===== 2026-11-05：月度结算 ===== -->
 <div class="modal" id="lgModal" hidden><div class="mbox" style="width:980px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
   <h3>月度结算</h3>
-  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">按<b>登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br><b>退单</b>（成交后号被删）不计收入、不计提成；补号单、公益赠号/手动号也都不计营收、不计提成，各自单列。</p>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">按<b>登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br><b>退单</b>只认「控制台<b>手动删号</b>」（钱退客户、服务没做完），不计收入不计提成；<b>CK 失效被自动判死</b>的号钱已经收了、没有任何退款动作，订单照常生效，<b>照算收入与提成</b>。补号单、公益赠号/手动号也都不计营收、不计提成，各自单列。</p>
   <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
     <div><label style="margin-top:0">月份</label><input type="month" id="lgMonth" style="width:150px"></div>
     <div><label style="margin-top:0">群</label><select id="lgPool" style="width:130px"><option value="hz" selected>主群</option><option value="">全部（含定制群）</option><option value="dz">定制群</option></select></div>
@@ -9971,10 +9971,12 @@ $('lgPool').onchange=lgLoad;
 if($('lgAgent'))$('lgAgent').onchange=lgLoad;
 $('lgCsv').onclick=function(){
   if(!LGDATA||!LGDATA.rows||!LGDATA.rows.length){$('lgm').textContent='还没有数据，先点查询';$('lgm').className='msg err';return;}
-  var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','是否退单','备注']];
+  var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','删除情况','备注']];
   for(var i=0;i<LGDATA.rows.length;i++){var r=LGDATA.rows[i];
     out.push([r.day,r.pool==='hz'?'主群':'定制群',String(r.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'),r.uid,r.agent,r.plan,
-      r.rb?'0':(r.gift?'赠号':(r.price==null?'':r.price)),r.rb?'补号':'',r.alive?'':'退单',r.remark]);}
+      r.rb?'0':(r.gift?'赠号':(r.price==null?'':r.price)),r.rb?'补号':'',
+      r.alive?'':(r.deadReason==='manual'?'退单':(r.deadReason==='cookie_invalid'?'判死·仍计费':'删除·未知')),
+      r.remark]);}
   var csv='\\ufeff'+out.map(function(a){return a.map(function(v){return '"'+String(v==null?'':v).replace(/"/g,'""')+'"';}).join(',');}).join('\\r\\n');
   var a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
