@@ -1457,10 +1457,11 @@ async function cfg() {
       // 2026-11-12 扫码家宽出口灰度（方案A）：EGRESS_PCT 缺省=0=全走 CF 直连（行为与现网一致）
       egressKey: cleanKV(egressKey),
       egressPct: cleanKV(egressPct),
-      // 分群上限：2026-10-22 默认 500 → 1500，同日晚按「20 并发 + 24h 排队上限」下调到 1200
+      // 分群上限：2026-10-22 默认 500 → 1500，同日晚按「20 并发 + 24h 排队上限」下调到 1200；
+      // 2026-11-13 上调到 1440（单仓舒适顶：per=24/PAR=48/60 片/3 波 ≈7.7h，KV POOL_LIMIT_G1 已同步设 1440）
       // （KV 里 POOL_LIMIT_G1 / POOL_LIMIT_G2 仍可覆盖，改数字即时生效不用改代码）
-      poolLimit: parseInt(cleanKV(lim), 10) || 1200,
-      poolLimitG1: parseInt(cleanKV(limG1), 10) || 1200,
+      poolLimit: parseInt(cleanKV(lim), 10) || 1440,
+      poolLimitG1: parseInt(cleanKV(limG1), 10) || 1440,
       poolLimitG2: parseInt(cleanKV(limG2), 10) || 500,
       owner: GH_OWNER,
       repo: GH_REPO,
@@ -2013,7 +2014,7 @@ async function pushPool(entries, force) {
   // 2026-11-13：40000 → 55000。Free 版 Worker 单次调用 50 子请求是真正的天花板：
   // 每片 1 次 PUT（公钥已缓存，见 ghPublicKey）+ mergePool 1 次 D1 + 读写 KV。
   // 1024 号（CK 均长 866，单条 JSON ≈1000 字符）→ 19 片 ≈ 22 个子请求；
-  // 登记上限 1200 号 → 22 片仍安全。55000 取的是 gzip 最差压缩比 0.62 下的安全值：
+  // 登记上限 1440 号 → 23 片仍安全（2026-11-13 上限 1200→1440）。55000 取的是 gzip 最差压缩比 0.62 下的安全值：
   // 55000×0.62+48 → b64 ≈ 45.6KB < GitHub Secret 48KB 上限（实测 CK hex ≈0.52）。
   const CHUNK_MAX = 55000;
   // 2026-11-01：片数不再写死 12。按号池实际体积自动算（ceil(总字符 / CHUNK_MAX)）：
@@ -3073,7 +3074,7 @@ async function d1SnapWrite(day, pool, clean) {
   try {
     const now = new Date().toISOString();
     // 2026-10-24 修复：D1 单次 batch 最多 1000 条语句，而 snap650 是 jobs=1 写全池。
-    // hz 登记上限 1200，号池涨到千级后会整批写入失败（快照一条都进不去）。
+    // hz 登记上限 1440（2026-11-13 由 1200 上调），号池涨到千级后会整批写入失败（快照一条都进不去）。
     // 与 d1DursWrite/d1RunsWrite 统一按 100 条分批；小批量仍只跑一次循环，行为不变。
     for (let i = 0; i < uids.length; i += 100) {
       const stmts = uids.slice(i, i + 100).map(uid => DB.prepare(
@@ -4322,11 +4323,11 @@ function maskPhone(x) {
 /* ===== 2026-11-10：客服机器授权（reg_devices）=====
    背景：EXE 里的生成口令 REG_TOKEN_PASS 是硬编码的，EXE 外流就等于谁都能造链接。
    配额（200 条/天）只是止损。这里加一层「按机器授权」：
-     客服电脑算出一个机器码 → 首次用时自动登记为 pending（24 小时宽限）→
+     客服电脑算出一个机器码 → 首次用时自动登记为 pending →
      管理员在控制台放行（ok）→ 之后这台机器才继续能生成。
-   老版 EXE 不带机器码字段：默认放行（否则上线瞬间所有客服全停），
-   等新版都发出去、机器码都授权完，把 KV REG_REQUIRE_DEV 置 1 即可彻底关掉老版。 */
-const REG_DEV_GRACE_MS = 24 * 3600 * 1000;
+   老版 EXE 不带机器码字段：KV REG_REQUIRE_DEV 置 1 后一律拒绝（2026-11-13 已置 1）。
+   2026-11-13：24 小时宽限取消（用户要求「必须授权才能用」）—— 新机器登记 pending 后
+   直接拒绝使用，只有管理员在控制台点了放行（state=ok）才放行。 */
 
 function regDevNorm(v) {
   return String(v || '').toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 16);
@@ -4375,7 +4376,8 @@ async function regDevCheck(devRaw, agent, opt) {
     return { ok: true, dev: dev, quota: 0, degraded: true };
   }
   if (!g.row) {
-    /* 第一次见到这台机器：登记 pending，给 24 小时宽限（老板在这段时间里授权）。 */
+    /* 第一次见到这台机器：登记 pending 入库（管理员能在控制台看到），但不放行 ——
+       2026-11-13 起 24 小时宽限取消：必须管理员在控制台点了放行（state=ok）才能用。 */
     const now = Date.now();
     const row = { dev: dev, agent: String(agent || ''), quota: 200, state: 'pending',
       note: '', ctime: regIso(now), last_at: regIso(now) };
@@ -4385,7 +4387,8 @@ async function regDevCheck(devRaw, agent, opt) {
                   [row.dev, row.agent, row.quota, row.state, row.note, row.ctime, row.last_at]);
     } catch (e) { console.error('登记新设备失败:', e && e.message); }
     try { await POOL.put('dev:' + dev, JSON.stringify(row)); } catch (e) {}
-    return { ok: true, dev: dev, quota: 200, pending: true };
+    return { ok: false, dev: dev, quota: 0,
+      msg: '这台' + term + '还没被授权。请把机器码 ' + dev + ' 发给管理员，授权后重新打开软件即可。' };
   }
   const st = String(g.row.state || 'pending');
   const quota = Math.max(1, Number(g.row.quota) || 200);
@@ -4393,12 +4396,7 @@ async function regDevCheck(devRaw, agent, opt) {
   if (st === 'hold') {
     return { ok: false, dev: dev, quota: 0, msg: '这台' + term + '的权限已被管理员停用，请联系管理员。' };
   }
-  /* pending：看宽限期 */
-  const born = regTs(g.row.ctime);
-  if (born && (Date.now() - born) < REG_DEV_GRACE_MS) {
-    return { ok: true, dev: dev, quota: quota, pending: true,
-      grace_left_h: Math.max(1, Math.round((REG_DEV_GRACE_MS - (Date.now() - born)) / 3600000)) };
-  }
+  /* pending：一律拒绝（2026-11-13 取消 24 小时宽限，必须管理员放行）。 */
   return { ok: false, dev: dev, quota: 0,
     msg: '这台' + term + '还没被授权。请把机器码 ' + dev + ' 发给管理员，授权后重新打开软件即可。' };
 }
