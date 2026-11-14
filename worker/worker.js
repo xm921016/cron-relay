@@ -6489,6 +6489,42 @@ async function handle(request) {
         + `新增疑似 ${suspects.length} 个（需下一轮再次判死才删除${suspects.length ? '：' + nm(suspects) : ''}），`
         + `剩余 ${after.length} 个。` });
     }
+    // ---- 2026-11-14：250 提醒信冷却闸门（纯新增路由）----
+    // 背景：notes.py 每天给 code=250 的号发「动态发不出去」提醒，同一号会天天收到。
+    // 11-14 全量复盘：换绑（ckswap）只对部分号有效（4 个已换绑号里 1 个当晚恢复、
+    // 3 个换完首个发布日仍 250），客户照做了还被天天催，体感「这办法没用」。
+    // 现在改成：发信前先来这里问一次，同一号 VERIFY_COOL_DAYS（默认 3）天内最多一封。
+    // 状态放 KV vmail:<pool>:<uid>（跨天、跨 runner，只有云端存得住）；读失败一律放行。
+    if (url.pathname === '/api/verify_gate') {
+      const cg = await cfg();
+      if (!cg.assignPass) return json({ message: '尚未配置 ASSIGN_PASS，该接口不开放' }, 503);
+      if (request.method !== 'POST') return json({ message: '请用 POST' }, 405);
+      let bg;
+      try { bg = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
+      if (String(bg.pass || '') !== cg.assignPass) return json({ message: '口令错误' }, 403);
+      const gId = String(bg.uid || bg.name || '').trim();
+      if (!gId) return json({ message: '缺少 uid/name' }, 400);
+      let gDays = parseInt(bg.days, 10);
+      if (!isFinite(gDays) || gDays <= 0) gDays = 3;
+      const gKey = 'vmail:' + POOL_NAME + ':' + gId;
+      let gPrev = null;
+      try {
+        const gRaw = await POOL.get(gKey);
+        if (gRaw) gPrev = JSON.parse(gRaw);
+      } catch (e) { gPrev = null; }          // 读失败当没有记录 → 放行
+      const gNow = Date.now();
+      const gLast = gPrev && gPrev.t ? Date.parse(gPrev.t) : 0;
+      const gRemain = gLast ? (gDays * 86400000 - (gNow - gLast)) : 0;
+      const gSend = !(gRemain > 0);
+      if (gSend && String(bg.mark || '') === '1') {
+        const gRec = { t: new Date(gNow).toISOString(), n: ((gPrev && gPrev.n) || 0) + 1 };
+        try { await POOL.put(gKey, JSON.stringify(gRec)); } catch (e) {}
+        return json({ ok: true, send: true, count: gRec.n });
+      }
+      return json({ ok: true, send: gSend, last: (gPrev && gPrev.t) || '',
+                    count: (gPrev && gPrev.n) || 0,
+                    remainDays: gRemain > 0 ? Math.ceil(gRemain / 86400000) : 0 });
+    }
     // ---- 2026-11-04：号主重登提醒的「已发信」回执（纯新增路由）----
     // report_dead 把「CK 失效但账号还在」的号通过 relogin 字段回给 run.py，
     // run.py 直邮成功后调本接口写 relogin_at。作用有二：

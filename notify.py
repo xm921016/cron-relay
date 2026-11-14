@@ -18,14 +18,19 @@
   - 发动态需安全验证 → notes.py 负责（每 6 天最多轮到一次）
 """
 import os
+import json
 import smtplib
 import time
 import html as _html
+import urllib.request
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
 DISPLAY_NAME = "网易音乐人650任务"
+# 2026-11-14：调 xx1031.xyz 必须带浏览器 UA，否则被 Cloudflare 1010 挡回
+UA_BROWSER = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 # 2026-10-23：落款统一（此前 verify 用「小助手」、relogin 用「目标任务」，同一个人收到两封
 # 会出现两个身份）。全部改用品牌名，两群模板完全一致，只有 JOIN_PAGE 按群不同。
 SIGN = "网易音乐人650任务"
@@ -154,7 +159,45 @@ def _who(nickname, name):
     return who or "网易音乐人650任务成员"
 
 
-def notify_verify(email, nickname, name):
+VERIFY_COOL_DAYS = 3          # 同一个号多少天内最多收一封 250 提醒（可用 VERIFY_COOL_DAYS 覆盖）
+VERIFY_GATE_PATH = "/api/verify_gate"
+
+
+def _verify_gate(uid, mark=False):
+    """问 worker「这个号现在能不能再发一封 250 提醒」。
+
+    返回 dict（含 send=True/False）或 None（口令没配/网络不通 → 调用方按"能发"处理）。
+    为什么不放本地 json：GH runner 是一次性的，跨天状态只能放云端（worker 侧写 KV
+    vmail:<pool>:<uid>）。读失败一律放行：宁可多发一封，也不能因为闸门坏了漏掉真问题。
+    """
+    uid = str(uid or "").strip()
+    if not uid:
+        return None
+    pw = (os.environ.get("ASSIGN_PASS") or os.environ.get("NB_PASS") or "").strip()
+    if not pw:
+        return None
+    base = (os.environ.get("WORKER_URL") or "https://xx1031.xyz").rstrip("/")
+    try:
+        days = max(1, int(os.environ.get("VERIFY_COOL_DAYS") or VERIFY_COOL_DAYS))
+    except ValueError:
+        days = VERIFY_COOL_DAYS
+    payload = {"pass": pw, "uid": uid, "days": days, "mark": "1" if mark else "0"}
+    try:
+        req = urllib.request.Request(
+            base + VERIFY_GATE_PATH,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "User-Agent": UA_BROWSER},   # 不带 UA 会被 CF 1010 挡掉
+            method="POST")
+        with urllib.request.urlopen(req, timeout=20) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return d if isinstance(d, dict) else None
+    except Exception as e:
+        print(f"[notify] 提醒闸门不可用（按可发处理）：{e}")
+        return None
+
+
+def notify_verify(email, nickname, name, uid=""):
     """发动态时平台要求完成一次安全验证。平和陈述，不吓人。
 
     2026-10-23 改版：把「安全验证」从标题里拿掉（容易被读成"我账号出事了"），
@@ -176,26 +219,46 @@ def notify_verify(email, nickname, name):
         助于解除账号侧标记；不弹也无妨，没有副作用）。
       · 恢复承诺要留有余地：换绑解决的是「会话级」标记（最常见）；如果换绑后仍 250，
         属账号级风控，等几天会自然解除。文案写「一般第二天恢复」，不说死。
+
+    2026-11-14 改版（换绑实测复盘，用户拍板）：
+      · 「一般换完第二天就恢复」这句实测站不住：11-14 全量核过 4 个已换绑号 ——
+        17316702006（11-12 换）当晚起就 200 成功；19236053716 / 19275040226 / 19212602585
+        换完首个发布日仍是 250。⇒ 换绑只是「有时管用」，多数账号级标记换几次都一样。
+      · 新增实证结论：号主自己发图文**能补任务进度**（19299558196 我们一次没发成功，
+        进度仍从 3/4 走满 4/4 后被 NOTES_SKIP_FULL 跳过），但不能解除我们这条 250。
+        所以现在把「自己发够 4 条图文」提成主推路径 —— 进度满了我们就不代发、也不再发信。
+      · 明确劝阻反复换绑：同一号换两次既没用又把登录环境搞乱。
+      · 加 3 天冷却（VERIFY_COOL_DAYS）：同一号 3 天内最多收一封，避免"照做了还天天被催"。
     """
     if not (email or "").strip():
         return False
-    subject = "【网易音乐人650任务】一条动态暂时发不出去，麻烦联系客服换绑一下"
+    gate = _verify_gate(uid)
+    if gate is not None and gate.get("send") is False:
+        print(f"[notify] {name} 的 250 提醒还在冷却期（上次 {gate.get('last') or '?'}，"
+              f"还剩约 {gate.get('remainDays')} 天），本次不发")
+        return False
+    subject = "【网易音乐人650任务】一条动态暂时发不出去，今天先这样处理"
     body = (
         f"你好，{_who(nickname, name)}：\n\n"
-        "跟你说一声：这个号在自动发动态时，被网易云单独要求做一次安全验证，这条动态暂时发不出去。\n"
+        "跟你说一声：这个号在自动发动态时，被网易云要求做一次安全验证，这条动态暂时发不出去。\n"
         "其它都正常——听歌、签到、你的歌被别人播放，全都照旧。\n\n"
-        "处理起来很简单，两步：\n"
-        "第一步：联系客服拿一条「换绑登录」链接，打开后用原来登记的那个网易云账号扫码登录一次。\n"
-        "这一步是把被标记的登录凭证换成一条全新的——免费，有效期、歌曲、邮箱都不变，听歌不受影响。\n"
-        "第二步：换绑完成后，打开网易云音乐 App → 底部「笔记」→ 自己发一条图文动态（一句话、一张图都可以）。\n"
-        "如果发的过程中网易弹了安全验证，顺手完成一下就行；没弹也无妨。\n\n"
+        "有两件事可以做，第二件更管用：\n\n"
+        "【一·可选】联系客服拿一条「换绑登录」链接，用原来登记的那个网易云账号扫码登录一次。\n"
+        "这是把被标记的登录凭证换成一条全新的——免费，有效期、歌曲、邮箱都不变，听歌不受影响。\n"
+        "实测有的号换完当晚就恢复；也有的号换完照旧发不出去（那是网易对这个账号本身的风控，"
+        "不是凭证的问题），这种情况再换一次也没用，不要反复换。\n\n"
+        "【二·更管用】打开网易云音乐 App → 底部「笔记」→ 自己发一条图文动态（一句话加一张图就行）。\n"
+        "这个任务算的是「30 天内发够 4 条图文」，你自己发够 4 条，任务就算完成，"
+        "我们这边也会自动跳过这个号——不再代发、也不再发这封提醒。\n\n"
         "提醒一句：请不要自己在 App 里退出登录 —— 扫码不需要先退出，直接扫就行；"
         "自己先退出的话听歌任务会中断，反而更麻烦。\n\n"
-        "一般换完第二天自动发动态就恢复了；万一还提示验证，说明网易对这个号多看了几天，"
-        "等几天会自己好，不用反复操作，不影响听歌和播放。\n\n"
+        "这条提醒我们最多 3 天发一次，不会天天打扰你；不影响听歌和播放，不用着急。\n\n"
         "——" + SIGN
     )
-    return send_user_email(email, subject, body)
+    ok = send_user_email(email, subject, body)
+    if ok and uid:
+        _verify_gate(uid, mark=True)   # 发成功才记冷却，发失败下一班还能补
+    return ok
 
 
 def notify_relogin(email, nickname, name):
