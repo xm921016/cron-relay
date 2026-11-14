@@ -47,6 +47,10 @@ jobs:
       ns: ${{ steps.plan.outputs.ns }}
       par: ${{ steps.plan.outputs.par }}
       day: ${{ steps.plan.outputs.day }}
+      # 2026-11-14 fanout 接线（阶段一）：最后 2 片派 follower N2（xm921015/relay-node）
+      fanout: ${{ steps.plan.outputs.fanout }}
+      fs_lo: ${{ steps.plan.outputs.fs_lo }}
+      fs_hi: ${{ steps.plan.outputs.fs_hi }}
     steps:
       # 2026-11-13 新增：0 点闸门（只对 schedule 定时触发生效）。
       # 作用：把每晚真正开跑钉死在北京时间 0:00~0:30 的随机点，播放全部落在 0 点后的新窗口。
@@ -270,7 +274,17 @@ jobs:
           if _nsov.isdigit() and int(_nsov) > 0:
               ns = int(_nsov)
           _only = [int(x) for x in (os.environ.get("ONLY_SLICES") or "").replace(" ", "").split(",") if x.isdigit()]
-          _slices = [x for x in _only if 0 <= x < ns] if _only else list(range(ns))
+          # 2026-11-14 fanout 接线（阶段一，follower N2=xm921015/relay-node 灰度 11-14 全绿后接线）：
+          # 正常轮（无 ns_override 且无 only_slices）master 只跑 0..ns-3，
+          # 最后 2 片 {ns-2},{ns-1} 由下方 dispatch step 派给 follower N2（带同轮 ns/day/par，
+          # 分片键与 master 完全一致）。带 ns_override / only_slices 的补跑/排查保持原语义：
+          # master 0..ns-1 全跑、不派 follower（补跑片号不能变，且 follower 不该掺和定向补跑）。
+          # follower dispatch 失败只告警不拦 master：ns-2/ns-1 今晚漏播由 warning 显式暴露人工补。
+          _fanout = (not _nsov) and (not _only)
+          if _fanout:
+              _slices = list(range(max(0, ns - 2)))
+          else:
+              _slices = [x for x in _only if 0 <= x < ns] if _only else list(range(ns))
           if not _slices:
               _slices = list(range(ns))
           _dayov = (os.environ.get("DAY_OVERRIDE") or "").strip()
@@ -283,8 +297,41 @@ jobs:
               f.write(f"par={par}\n")
               f.write("day=" + day + "\n")
               f.write(f"matrix={json.dumps({'slice': _slices})}\n")
-          print(f"pool_size={n} ns={ns} slices={len(_slices)} day={day}")
+              f.write("fanout=%d\n" % (1 if _fanout else 0))
+              f.write(f"fs_lo={max(0, ns - 2)}\n")
+              f.write(f"fs_hi={ns - 1}\n")
+          print(f"pool_size={n} ns={ns} slices={len(_slices)} day={day} fanout={'on' if _fanout else 'off'}")
           EOF
+
+      # 2026-11-14 fanout 接线（阶段一）：把本轮最后 2 片派给 follower N2（xm921015/relay-node）。
+      # 只在正常轮（fanout=1，即无 ns_override / only_slices）派发；入参 ns/day/par 与 master
+      # 完全一致保证分片键相同，only_slices 固定 {ns-2},{ns-1} 与 master 矩阵互斥且并集=0..ns-1。
+      # continue-on-error：dispatch 失败只打 warning（含响应体），不拦 master 后续矩阵。
+      - name: 派 follower N2 最后 2 片（fanout 阶段一）
+        if: steps.plan.outputs.fanout == '1'
+        continue-on-error: true
+        env:
+          NODE015_TOKEN: ${{ secrets.NODE015_TOKEN }}
+          NS: ${{ steps.plan.outputs.ns }}
+          DAY: ${{ steps.plan.outputs.day }}
+          PAR: ${{ steps.plan.outputs.par }}
+          FS_LO: ${{ steps.plan.outputs.fs_lo }}
+          FS_HI: ${{ steps.plan.outputs.fs_hi }}
+        run: |
+          body=$(printf '{"ref":"main","inputs":{"ns_override":"%s","day_override":"%s","par_override":"%s","only_slices":"%s,%s"}}' "$NS" "$DAY" "$PAR" "$FS_LO" "$FS_HI")
+          resp=$(mktemp)
+          code=$(curl -s -o "$resp" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $NODE015_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/xm921015/relay-node/actions/workflows/run.yml/dispatches \
+            -d "$body")
+          if [ "$code" = "204" ]; then
+            echo "follower N2 已派片 $FS_LO,$FS_HI（ns=$NS day=$DAY par=$PAR）"
+          else
+            echo "::warning::follower N2 dispatch 失败 http=$code：master 矩阵本片已缩为 0..ns-3，片 $FS_LO/$FS_HI 今晚无人播，需人工补派。响应：$(cat "$resp")"
+          fi
+          rm -f "$resp"
 
   brush:
     needs: plan
