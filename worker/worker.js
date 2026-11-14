@@ -10013,7 +10013,9 @@ function renderRunbar(){
       }
       // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，
       // 这里再按 ROLE 兜一层（缓存里的旧数据 / 将来字段改名时不至于漏出链接）。
-      var logLink=((ROLE==='full')&&a.url)?' · <a href="'+esc(a.url)+'" target="_blank">日志</a>':'';
+      // 2026-11-15：日志链接带仓库名（016=主群主仓 cron-relay，017=定制群 dingzhi），
+      // 与节点仓「015日志/014日志/013日志」对齐，一眼分清哪条链接是哪个仓。
+      var logLink=((ROLE==='full')&&a.url)?' · <a href="'+esc(a.url)+'" target="_blank">'+(a.pool==='hz'?'016':'017')+'日志</a>':'';
       // 2026-11-14：follower 节点仓日志入口（015/014/013，服务端已附 nodes[]，只读无 url 不渲染）。
       // 主群分片现在由主仓+节点仓一起跑，只看主仓日志会漏掉节点那几片的成败。
       var nodeLinks='';
