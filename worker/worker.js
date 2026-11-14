@@ -7598,7 +7598,12 @@ async function handle(request) {
           return json({ message: '转发到定制群失败：' + ((e && e.message) || e) }, 502, CORS);
         }
       }
-      return applyEntryEdit(body);
+      // 2026-11-14：hz 本地分支原先直接 return，漏了 ccBust —— 控制台编辑 hz 号成功后
+      //   首屏 5 分钟缓存不失效，电脑/手机看到的都是旧数据（15072467663 设公益号"没变"实为此因）。
+      //   对齐 /api/entry 与 dz 转发分支的口径：成功即作废首屏缓存。
+      const _rAe = await applyEntryEdit(body);
+      try { if (_rAe.status === 200) await ccBust(); } catch (e) {}
+      return _rAe;
     }
     // 客服名单 / 套餐档位维护（2026-10-27）：只认满权限口令。
     // 只传要改的字段：agents 和 plans 哪个没传就保持原样，避免「只加一个人把套餐表冲掉」。
