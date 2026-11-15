@@ -9200,7 +9200,7 @@ try{
 
 
 // ---- 进阶控制台页面（2026-10-22）：两池账号每日快照 + 日环比 + 编辑。登录账号/密码均 xx1031（CONSOLE_PASS 可覆盖密码）----
-const CONSOLE_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>650任务进阶控制台</title><style>
+const CONSOLE_HTML = `<!DOCTYPE html><html lang="zh-CN" data-page-node-id="7kKMmZJOuLC0H2ofrbW7mI"><head data-page-node-id="uLuCt26jt1nR9M4Y2KZkqW"><meta charset="utf-8" data-page-node-id="Q4Eos41W5D4jPuXXzYEXuj"><meta name="viewport" content="width=device-width,initial-scale=1" data-page-node-id="0rnB8mZXzxZBwkpwptGYrI"><title>650任务进阶控制台</title><style>
 body{font-family:-apple-system,system-ui,"PingFang SC",sans-serif;background:#f5f6f8;margin:0;padding:20px 12px}
 .head{text-align:center;margin-bottom:10px}.page-title{font-size:19px;font-weight:600;color:#3b6d11;margin:0}.page-sub{font-size:12px;color:#888;margin:5px 0 0}
 .abox{background:#fff;padding:20px;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:1800px;box-sizing:border-box;margin:0 auto 14px}
@@ -9312,25 +9312,27 @@ body:has(.modal:not([hidden])){overflow:hidden}
    1# 2池 3账号 4客服 5UID 6歌曲 7歌手 8时长 9昨日650 10今日650 11较昨日 12近30日播放 13笔记任务
    13入池 14有效期 15套餐 16标记 17操作 */
 @media (max-width:860px){
-  body{padding:10px 8px}
-  .head{margin-bottom:8px}.page-title{font-size:16px}.page-sub{font-size:11px;line-height:1.5}
-  .abox{padding:12px;border-radius:12px;margin-bottom:10px}
-  #loginBox{max-width:100%}
-  /* 2026-11-05：统计卡改 grid 后，手机端只换列宽/尺寸（flex 属性对 grid item 无效，已删） */
-  .stats{grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:5px;margin-bottom:10px}
-  .stat{padding:6px 4px;border-radius:9px}
-  .stat b{font-size:15px}.stat span{font-size:10px;line-height:1.25}
-  .plans{gap:6px;margin-bottom:10px}
-  .pl{flex:1 1 40%;padding:5px 9px;font-size:11.5px}
-  .pl b{font-size:14px}
-  .tools{gap:6px;margin-bottom:8px}
-  .tools input,.tools select,.tools button,.mini{padding:8px 10px;font-size:12.5px}
-  /* 手机端：两个日期框平分一行，否则各自换行会顶掉半屏 */
+  body{padding:8px 8px 14px}
+  .head{margin-bottom:8px;padding:2px 4px 0}
+  .page-title{font-size:17px;font-weight:800}
+  .page-sub{font-size:10.5px;line-height:1.5;color:#9aa5b1}
+  /* 主容器融进灰底：芯片/卡片自己是白色浮层（方案④预览的「灰底+白卡」语言） */
+  #mainBox{background:transparent;box-shadow:none;border-radius:0;padding:0 2px;margin-bottom:0}
+  #loginBox{max-width:100%;padding:14px;border-radius:13px}
+  .deadbox{background:#fff;border:0;border-radius:12px;box-shadow:0 1px 3px rgba(30,50,80,.06);padding:9px 12px}
+  /* 统计/套餐/运行状态 = 横滑白色小芯片（预览 .chips 视觉） */
+  .stats{display:flex;flex-wrap:nowrap;overflow-x:auto;gap:6px;margin-bottom:9px;padding:2px 2px 4px;-webkit-overflow-scrolling:touch}
+  .stat{flex:0 0 auto;min-width:64px;background:#fff;border:0;box-shadow:0 1px 2px rgba(30,50,80,.07);border-radius:10px;padding:6px 10px}
+  .stat b{font-size:14px;color:#17324f}.stat span{font-size:9.5px;color:#9aa5b1;line-height:1.3}
+  .plans{flex-wrap:nowrap;overflow-x:auto;gap:6px;margin-bottom:9px;padding:2px 2px 4px}
+  .pl{flex:0 0 auto;background:#fff;border:0;box-shadow:0 1px 2px rgba(30,50,80,.07);padding:5px 10px;font-size:11px;color:#5b6b7d;border-radius:10px}
+  .pl b{font-size:13px;color:#17324f}
+  .runbar{flex-wrap:nowrap;overflow-x:auto;gap:6px;margin-bottom:10px;padding:2px 2px 4px}
+  .rb{min-width:0;flex:0 0 auto;max-width:88%;background:#fff;border:0;box-shadow:0 1px 2px rgba(30,50,80,.07);border-radius:10px;padding:8px 11px;font-size:11px}
+  /* 手机端：两个日期框平分一行（筛选面板内） */
   .dr{width:100%;flex:1 1 100%;justify-content:space-between;padding:3px 5px}
   .dr input{flex:1;min-width:0;padding:7px 4px;font-size:12px}
   .dr .dn{flex:0 0 auto}
-  .runbar{gap:6px;margin-bottom:10px}
-  .rb{min-width:0;flex:1 1 100%;padding:7px 10px;font-size:11.5px}
   /* 2026-11-15：恢复手机端列表框锁定（用户要求与电脑版一致：账号列表中间内滚，
      删号记录/对照表/底部说明不用滚过几百行就能看到）。
      10-26 的「压底」事故根因是当时 overflow:visible 覆盖了基础 overflow:auto——
@@ -9338,21 +9340,10 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap{border:0;border-radius:0;background:transparent;overflow-y:auto}
   .twrap table,.twrap tbody{display:block}
   .twrap thead{display:none}
-  /* ===== 2026-11-15 方案④「单页 + 详情弹窗」整页重做（用户在④预览拍板，替代 v4/A-1）=====
-     ① 不加分页导航：APK 外层已有四页签，页面内再嵌导航会双重底栏（16:45 分析结论）；
-     ② 常用信息上卡片，全字段进卡片「详情」弹窗（infoBtn，桌面 CSS 隐藏）；
-     ③ 低频工具按钮由 JS 原样搬进右上「工具」抽屉、筛选控件搬进「筛选」面板
-        （搬的是同一批 DOM 节点，事件与 applyRole 权限显隐全部照旧生效，桌面可逆搬回）；
-     ④ 统计卡/套餐汇总/运行状态压成横滑 chips；
-     ⑤ 有效期 pill 占 2 列，修复 v4 的「有效期：202…」截断。
-     桌面端（>860px）零影响。 */
-  /* 顶部三块压成横滑条 */
-  .stats{display:flex;flex-wrap:nowrap;overflow-x:auto;gap:6px;margin-bottom:10px;padding-bottom:2px}
-  .stat{flex:0 0 auto;min-width:66px;max-width:112px}
-  .plans{flex-wrap:nowrap;overflow-x:auto;gap:6px}
-  .pl{flex:0 0 auto}
-  .runbar{flex-wrap:nowrap;overflow-x:auto;gap:6px}
-  .rb{min-width:0;flex:0 0 auto;max-width:86%}
+  /* ===== 2026-11-15 方案④「单页 + 详情弹窗」（用户在④预览拍板）—— 18:28 二次返工 =====
+     第一版只做了收纳重排、观感仍像桌面压缩版，用户打回；本次照预览稿 .card4/.chips/.seg
+     的视觉语言整个重写手机端样式（纯 CSS，桌面端 >860px 依旧零影响）：
+     灰底白卡浮层 / 池tab 分段条 / KPI 灰带 / meta 小字两行 / 详情蓝按钮 / 大按钮抽屉。 */
   /* 手机专属件：筛选面板（顶部下拉）/ 工具抽屉（右侧）/ 遮罩 */
   .mpanel{position:fixed;left:0;right:0;top:0;background:#fff;z-index:60;box-shadow:0 6px 24px rgba(0,0,0,.22);border-radius:0 0 14px 14px;padding:12px;display:none}
   .mpanel.on{display:block}
@@ -9371,61 +9362,66 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .mdh span{margin-left:auto;color:#999;cursor:pointer;padding:2px 6px}
   .mdbody{flex:1;overflow-y:auto;padding:0 14px 16px}
   .mdbody h5{font-size:10.5px;color:#9aa5b1;margin:10px 0 6px;font-weight:600}
-  .mdbody .mini{display:block;width:100%;margin-bottom:8px;padding:11px;font-size:13px;text-align:left}
-  /* 工具栏：池tab 一行 + 搜索/筛选/工具 一行（低频件被 JS 搬走，只剩这些） */
-  .tools{gap:6px;margin-bottom:8px}
-  .tools input,.tools select,.tools button,.mini{padding:8px 10px;font-size:12.5px}
-  .tools .tab{flex:1 1 29%;text-align:center;padding:8px 0}
+  .mdbody .mini{display:block;width:100%;margin-bottom:8px;padding:12px 13px;font-size:13px;text-align:left;background:#fff;border:1px solid #eef1f5;border-radius:10px;box-shadow:0 1px 2px rgba(30,50,80,.05);color:#33506e}
+  /* 工具栏：池tab 分段条一行 + 搜索整行 + 筛选/工具/刷新三键一行（低频件被 JS 搬走） */
+  .tools{gap:6px;margin-bottom:6px}
+  .tools input,.tools select,.tools button,.mini{padding:9px 12px;font-size:12.5px;border-radius:9px}
+  .tools .tab{flex:1 1 30%;text-align:center;padding:9px 0;background:#e3e8ef;color:#5b6b7d;font-weight:600;border-radius:9px}
+  .tools .tab.on{background:#fff;color:#17324f;box-shadow:0 1px 2px rgba(30,50,80,.12)}
   .mOnly{display:inline-block}
-  #q{flex:1;min-width:120px}
+  #q{flex:1 1 100%;background:#fff;border:1px solid #e4e9f0;border-radius:10px;padding:10px 12px}
+  #btnFilter,#btnMore,#btnRefresh{flex:1 1 30%;background:#fff;border:1px solid #e4e9f0;color:#33506e}
   /* 列表框保持锁高内滚（与电脑版一致，10-26 压底事故与 11-15 恢复记录见上） */
   .twrap{border:0;border-radius:0;background:transparent;overflow-y:auto}
   .twrap table,.twrap tbody{display:block}
   .twrap thead{display:none}
-  /* 卡片：沿用 v4 的 6 列 dense grid 结构，改动=①有效期 pill 占 2 列修截断；②操作列加「详情」 */
-  .twrap tr{display:grid;grid-template-columns:repeat(6,1fr);grid-auto-flow:dense;gap:4px 8px;
-    background:#fff;border:1px solid #e8eaee;border-radius:13px;padding:10px 12px 9px;margin:0 0 9px}
-  .twrap td{display:block;min-width:0;border:0;padding:1px 0;font-size:11.5px;line-height:1.5;color:#33506e;white-space:normal}
-  .twrap td::before{content:attr(data-l) '：';color:#9aa5b1;font-size:10px;margin-right:2px}
+  /* ===== 卡片：照方案④预览 .card4 视觉重写（18:28 用户打回第一版）=====
+     灰底白卡+阴影；头部=池badge+账号名+有效期pill(绿调)；KPI=5格拼成一条灰带（列gap=0首尾圆角）；
+     meta=客服|歌曲、入池|套餐 两行小字；底部分隔线上=标记、下=详情(蓝实心)+编辑(描边)。
+     UID/邮箱/歌手/时长/备注卡上隐藏 —— 全字段「详情」弹窗(openInfo)里都有。 */
+  .twrap tr{display:grid;grid-template-columns:repeat(6,1fr);gap:0;background:#fff;border:0;
+    border-radius:13px;padding:10px 12px 9px;margin:0 0 8px;box-shadow:0 1px 3px rgba(30,50,80,.07)}
+  .twrap td{display:block;min-width:0;border:0;padding:0;font-size:12px;line-height:1.5;color:#33506e;white-space:normal}
+  .twrap td::before{content:attr(data-l) ' ';color:#9aa5b1;font-size:10px;margin-right:3px}
   .twrap td:not([data-l])::before{content:none}
-  .twrap td .snap-at{font-size:10px;color:#9aa5b1}
-  .twrap td.nv{display:none}
-  .twrap td:nth-child(1){display:none}
-  /* 头部行：池badge + 账号名(3列) + 有效期pill(2列，不再挤在1列里截断) */
+  .twrap td:nth-child(4)::before{content:'客服 '}
+  .twrap td .snap-at{font-size:9px;color:#9aa5b1}
+  .twrap td.nv,.twrap td:nth-child(1),.twrap td:nth-child(5),.twrap td:nth-child(6),
+  .twrap td:nth-child(8),.twrap td:nth-child(9),.twrap td:nth-child(18){display:none}
+  /* 头部：池badge | 账号名 | 有效期pill */
   .twrap td:nth-child(2){grid-column:1/2;grid-row:1;align-self:center}
-  .twrap td:nth-child(3){grid-column:2/5;grid-row:1;font-size:15px;font-weight:700;color:#17324f;
-    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;align-self:center;padding:2px 0}
+  .twrap td:nth-child(3){grid-column:2/5;grid-row:1;font-size:14.5px;font-weight:700;color:#17324f;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;align-self:center;padding:1px 4px}
   .twrap td:nth-child(16){grid-column:5/7;grid-row:1;justify-self:end;align-self:center;display:flex;align-items:center;
-    background:#f0f2f5;border-radius:20px;padding:3px 8px;font-size:10.5px;font-weight:700;color:#33506e;white-space:nowrap;max-width:100%;overflow:hidden}
+    background:#eef3e6;border-radius:20px;padding:3px 9px;font-size:10.5px;font-weight:700;color:#3b6d11;
+    white-space:nowrap;max-width:100%;overflow:hidden}
   .twrap td:nth-child(16)::before{font-size:9px;font-weight:400;margin-right:3px;flex:0 0 auto}
-  /* KPI 行：5 格灰底（昨日/今日/较昨日/近30日/笔记），今日650格带微型进度条 */
+  /* KPI 灰带：昨日/今日/较昨日/近30日/笔记 五格连成一条（gap=0，首尾格单独圆角，格间细分隔线） */
   .twrap td:nth-child(10),.twrap td:nth-child(11),.twrap td:nth-child(12),.twrap td:nth-child(13),.twrap td:nth-child(14){
     display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
-    background:#f6f8fb;border-radius:8px;padding:5px 2px 4px;text-align:center;font-weight:700;color:#17324f}
-  .twrap td:nth-child(10){grid-column:1/2;grid-row:2}
-  .twrap td:nth-child(11){grid-column:2/3;grid-row:2;font-size:13.5px}
-  .twrap td:nth-child(12){grid-column:3/4;grid-row:2}
-  .twrap td:nth-child(13){grid-column:4/5;grid-row:2}
-  .twrap td:nth-child(14){grid-column:5/6;grid-row:2}
+    background:#f6f8fb;padding:7px 2px 6px;text-align:center;font-weight:700;color:#17324f}
+  .twrap td:nth-child(10){grid-column:1/2;grid-row:2;border-radius:9px 0 0 9px;border-right:1px solid #e4e9f0}
+  .twrap td:nth-child(11){grid-column:2/3;grid-row:2;font-size:13px;border-right:1px solid #e4e9f0}
+  .twrap td:nth-child(12){grid-column:3/4;grid-row:2;border-right:1px solid #e4e9f0}
+  .twrap td:nth-child(13){grid-column:4/5;grid-row:2;border-right:1px solid #e4e9f0}
+  .twrap td:nth-child(14){grid-column:5/7;grid-row:2;border-radius:0 9px 9px 0}
   .twrap td:nth-child(10)::before,.twrap td:nth-child(11)::before,.twrap td:nth-child(12)::before,.twrap td:nth-child(13)::before,.twrap td:nth-child(14)::before{font-size:8.5px;font-weight:400;margin-right:0;white-space:nowrap}
   .twrap td:nth-child(11) .snap-at{font-size:8.5px}
   .twrap .pbar6{display:block;height:3px;width:100%;background:#e2e7ee;border-radius:2px;margin-top:3px;overflow:hidden;flex:0 0 auto}
   .twrap .pbar6 i{display:block;height:100%;background:#3b6d11;border-radius:2px}
-  /* 信息流：两列小字（nv 隐藏后 dense 回填，同排另一半留空属正常） */
-  .twrap td:nth-child(5){grid-column:1/4}
-  .twrap td:nth-child(4){grid-column:4/7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .twrap td:nth-child(7){grid-column:1/7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .twrap td:nth-child(8){grid-column:1/4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .twrap td:nth-child(9){grid-column:4/7}
-  .twrap td:nth-child(6){grid-column:1/4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .twrap td:nth-child(17){grid-column:4/7}
-  .twrap td:nth-child(15){grid-column:1/4}
-  .twrap td:nth-child(18){grid-column:4/7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  /* 底部：标记 左 + 操作(详情/编辑) 右 同一行 */
-  .twrap td:nth-child(19){grid-column:1/4;display:flex;flex-wrap:wrap;gap:3px;align-items:center;padding-top:6px}
-  .twrap td:nth-child(20){grid-column:4/7;display:flex;gap:5px;align-items:center;padding-top:6px}
-  .twrap td:nth-child(20) button{flex:1;padding:7px 0;font-size:11.5px;text-align:center;border-radius:8px}
-  .twrap td:nth-child(20) .infoBtn{flex:0 0 34%;background:#255ea6;color:#fff;border-color:#255ea6}
+  /* meta 两行小字：客服|歌曲 一行，入池|套餐 一行（标签灰前缀、值右对齐防挤压） */
+  .twrap td:nth-child(4){grid-column:1/3;grid-row:3;padding:6px 0 0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .twrap td:nth-child(7){grid-column:3/7;grid-row:3;padding:6px 0 0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+  .twrap td:nth-child(15){grid-column:1/3;grid-row:4;padding:3px 0 0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .twrap td:nth-child(17){grid-column:3/7;grid-row:4;padding:3px 0 0;font-size:11px;text-align:right}
+  /* 底部：分隔线上 标记(badge流) | 按钮(详情蓝实心+编辑描边) */
+  .twrap td:nth-child(19){grid-column:1/4;grid-row:5;display:flex;flex-wrap:wrap;gap:3px;align-items:center;
+    padding-top:7px;margin-top:8px;border-top:1px solid #f2f4f6}
+  .twrap td:nth-child(20){grid-column:4/7;grid-row:5;display:flex;gap:6px;align-items:center;justify-content:flex-end;
+    padding-top:7px;margin-top:8px;border-top:1px solid #f2f4f6}
+  .twrap td:nth-child(20) button{flex:0 0 auto;min-width:64px;padding:7px 0;font-size:11.5px;text-align:center;
+    border-radius:8px;background:#fff;border:1px solid #dde3ea;color:#33506e;font-weight:600}
+  .twrap td:nth-child(20) .infoBtn{flex:0 0 36%;background:#255ea6;color:#fff;border-color:#255ea6}
   /* 「数据口径」在手机端被 JS 包进折叠 details（kjWrap），给个跟 deadbox 一致的观感 */
   .kjbox{font-size:11.5px;color:#666;line-height:1.7}
   /* 「删号记录」6 列表 / 「标记对照表」3 列表，在 360px 下每列只剩几十 px，会被挤成一字一行。
@@ -9450,259 +9446,259 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .lgd td:nth-child(3)::before{content:"处理｜";color:#9aa5b1;font-size:11px}
   .lgd td[colspan]{display:block;margin:2px 0 0;padding:4px 8px;border-radius:6px}
 }
-</style></head><body>
-<div class="head"><h1 class="page-title" id="ptitle">650 任务进阶控制台</h1><p class="page-sub">两群账号每日快照 · 数据由 Actions 播放时段顺带采集（T+1 可见）· CK 不在页面展示</p></div>
-<div class="abox" id="loginBox">
-  <h3 style="margin:0 0 10px">输入控制台口令</h3>
-  <p style="margin:0 0 8px;color:#888;font-size:13px;line-height:1.5">账号固定 <b>xx1031</b>，只需填口令。<b>本机不保存口令，每次打开这一页都要重新输入</b>。从「网易云CK助手」或手机 App 点「进阶控制台」进来时，口令由软件带过来，不用在这里再输一遍。</p>
-  <div style="display:flex;gap:8px;flex-wrap:wrap">
-    <input id="lu" value="xx1031" readonly title="账号固定 xx1031，不用改" style="width:92px;flex:0 0 92px;background:#f5f5f5;color:#999;text-align:center">
-    <input id="lp" type="password" placeholder="控制台口令" style="flex:1;min-width:160px">
-    <button id="lbtn">进入</button>
+</style></head><body data-page-node-id="EoABxAAtvQh95VCx9f8tgX">
+<div class="head" data-page-node-id="rQq8lzTDYJvtfMiC4hYDzI"><h1 class="page-title" id="ptitle" data-page-node-id="MGbM9loyjWJasw3fwZqn3v">650 任务进阶控制台</h1><p class="page-sub" data-page-node-id="kFgdIY3tajOozlMB3ENex1">两群账号每日快照 · 数据由 Actions 播放时段顺带采集（T+1 可见）· CK 不在页面展示</p></div>
+<div class="abox" id="loginBox" data-page-node-id="gGPFBKyx0kCWGo0HRHFp8T">
+  <h3 style="margin:0 0 10px" data-page-node-id="fKjS8kbb40JtIRbCzjboI9">输入控制台口令</h3>
+  <p style="margin:0 0 8px;color:#888;font-size:13px;line-height:1.5" data-page-node-id="WlyNRaY6AlMSEAW2WPiDBc">账号固定 <b data-page-node-id="CPJv5nsB0DOkAnPHv1sAK9">xx1031</b>，只需填口令。<b data-page-node-id="CV3g5FP8oxDIlAIEVk4rtj">本机不保存口令，每次打开这一页都要重新输入</b>。从「网易云CK助手」或手机 App 点「进阶控制台」进来时，口令由软件带过来，不用在这里再输一遍。</p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap" data-page-node-id="UFnZ9TBVvsxolHxAGJ0IwI">
+    <input id="lu" value="xx1031" readonly title="账号固定 xx1031，不用改" style="width:92px;flex:0 0 92px;background:#f5f5f5;color:#999;text-align:center" data-page-node-id="6y1oM5fOuhDgbyCDs6UHsY">
+    <input id="lp" type="password" placeholder="控制台口令" style="flex:1;min-width:160px" data-page-node-id="wEjEZR1g1TkA8bX301xDoD">
+    <button id="lbtn" data-page-node-id="czCWZy8b7yFfjWG6xZtuYN">进入</button>
   </div>
-  <div class="msg" id="lm"></div>
+  <div class="msg" id="lm" data-page-node-id="BLDDBXsxPDivdNEUi6Wd43"></div>
 </div>
-<div class="abox" id="mainBox" hidden>
-  <div class="runbar" id="runbar"></div>
-  <div class="stats" id="stats"></div>
-  <div class="plans" id="plans"></div>
-  <div class="tools">
-    <span class="tab on" data-p="all">全部</span><span class="tab" data-p="hz">主群</span><span class="tab" data-p="dz">定制群</span>
-    <select id="fagent" title="按客服筛选（顶部套餐汇总、所有统计都跟着变）"><option value="">客服：全部</option></select>
-    <select id="fplan" title="按套餐筛选"><option value="">套餐：全部</option></select>
-    <span class="dr" id="dr" title="入池日期范围：只看这段时间登记进池的号。只填一端也行（只填左边=这天及以后，只填右边=这天及以前），两边都空=全部。清空点右边的 ×"><input type="date" id="date" title="入池起始日（含）"><em>~</em><input type="date" id="dateTo" title="入池结束日（含）"><i class="dn" id="dn"></i><span class="dx" id="dClear" title="清除入池日期范围">×</span></span>
-    <input id="q" placeholder="搜索：账号 / 邮箱 / UID / 歌曲ID / 客服">
-    <select id="sort"><option value="default">排序：默认</option><option value="delta">排序：日涨幅↓</option><option value="rate">排序：今日进度↓</option></select>
+<div class="abox" id="mainBox" hidden data-page-node-id="6ED187LnNcdDOrKH4VCc9b">
+  <div class="runbar" id="runbar" data-page-node-id="2HlNsb5yhx8i0N1crLYhvp"></div>
+  <div class="stats" id="stats" data-page-node-id="0RQhKRtmXaOlGAOYWWJNtZ"></div>
+  <div class="plans" id="plans" data-page-node-id="goE4cBUtVctv26PFFUdJFU"></div>
+  <div class="tools" data-page-node-id="kVy45jLG9MJIKM2ZIrVVlM">
+    <span class="tab on" data-p="all" data-page-node-id="4ub0NzCO4pJviHDZQaDogA">全部</span><span class="tab" data-p="hz" data-page-node-id="2pTpcNIZZRfZtDvefr4GIF">主群</span><span class="tab" data-p="dz" data-page-node-id="JqWDcV45Swk0bBSLoeT5xw">定制群</span>
+    <select id="fagent" title="按客服筛选（顶部套餐汇总、所有统计都跟着变）" data-page-node-id="PMHAmUNacAc9JD94w8Kncm"><option value="" data-page-node-id="frD7MCweVB1xbQyhLknV9X">客服：全部</option></select>
+    <select id="fplan" title="按套餐筛选" data-page-node-id="7lbtLCqkdoXnFx2elLEPh7"><option value="" data-page-node-id="KKD1lGOAHrsUfypnmcVICv">套餐：全部</option></select>
+    <span class="dr" id="dr" title="入池日期范围：只看这段时间登记进池的号。只填一端也行（只填左边=这天及以后，只填右边=这天及以前），两边都空=全部。清空点右边的 ×" data-page-node-id="51HnUGAktl3MFaTSEsiVgg"><input type="date" id="date" title="入池起始日（含）" data-page-node-id="hT6obr4wl7H9KkVKKPtOHn"><em data-page-node-id="aRF6HwXs74KJlhOHqesG6m">~</em><input type="date" id="dateTo" title="入池结束日（含）" data-page-node-id="sdbGDGBakfbAVJVvEKmEpR"><i class="dn" id="dn" data-page-node-id="9MXwZzxueGJTpTF6MLi2rR"></i><span class="dx" id="dClear" title="清除入池日期范围" data-page-node-id="7IXbtdwLZbGsEqyiEV1TvD">×</span></span>
+    <input id="q" placeholder="搜索：账号 / 邮箱 / UID / 歌曲ID / 客服" data-page-node-id="HiY9izWnIWEZm0rKYqM076">
+    <select id="sort" data-page-node-id="wfp1M22iElG3PcguLgWXMo"><option value="default" data-page-node-id="56UTQFF8rFJAn7DXfloPbt">排序：默认</option><option value="delta" data-page-node-id="UymcGjBMywhhG1NIuf0KEu">排序：日涨幅↓</option><option value="rate" data-page-node-id="WUzlj2zRfKlG1YWKGta3t4">排序：今日进度↓</option></select>
     <!-- 2026-11-15 方案④：手机专属入口（桌面 .mOnly 隐藏）。筛选面板/工具抽屉里的控件由 JS 从本栏搬过去，事件不变 -->
-    <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期/排序）">筛选</button>
-    <button class="mini mOnly" id="btnMore" title="工具箱（导出CSV/月度结算/客服名单/设备授权/登记链接/历史登记/退出）">工具</button>
-    <button class="mini" id="btnCsv">导出CSV</button>
-    <button class="mini" id="btnRefresh">刷新</button>
-    <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成">月度结算</button>
-    <button class="mini gray" id="btnCfg" style="display:none">客服名单</button>
-    <button class="mini gray" id="btnDev" style="display:none" title="按客服电脑授权：未授权的机器码不能生成登记链接">设备授权</button>
-    <button class="mini gray" id="btnReg" style="display:none" title="生成买家自助登记链接；续费/补登必须选原单，类型定在链接上">登记链接</button>
-    <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限可见）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应">历史登记</button>
-    <button class="mini gray" id="btnOut">退出</button>
+    <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期/排序）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
+    <button class="mini mOnly" id="btnMore" title="工具箱（导出CSV/月度结算/客服名单/设备授权/登记链接/历史登记/退出）" data-page-node-id="Z0TBa6mm2C5i5J4wMmUIVm">工具</button>
+    <button class="mini" id="btnCsv" data-page-node-id="1wGeER1qQC3pXjLZx52lK2">导出CSV</button>
+    <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
+    <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成" data-page-node-id="KG7uyWeMOO4hHWeiVUB4Li">月度结算</button>
+    <button class="mini gray" id="btnCfg" style="display:none" data-page-node-id="fyixyeXAj1IGBnB0XxPYrp">客服名单</button>
+    <button class="mini gray" id="btnDev" style="display:none" title="按客服电脑授权：未授权的机器码不能生成登记链接" data-page-node-id="YJHiOvMyZyJGL0BLRrRV4p">设备授权</button>
+    <button class="mini gray" id="btnReg" style="display:none" title="生成买家自助登记链接；续费/补登必须选原单，类型定在链接上" data-page-node-id="JqzT5fuKCyCteGDQJKQloy">登记链接</button>
+    <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限可见）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
+    <button class="mini gray" id="btnOut" data-page-node-id="JfDeJt5vbASdRoOMC7tVaS">退出</button>
   </div>
   <!-- ===== 2026-11-15 方案④：手机端筛选面板 / 遮罩 / 工具抽屉（桌面 display:none）=====
        控件不是复制是搬运：JS 把 #fagent/#fplan/#dr/#sort 搬进面板、七个低频按钮搬进抽屉，
        同一批 DOM 节点，onclick/addEventListener 与 applyRole 的显隐全部照旧生效；>860px 原样搬回。 -->
-  <div id="filterPanel" class="mpanel"><div class="mph">筛选 <span id="fpClose">✕</span></div><div id="fpSlot"></div></div>
-  <div id="mMask" class="mmask"></div>
-  <div id="toolDrawer" class="mdrawer"><div class="mdh">工具箱 <span id="tdClose">✕</span></div><div class="mdbody" id="tdSlot"></div></div>
-  <div class="twrap"><table><thead><tr>
-    <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人" class="thin">邮箱</th><th class="thin">绑定歌曲</th><th title="该号自己的音乐人昵称（acc_meta 元数据回填；没同步到显示 —）。限宽约 5 个字，超长截断成 …，鼠标悬停看全名。2026-11-11 起不再显示歌的歌手列表与 ✓/✗（共创人太多把行撑太高），绑错歌判定走标记列" class="thin">音乐人</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="笔记任务（发布图文笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">笔记<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成">备注</th><th>标记</th><th>操作</th>
-  </tr></thead><tbody id="tb"></tbody></table></div>
-  <details class="deadbox" id="deadBox" hidden><summary>删号记录 / 待复核账号（删号=近 3 天全部，待复核最多 12 条；来自 D1 dead_log 与 accounts.suspect_at）</summary>
-  <div class="muted" style="margin:6px 0 8px">原因：<b>手动删除</b>＝你在控制台/号池工具点的删除；<b>Cookie失效</b>＝播放前验活自动判死；<b>到期清理</b>＝账号有效期到了自动移除。已回池（迁移到另一群或当天重登）的号不算删号。<br>通知：<b>已通知</b>＝确认发出；<b>已回池·不发</b>＝号还在跑；<b>无邮箱·不发</b>＝没登记邮箱；<b>待判·12h</b>＝删后满 12 小时才判定该不该发；<b>自动判死·run.py 发信</b>＝早期记录，发信由播放任务临时触发，发没发事后查不到。</div><div id="deadList"></div></details>
-  <details class="deadbox" id="legendBox"><summary><b>标记看不懂 / 数字怎么读？点开这份对照表</b></summary><div class="lgd">
-    <b>一、先认清三个数（别再混）：</b>「650进度」= 音乐人后台的 650 任务完成度，100% 才算做完，是唯一有意义的成绩；「近30日播放量」= 工作台统计的播放次数，刷再多也不直接等于进度；「笔记任务」= 网易塞在同一组里的另一个小任务（发布图文笔记），跟播放和 650 一点关系都没有，一列显示「—」也是正常的。
-    <br><b>二、标记对照（按「问题出在哪」分组，越靠上的越该先处理）：</b>
-    <table><thead><tr><th>标记</th><th>意思</th><th>要怎么处理</th></tr></thead><tbody>
-    <tr><td colspan="3" style="background:#fdf0f0;font-weight:600;color:#a32d2d">A · 歌曲问题 —— 必须改歌，刷多少都不会涨</td></tr>
-    <tr><td><span class="badge b-red">歌曲无效·绑错歌</span></td><td>他登记的这首歌，作者里<b>没有他自己的音乐人身份</b>（相当于绑了别人的歌）。两种情况都算：多人合唱里没他；<b>独唱但作者是别人</b>（10-25 补，只在近30日播放 ≥650 次、650 仍 ≤2% 时才提示，避免误伤爬坡中的新号）</td><td>要改：让他换成自己名下的歌。这是「播放一直涨、650 永远 0%」最常见的根因之一</td></tr>
-    <tr><td><span class="badge b-red">歌曲无效·查无此歌</span></td><td>网易接口查不到这首歌（已下架或已删除）</td><td>要改：换一首正常上架的歌</td></tr>
-    <tr><td><span class="badge b-orange">共创歌曲·非主艺</span></td><td>这首歌是<b>多人合唱</b>，他排在第 2 位以后（主艺是别人）。实测这类号 650 恒为 0%：合唱曲里非主艺人的播放基本不计入任务</td><td>要改：优先换本人独唱的歌</td></tr>
-    <tr><td><span class="badge b-orange">共创歌曲·本人主艺</span></td><td>多人合唱，他是第一艺人。比非主艺好，但播放仍会被分摊给其他艺人，不如独唱</td><td>可改可不改：能换独唱就换</td></tr>
-    <tr><td><span class="badge b-orange">共创歌曲·待核</span></td><td>多人合唱，但还没同步到该号的音乐人身份，判断不了他排第几</td><td>先按「共创」处理；等元数据同步后会自动变成上面两种之一</td></tr>
-    <tr><td colspan="3" style="background:#f7f7f7;font-weight:600;color:#555">B · 账号状态</td></tr>
-    <tr><td><span class="badge b-yellow">待复核</span></td><td>登录已失效被系统判死，等下一轮再确认就删号</td><td>要管：让号主换 CK</td></tr>
-    <tr><td><span class="badge b-yellow">未绑邮箱</span></td><td>没填通知邮箱，号失效时通知不到人</td><td>能补就补，不影响播放</td></tr>
-    <tr><td><span class="badge b-gray">只收不听</span></td><td>号主自己关了互听，只接收别人的播放，不给别人播</td><td>号主的选择，不用管</td></tr>
-    <tr><td><span class="badge b-gray">公益号</span></td><td><b>在编辑里手动标记的公益号</b>（也可以是没有登记歌曲的老公益号）：只帮别人听歌，自己登记的歌不再分给别人听，也不参加签到/笔记。它本来就没有 650 进度</td><td>不用管。要它回归普通号：编辑 → 账号类型选「普通号」</td></tr>
-    <tr><td colspan="3" style="background:#fdf6ec;font-weight:600;color:#b85c00">C · 任务周期（650 任务本身不统计了）</td></tr>
-    <tr><td><span class="badge b-orange">有播放·650为0·卡住</span></td><td>连续 2 天以上 0% 且播放量还在涨，<b>且刚刚实时查过工作台仍是 0%</b>（控制台对这类号自动做一次实时复核，30 分钟内不重复查）。实测「0%」绝大多数是<b>快照采在网易结算之前</b>：同一个号 07:20 快照 0%、11:30 实时已 100%，这类现在会被改标成灰色的「实时已恢复」</td><td>真卡住的（连续 8 天以上、实时也 0%）先让号主去音乐人后台看 650 任务还在不在；<b>后台没有「领取上期奖励 / 开启新一期」这种按钮</b>（卡片上只有「看攻略」，周期按 31 天自动换期），任务真被下掉只能重新报名或换号</td></tr>
-    <tr><td><span class="badge b-orange">有播放·650为0</span></td><td>近30日播放已有 <b>650 次以上</b>，但快照里的 650 进度是 0%。<b>多半是这一轮快照早于网易结算</b>（结算窗口实测到 11:30~12:00）；控制台会自动实时复核，实时有进度就改标灰的「实时已恢复」。入池 ≤2 天的新号不标这一类</td><td>观察即可：实时复核仍是 0% 且连续 2 天以上，才升级成「·卡住」</td></tr>
-    <tr><td><span class="badge b-gray">实时已恢复</span></td><td>快照里 650 是 0%，但<b>刚刚实时查工作台已经有进度</b>：这一轮快照采在网易结算之前，不是掉量也不是周期问题（同一个号 07:20 快照 0%、11:30 实时 100%）</td><td>不用管。这个标记只在被怀疑「有播放·650为0」的号上出现，30 分钟内不重复查</td></tr>
-    <tr><td><span class="badge b-red">非音乐人</span></td><td>账号元数据（acc_meta）已确认该号<b>没有音乐人身份</b>：拿普通用户号登记的歌，播放永远不会计入 650（11-11 批量核查 12 个无650任务号，7 个是这类）。实习期号不会标这个 —— 实习号的音乐人身份是有的</td><td>要管：找买家核实身份 —— 要么换成音乐人号，要么按非音乐人号重新定价。让号主去后台「点开通」解决不了，因为根本没有音乐人身份</td></tr>
-    <tr><td><span class="badge b-gray">无650任务</span></td><td>后台没返回 650 任务。已按账号元数据细分：有音乐人身份的 = <b>任务没开通，多为实习期未转正</b>（官方 90 天实习期里特殊权益开不了，实测实习号维持天数恒为 0、不每天涨）；转正不是纯时间驱动，有号超 90 天仍实习，可能卡在号主侧认证。元数据没同步到的保持通用提示</td><td>用「号体检」工具实时复核（能分辨非音乐人 / 实习期 / 可开通没开通三种根因）。实习期未到 90 天的等转正，超 90 天的催号主上后台查实习状态</td></tr>
-    <tr><td><span class="badge b-gray">周期归零</span>（较昨日列 + 标记列）</td><td>昨日 650 已接近满（≥80%）、今天突然 0%，但近30日播放量没塌 —— 这是 <b>650 换新周期</b>，进度从头计，不是掉量。<b>周期按 31 天日历走，不看进度</b>：上期只做到 98% 到期也一样归零重来，没用完的百分比不会带到新一期</td><td>不用管：已不计入「今日下跌」，也不再标成「有播放·650为0」</td></tr>
-    <tr><td colspan="3" style="background:#fdf9e6;font-weight:600;color:#8a6d00">D · 进度停滞（还在周期内，只是没动）</td></tr>
-    <tr><td><span class="badge b-yellow">今日零增长</span></td><td>650 进度和昨天完全一样（还没到 100%），<b>近30日播放量也刚好持平</b>（不多不少；在跌的那种已单独标成下面的「净增≤0」）。原因基本是 <b>30 天滚动回吐</b>：悬浮说明里会给两个数 —— 该号近两周平均每天净涨多少次（=每天正常应增加的水平）、今天被多少次老播放到期退出抵掉</td><td>先观察 2~3 天，不是每天都一定涨</td></tr>
-    <tr><td><span class="badge b-yellow">近30日净增≤0</span></td><td>近30日播放量今天<b>没涨或略降</b>（30 天滚动窗口），650 进度也没涨 —— 说明今天补进去的播放被 <b>30 天前那一波老播放到期退出</b>抵掉了，不是播放没算进去。只在两边快照采集时刻相差 ≤3 小时时才判（否则是拿今早的数和昨晚的数硬比）。悬浮说明里附<b>两周均值与回吐估算</b>（按该号 14 天前快照到今天的平均日增算，新号/断档没有这两个数）</td><td>偶发不用管（30 天前有过高峰的号必然会遇到一次）。连续 3 天以上净增≤0 → 说明补的量追不上退的量，加每号播放次数或换更热的歌</td></tr>
-    <tr><td><span class="badge b-yellow">650未结算</span></td><td>650 进度和昨天一样，但<b>近30日播放量在涨</b>：播放已入账，网易分批结算还没滚到 650（入账窗口实测持续到 11:30~12:00）。这类不算真停滞，悬浮提示里能看到对比双方快照的采集时刻</td><td>不用管；连续 3 天以上播放量在涨而 650 不动再人工查</td></tr>
-    <tr><td><span class="badge b-yellow">N天未涨</span></td><td>连续 N 天 650 进度没涨（含小幅回落；没有快照的断档天不计；当前已到 100% 的号不标）。<b>先看「近30日播放量」</b>：在跌 = 30 天滚动窗口里老播放退出（做过满 100% 的号会一直回落到新播放补不回为止，属自然衰减）；在涨却不动 = 播放被判无效</td><td>播放量也在跌 → 不用管；播放量在涨却 4 天不动 → 人工查</td></tr>
-    <tr><td colspan="3" style="background:#eef5fd;font-weight:600;color:#255ea6">E · 入池状态 —— 刚进来的号，进度低是正常的，别当故障查</td></tr>
-    <tr><td><span class="badge b-blue">今日入池</span></td><td>今天才登记的新号：明天才进轮转开始被听，所以今天既没有快照也没有 650 进度。<b>顶部「今日入池」这个数字就等于搜这个词的行数</b></td><td>正常，不用管（第 4 天还是 0% 再查）</td></tr>
-    <tr><td><span class="badge b-green">已达100%</span></td><td>本周期 650 已经做满，继续刷也不会有额外收益</td><td>不用管；下个 31 天周期会自动归零重爬</td></tr>
-    <tr><td colspan="3" style="background:#f7f7f7;font-weight:600;color:#555">F · 数据 / 其它</td></tr>
-    <tr><td><span class="badge b-gray">采集缺失</span></td><td>今天这一轮没采到该号的快照（接口超时或号没跑）。<b>入池 ≤2 天的新号不会打这个标</b>（它们本来就没有快照，顶部「今日入池」就是它们的总数）</td><td>偶尔出现不用管，连续几天要查</td></tr>
-    <tr><td><span class="badge b-red">只收</span>/<span class="badge b-yellow">长歌</span>（时长列）</td><td>时长 <b>2:12 以下</b>标红、<b>5:36 以上</b>标黄</td><td>只是提示，10-22 修完后长短歌都能正常计入</td></tr>
+  <div id="filterPanel" class="mpanel" data-page-node-id="L3O5UkH3KEmlVcDrDbcJOC"><div class="mph" data-page-node-id="IdqY4dz5DxRpq1XN2ubSI3">筛选 <span id="fpClose" data-page-node-id="zCL5VgX0sw2yI7HUgcynZZ">✕</span></div><div id="fpSlot" data-page-node-id="sAFFYvCDnbXutmbmToDvnT"></div></div>
+  <div id="mMask" class="mmask" data-page-node-id="X7ccQ5Ytb1V4EP6b7sYNtA"></div>
+  <div id="toolDrawer" class="mdrawer" data-page-node-id="jXLFfOftjQzsGowY8leGMg"><div class="mdh" data-page-node-id="ad9kK7jsdGt5Axg1EFm1d4">工具箱 <span id="tdClose" data-page-node-id="QjUHxUXHVIXCrIjdHeP5UO">✕</span></div><div class="mdbody" id="tdSlot" data-page-node-id="uOAWxGAgTmt0dUBblc1BZH"></div></div>
+  <div class="twrap" data-page-node-id="qw0wwRTgBB6xJ319MIPsRk"><table data-page-node-id="T9AAPz0dPw6WJfySn2Kn4L"><thead data-page-node-id="oCvlUDgyCgOLEc8QG0K5E0"><tr data-page-node-id="OFIMUWkSUVRAt9CDT16lUN">
+    <th data-page-node-id="aTPgMAJ87FBNwtU6NzE60Z">#</th><th data-page-node-id="2lhpIuolIU4a3LWKcv9dfD">池</th><th data-page-node-id="1hC5Cbeq9f9IfaxB8Lg5Oo">账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）" data-page-node-id="sys7WTZJcXCcjL8iHiYYLj">客服</th><th data-page-node-id="6wM0XMmz0299rxox7Xh51U">UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人" class="thin" data-page-node-id="Y0AXBUqqHtH8IAOCIKdnQk">邮箱</th><th class="thin" data-page-node-id="sffajFyXGlSg3vB1CoLC0i">绑定歌曲</th><th title="该号自己的音乐人昵称（acc_meta 元数据回填；没同步到显示 —）。限宽约 5 个字，超长截断成 …，鼠标悬停看全名。2026-11-11 起不再显示歌的歌手列表与 ✓/✗（共创人太多把行撑太高），绑错歌判定走标记列" class="thin" data-page-node-id="cOjDjA7lffybZmGOt4ih4V">音乐人</th><th data-page-node-id="jyapRQ9x7gNQL4FjBpHqAT">时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）" data-page-node-id="sN2t8uDHSEjdIamGhjJIWF">昨日<br data-page-node-id="IGWYzbgWdo6jaraQMwbLiS">650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）" data-page-node-id="UEY1sevqW55LCelGVfYU7w">今日<br data-page-node-id="NIkCBwMzZnlQ2ThYvI7mgC">650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）" data-page-node-id="ZKF27dTLdlODaV78hyn3Rd">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）" data-page-node-id="qk920a4VM1QngxMEliNJYX">近30日<br data-page-node-id="TcVHIdqj1jffat6zmXda8o">播放量</th><th title="笔记任务（发布图文笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响" data-page-node-id="zeXLnA8nPwcZkWZGP9DvpE">笔记<br data-page-node-id="X6OOzhWNOFtPXtlD5GRnIz">任务</th><th data-page-node-id="kjXSKnO9OYb3eCIPMKuU30">入池</th><th data-page-node-id="yBozztfh1mgawswm4aDKhG">有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算" data-page-node-id="fZVlFlT8tMV0V0IRYYBKWF">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成" data-page-node-id="SWE7yzg8LCE1AOEMKcjYKv">备注</th><th data-page-node-id="6xQgH5eG5p287o84IiOlnA">标记</th><th data-page-node-id="jkZqSenKCqCtHV6P3uS5VG">操作</th>
+  </tr></thead><tbody id="tb" data-page-node-id="CVtX4T7l8wPY1N5HEJ6XRc"></tbody></table></div>
+  <details class="deadbox" id="deadBox" hidden data-page-node-id="lfrkgrMU2ubGXlnxn48UWr"><summary data-page-node-id="XwFFTsdLYpth4zEnVpG6xK">删号记录 / 待复核账号（删号=近 3 天全部，待复核最多 12 条；来自 D1 dead_log 与 accounts.suspect_at）</summary>
+  <div class="muted" style="margin:6px 0 8px" data-page-node-id="kBFU6U8IBCiHQUu3YdCXeO">原因：<b data-page-node-id="CtupgiZ8mBFGp0wuHKR6FE">手动删除</b>＝你在控制台/号池工具点的删除；<b data-page-node-id="VWhsH1y2nGW6A5LAEGZDJv">Cookie失效</b>＝播放前验活自动判死；<b data-page-node-id="89Oectoh1ezmHaIBUpVK2S">到期清理</b>＝账号有效期到了自动移除。已回池（迁移到另一群或当天重登）的号不算删号。<br data-page-node-id="fz0KjxfTokNbiEctgVT97O">通知：<b data-page-node-id="6AERGvSJSmVFi1h8kXtbU6">已通知</b>＝确认发出；<b data-page-node-id="XNBMztB166geb2VAZbjcRA">已回池·不发</b>＝号还在跑；<b data-page-node-id="bPAolzxGyByAMT5Bbvy8WK">无邮箱·不发</b>＝没登记邮箱；<b data-page-node-id="fF1dnk2yjGh1gVdsb0uffP">待判·12h</b>＝删后满 12 小时才判定该不该发；<b data-page-node-id="BNIRMWjDsYfuB8LLYyEQAv">自动判死·run.py 发信</b>＝早期记录，发信由播放任务临时触发，发没发事后查不到。</div><div id="deadList" data-page-node-id="BMJYTDQF6EUDtCeaqH2Sbc"></div></details>
+  <details class="deadbox" id="legendBox" data-page-node-id="k8dNuTPEENU05JcY46GTCO"><summary data-page-node-id="C7fyEi8574JXAnZG7thQgV"><b data-page-node-id="oKZLI2RLbuFrYnFfB2nfKq">标记看不懂 / 数字怎么读？点开这份对照表</b></summary><div class="lgd" data-page-node-id="nk6GO1KPwgELKchrFCTegf">
+    <b data-page-node-id="huymoA6Lgy3chV36NqT2ZU">一、先认清三个数（别再混）：</b>「650进度」= 音乐人后台的 650 任务完成度，100% 才算做完，是唯一有意义的成绩；「近30日播放量」= 工作台统计的播放次数，刷再多也不直接等于进度；「笔记任务」= 网易塞在同一组里的另一个小任务（发布图文笔记），跟播放和 650 一点关系都没有，一列显示「—」也是正常的。
+    <br data-page-node-id="SlujCie0ft5ebjAK5BkHW0"><b data-page-node-id="TQ5mTotslq3h1K9deTNHdG">二、标记对照（按「问题出在哪」分组，越靠上的越该先处理）：</b>
+    <table data-page-node-id="LQdPxhW01zZDHxzUjJ598t"><thead data-page-node-id="PdJeynYdqUf7mubIrbDv1j"><tr data-page-node-id="HeRXIBe1hgnMqR9yg1zfgA"><th data-page-node-id="EPtm6BKcwJtWFHiNV8YLz2">标记</th><th data-page-node-id="Ihm9UDrFBm1HG9souIKN8a">意思</th><th data-page-node-id="btfzCGk3Vc1RnBYITdsJmP">要怎么处理</th></tr></thead><tbody data-page-node-id="vwU6vAX3WxDuuViM299Mns">
+    <tr data-page-node-id="r3w2jIopjyHwyK8ndc8cQ6"><td colspan="3" style="background:#fdf0f0;font-weight:600;color:#a32d2d" data-page-node-id="O9FDgquhPiGGvdldLhvQwc">A · 歌曲问题 —— 必须改歌，刷多少都不会涨</td></tr>
+    <tr data-page-node-id="xJYrPYXFebcJvoEeaMqcV6"><td data-page-node-id="NkRHkIwfoeu2hwAns27Iqp"><span class="badge b-red" data-page-node-id="9EUbSQo4Ngl1gpjXjT1QM5">歌曲无效·绑错歌</span></td><td data-page-node-id="AUvRWoSLaqALGsI5EKdx0L">他登记的这首歌，作者里<b data-page-node-id="POVcM4Bwe8dow8VsLNDRnY">没有他自己的音乐人身份</b>（相当于绑了别人的歌）。两种情况都算：多人合唱里没他；<b data-page-node-id="XxB6ZYiXROOpVzZOTDTbeF">独唱但作者是别人</b>（10-25 补，只在近30日播放 ≥650 次、650 仍 ≤2% 时才提示，避免误伤爬坡中的新号）</td><td data-page-node-id="mEBm5MeO2cHR1jFCRk3VES">要改：让他换成自己名下的歌。这是「播放一直涨、650 永远 0%」最常见的根因之一</td></tr>
+    <tr data-page-node-id="GybFfRevOuO8NF6rPtE14R"><td data-page-node-id="AiwaL3EeEWttQvK43jAABD"><span class="badge b-red" data-page-node-id="eFgadNsB1C4TK7WEOeHY2V">歌曲无效·查无此歌</span></td><td data-page-node-id="pFkb9zbgWdoh8tSUo4RWTG">网易接口查不到这首歌（已下架或已删除）</td><td data-page-node-id="Fxcaq0XHP5yDbJxlYV3D7V">要改：换一首正常上架的歌</td></tr>
+    <tr data-page-node-id="WDXQUK5EmkBb0xJs5nwmpV"><td data-page-node-id="rhi0qHGEQCdAv8JROiOltZ"><span class="badge b-orange" data-page-node-id="a9yud3N5D2qePrqIttSRfY">共创歌曲·非主艺</span></td><td data-page-node-id="ujpd9qoHlEjA0WQhx0CdpI">这首歌是<b data-page-node-id="Ad2ps8GyFT78Hvjs3Y4bd3">多人合唱</b>，他排在第 2 位以后（主艺是别人）。实测这类号 650 恒为 0%：合唱曲里非主艺人的播放基本不计入任务</td><td data-page-node-id="OBxJpRKahAwXt5ba7FD9nc">要改：优先换本人独唱的歌</td></tr>
+    <tr data-page-node-id="BdR34TTQSZNA6aMUyy4BE1"><td data-page-node-id="KKYBNCkZqzR3UT2ItRBMLB"><span class="badge b-orange" data-page-node-id="LS1bjPRNO1btoBhIZuJK87">共创歌曲·本人主艺</span></td><td data-page-node-id="QDsB4NGdsNyR6b8mwAoT9A">多人合唱，他是第一艺人。比非主艺好，但播放仍会被分摊给其他艺人，不如独唱</td><td data-page-node-id="QUR8tZAHRS3mVQCANuE4UD">可改可不改：能换独唱就换</td></tr>
+    <tr data-page-node-id="UsWhXvWxdVPct0ApzkHYyN"><td data-page-node-id="EskSPsQjILzRWATBfw3LvA"><span class="badge b-orange" data-page-node-id="O0pu624XptpI8lhOxXweNn">共创歌曲·待核</span></td><td data-page-node-id="JICPUmUhzIxlTabCe2J2Gb">多人合唱，但还没同步到该号的音乐人身份，判断不了他排第几</td><td data-page-node-id="DQdCJRJuBX7ZIpGqwT68XS">先按「共创」处理；等元数据同步后会自动变成上面两种之一</td></tr>
+    <tr data-page-node-id="CxzzgLCy9cc7Y8tDqCnYhU"><td colspan="3" style="background:#f7f7f7;font-weight:600;color:#555" data-page-node-id="Se7xRw5akLu3HXmWVIiMRH">B · 账号状态</td></tr>
+    <tr data-page-node-id="dGiMBb8dh1dVSWtvVBNBmT"><td data-page-node-id="AIa2gj7jmXFlaZvnMCfImh"><span class="badge b-yellow" data-page-node-id="SR23fKbdAyTlZSvD5BtCFR">待复核</span></td><td data-page-node-id="qXoZh9h8J2AsJOtY6n321t">登录已失效被系统判死，等下一轮再确认就删号</td><td data-page-node-id="d4Ou0MrKBjITTaiacAL8mK">要管：让号主换 CK</td></tr>
+    <tr data-page-node-id="lyfmPKFs1YZpr9TOhEOoKO"><td data-page-node-id="xTWpo5C5yF0laM6LNImhtW"><span class="badge b-yellow" data-page-node-id="dBlJzDXX3gBOEG7dJTJnvt">未绑邮箱</span></td><td data-page-node-id="lAWzLHX9ELykruqXsYPfDM">没填通知邮箱，号失效时通知不到人</td><td data-page-node-id="CfPxexnJbLcFOxjZSTE1D2">能补就补，不影响播放</td></tr>
+    <tr data-page-node-id="DoxoooNPzIAbshA5fGenJI"><td data-page-node-id="VfP6aqnHsuEzk1KhFjOAuF"><span class="badge b-gray" data-page-node-id="4KAG3xT4RqHIZrJbF52KMX">只收不听</span></td><td data-page-node-id="o0Di6EuJezs0Hs2Y6y2VIk">号主自己关了互听，只接收别人的播放，不给别人播</td><td data-page-node-id="GP3p6pUwGUCcixNbyqR5EL">号主的选择，不用管</td></tr>
+    <tr data-page-node-id="kcYYYu66LBjSfD4jmdAHVD"><td data-page-node-id="bEyeGGPsDBodr5yyVi9nsG"><span class="badge b-gray" data-page-node-id="kEPkH8FVB1yxmm6VulVADC">公益号</span></td><td data-page-node-id="tvxTwuJKEXXtCX3hcipEoG"><b data-page-node-id="QGrnmxJIHtg8IKCgzWoByy">在编辑里手动标记的公益号</b>（也可以是没有登记歌曲的老公益号）：只帮别人听歌，自己登记的歌不再分给别人听，也不参加签到/笔记。它本来就没有 650 进度</td><td data-page-node-id="14rUI9BqoXzFDcBZW6t7iq">不用管。要它回归普通号：编辑 → 账号类型选「普通号」</td></tr>
+    <tr data-page-node-id="EnCVVLlRbR5mp6CjVO8EAm"><td colspan="3" style="background:#fdf6ec;font-weight:600;color:#b85c00" data-page-node-id="RidxfEe83GlnRXthjbbVEo">C · 任务周期（650 任务本身不统计了）</td></tr>
+    <tr data-page-node-id="SdX65uGwmIkj9Ev7A9P3FQ"><td data-page-node-id="XFEqzV0QSj5myqvGBQmsZO"><span class="badge b-orange" data-page-node-id="vIwDWHLugujgTNWzutjQSN">有播放·650为0·卡住</span></td><td data-page-node-id="hyV0uAynetd4k4DosoZI69">连续 2 天以上 0% 且播放量还在涨，<b data-page-node-id="UJwANdNwEZzCQflAzeVTyk">且刚刚实时查过工作台仍是 0%</b>（控制台对这类号自动做一次实时复核，30 分钟内不重复查）。实测「0%」绝大多数是<b data-page-node-id="lscDqMH3QrwxtWAhXbLXjx">快照采在网易结算之前</b>：同一个号 07:20 快照 0%、11:30 实时已 100%，这类现在会被改标成灰色的「实时已恢复」</td><td data-page-node-id="7djqPqVM5E9VlxwYzIZgc3">真卡住的（连续 8 天以上、实时也 0%）先让号主去音乐人后台看 650 任务还在不在；<b data-page-node-id="C4seEDbIZKaFweXNMlq1f0">后台没有「领取上期奖励 / 开启新一期」这种按钮</b>（卡片上只有「看攻略」，周期按 31 天自动换期），任务真被下掉只能重新报名或换号</td></tr>
+    <tr data-page-node-id="lO3y7FnX11f3oefZvleQ1q"><td data-page-node-id="UoM0YGjcwx7RDNh7mM1Puf"><span class="badge b-orange" data-page-node-id="E3PR9CLqy63DDbCeBoD6cy">有播放·650为0</span></td><td data-page-node-id="M6yOLIcgUvybKKA1MKVKnP">近30日播放已有 <b data-page-node-id="6B6Y8NVd7P96dWYRINyaCP">650 次以上</b>，但快照里的 650 进度是 0%。<b data-page-node-id="UTJgeFNyGTJteOk06fhH36">多半是这一轮快照早于网易结算</b>（结算窗口实测到 11:30~12:00）；控制台会自动实时复核，实时有进度就改标灰的「实时已恢复」。入池 ≤2 天的新号不标这一类</td><td data-page-node-id="HqCMVM2si6dFLfgOxA2esa">观察即可：实时复核仍是 0% 且连续 2 天以上，才升级成「·卡住」</td></tr>
+    <tr data-page-node-id="Ae4MD6FnBpTESI1ZIkssDL"><td data-page-node-id="DDoRYclVP6RKHo0v9WCiBx"><span class="badge b-gray" data-page-node-id="fuAJQvFyQywT3sxkEaaZ0d">实时已恢复</span></td><td data-page-node-id="bI8wbe3a6FJz9DaYLShihT">快照里 650 是 0%，但<b data-page-node-id="2VSqbl67dVKSEvXhs7pcl6">刚刚实时查工作台已经有进度</b>：这一轮快照采在网易结算之前，不是掉量也不是周期问题（同一个号 07:20 快照 0%、11:30 实时 100%）</td><td data-page-node-id="3oDCGC54w2Fuy7RsOpIDCn">不用管。这个标记只在被怀疑「有播放·650为0」的号上出现，30 分钟内不重复查</td></tr>
+    <tr data-page-node-id="QUIXvyHPZASsebVZSM3LtL"><td data-page-node-id="FZcA6fHwGwBHcl0Hix2mLz"><span class="badge b-red" data-page-node-id="n3AG5aAvOAkQ85wvoQSe5Q">非音乐人</span></td><td data-page-node-id="2yu1x3XE10OpBIbq3EPH5K">账号元数据（acc_meta）已确认该号<b data-page-node-id="hnvdlYjDNXt2zzmrNhuZl7">没有音乐人身份</b>：拿普通用户号登记的歌，播放永远不会计入 650（11-11 批量核查 12 个无650任务号，7 个是这类）。实习期号不会标这个 —— 实习号的音乐人身份是有的</td><td data-page-node-id="QfSYojCzPKFsfRoH9cgdlw">要管：找买家核实身份 —— 要么换成音乐人号，要么按非音乐人号重新定价。让号主去后台「点开通」解决不了，因为根本没有音乐人身份</td></tr>
+    <tr data-page-node-id="UUxwL0d3hpFIhgoS9h8HR3"><td data-page-node-id="yeoItXRB3Dj6DZYm1wVQFL"><span class="badge b-gray" data-page-node-id="yNhHmsQqgOgxXG06I5b7Y5">无650任务</span></td><td data-page-node-id="E3CqsWH3EMFZ8XwPoyx0oO">后台没返回 650 任务。已按账号元数据细分：有音乐人身份的 = <b data-page-node-id="uaxLkSixQtJkcYGwWx283D">任务没开通，多为实习期未转正</b>（官方 90 天实习期里特殊权益开不了，实测实习号维持天数恒为 0、不每天涨）；转正不是纯时间驱动，有号超 90 天仍实习，可能卡在号主侧认证。元数据没同步到的保持通用提示</td><td data-page-node-id="mrnCt8CWsovQpFFdVJ1KVw">用「号体检」工具实时复核（能分辨非音乐人 / 实习期 / 可开通没开通三种根因）。实习期未到 90 天的等转正，超 90 天的催号主上后台查实习状态</td></tr>
+    <tr data-page-node-id="ebZtDOFex79d3x5VuYlVkd"><td data-page-node-id="Yhg7dUd57CG9nI8MoGWoAP"><span class="badge b-gray" data-page-node-id="QurKycxwncfnHfzAAvUKoe">周期归零</span>（较昨日列 + 标记列）</td><td data-page-node-id="cMCFRvDtYryBCbVtile6tG">昨日 650 已接近满（≥80%）、今天突然 0%，但近30日播放量没塌 —— 这是 <b data-page-node-id="oNOLtAg2BegYUDHRHequhU">650 换新周期</b>，进度从头计，不是掉量。<b data-page-node-id="bP4ZZwiXIgaBTmapfZVqqE">周期按 31 天日历走，不看进度</b>：上期只做到 98% 到期也一样归零重来，没用完的百分比不会带到新一期</td><td data-page-node-id="IgZoIOFDyWBw0DIFWcyPTm">不用管：已不计入「今日下跌」，也不再标成「有播放·650为0」</td></tr>
+    <tr data-page-node-id="Q3qsoiJilJpJJE3BdV1Jg0"><td colspan="3" style="background:#fdf9e6;font-weight:600;color:#8a6d00" data-page-node-id="loiFWFZPmpKx8HenUkGsIy">D · 进度停滞（还在周期内，只是没动）</td></tr>
+    <tr data-page-node-id="eKJ7kk3Jx8ShVatluh8dWZ"><td data-page-node-id="uEhWLWcuauj7vD895CQeiW"><span class="badge b-yellow" data-page-node-id="C8Z94B6uYAm7WmbN34ztOP">今日零增长</span></td><td data-page-node-id="Ckp8odlF6BFo8ilQ8gUdnT">650 进度和昨天完全一样（还没到 100%），<b data-page-node-id="WbRFaNzlfXZ6W0uADd8FcK">近30日播放量也刚好持平</b>（不多不少；在跌的那种已单独标成下面的「净增≤0」）。原因基本是 <b data-page-node-id="snrdTYyzKvUeDOQ0dxo8b4">30 天滚动回吐</b>：悬浮说明里会给两个数 —— 该号近两周平均每天净涨多少次（=每天正常应增加的水平）、今天被多少次老播放到期退出抵掉</td><td data-page-node-id="tUkIt2PJznc4ejvmThhuT3">先观察 2~3 天，不是每天都一定涨</td></tr>
+    <tr data-page-node-id="9s7hVi7HQVLiAhVbvmOgVg"><td data-page-node-id="cn0szgxMUbwraLW67GwznB"><span class="badge b-yellow" data-page-node-id="mLGWWLm2N0AatXEtzR7mCO">近30日净增≤0</span></td><td data-page-node-id="CXNEesKOna9U0kHe0gobqn">近30日播放量今天<b data-page-node-id="Jvnlr1zesRy9jidVgV2Qwg">没涨或略降</b>（30 天滚动窗口），650 进度也没涨 —— 说明今天补进去的播放被 <b data-page-node-id="O1ThfQMzk2PET33ko1a83D">30 天前那一波老播放到期退出</b>抵掉了，不是播放没算进去。只在两边快照采集时刻相差 ≤3 小时时才判（否则是拿今早的数和昨晚的数硬比）。悬浮说明里附<b data-page-node-id="3fa9QnqrazYkZXDvwPGb4q">两周均值与回吐估算</b>（按该号 14 天前快照到今天的平均日增算，新号/断档没有这两个数）</td><td data-page-node-id="LQcG91sydBrnc4eyj8W05F">偶发不用管（30 天前有过高峰的号必然会遇到一次）。连续 3 天以上净增≤0 → 说明补的量追不上退的量，加每号播放次数或换更热的歌</td></tr>
+    <tr data-page-node-id="pJp7Buv1UYDlQvNxHgmifn"><td data-page-node-id="jomAv8bJKGWuJoG0tyV71q"><span class="badge b-yellow" data-page-node-id="Xqb7d4fh9jKX8d6hqGsBbH">650未结算</span></td><td data-page-node-id="82irqu2CBEUT7sSYy2GjUh">650 进度和昨天一样，但<b data-page-node-id="kwpXCIjxZ3vITkuovfa2Hr">近30日播放量在涨</b>：播放已入账，网易分批结算还没滚到 650（入账窗口实测持续到 11:30~12:00）。这类不算真停滞，悬浮提示里能看到对比双方快照的采集时刻</td><td data-page-node-id="ylDs9orH97oX8SJv8FQuRF">不用管；连续 3 天以上播放量在涨而 650 不动再人工查</td></tr>
+    <tr data-page-node-id="wDKRvq9lCWIClVrTcfodgH"><td data-page-node-id="BXAc8hxM7ahAE2cFk1ciJr"><span class="badge b-yellow" data-page-node-id="LJHbFxuzhxzGM5wlAV7zTM">N天未涨</span></td><td data-page-node-id="YZZ7A6VKOZEed2cqM6R3Sc">连续 N 天 650 进度没涨（含小幅回落；没有快照的断档天不计；当前已到 100% 的号不标）。<b data-page-node-id="pNHFEYJNrW7RoKTGsyLjNn">先看「近30日播放量」</b>：在跌 = 30 天滚动窗口里老播放退出（做过满 100% 的号会一直回落到新播放补不回为止，属自然衰减）；在涨却不动 = 播放被判无效</td><td data-page-node-id="DrxucOv4h3X3V411cN5Bm8">播放量也在跌 → 不用管；播放量在涨却 4 天不动 → 人工查</td></tr>
+    <tr data-page-node-id="uXlz50yB4vJcMfzfT7zH1g"><td colspan="3" style="background:#eef5fd;font-weight:600;color:#255ea6" data-page-node-id="EtOkjUnNqovcoeqYuDtHSw">E · 入池状态 —— 刚进来的号，进度低是正常的，别当故障查</td></tr>
+    <tr data-page-node-id="6oBznlzHjOn6o5geFeKLpl"><td data-page-node-id="HANIYbSu87yFxqJ4fQ6AaN"><span class="badge b-blue" data-page-node-id="pcA3Xbxmzk444f0FsHdfS5">今日入池</span></td><td data-page-node-id="niha2vJZASMGG9K3v1pjOC">今天才登记的新号：明天才进轮转开始被听，所以今天既没有快照也没有 650 进度。<b data-page-node-id="oAnuJc1WatFOMiHFrHQaEs">顶部「今日入池」这个数字就等于搜这个词的行数</b></td><td data-page-node-id="KrZYLqU0TLqG9KmPM6e7px">正常，不用管（第 4 天还是 0% 再查）</td></tr>
+    <tr data-page-node-id="KzC3X6WQxA1077TKsk0EXo"><td data-page-node-id="SN50pAneh1Lt8EWsOliDGz"><span class="badge b-green" data-page-node-id="9lCMrXYtWbExn3DV4ilVAH">已达100%</span></td><td data-page-node-id="A9I0QnxMHobefEd0ma7iaC">本周期 650 已经做满，继续刷也不会有额外收益</td><td data-page-node-id="ZIhLI9ZyGBijky4493fS1B">不用管；下个 31 天周期会自动归零重爬</td></tr>
+    <tr data-page-node-id="qmLNaKCYKh4nAPjXswbDUd"><td colspan="3" style="background:#f7f7f7;font-weight:600;color:#555" data-page-node-id="IGIF9tJoaPMLdOJeHmKxeJ">F · 数据 / 其它</td></tr>
+    <tr data-page-node-id="QUjtkm6mY5JdMLMhzTPFt5"><td data-page-node-id="PLf8NOjHP5sUxDb3Cc7tZP"><span class="badge b-gray" data-page-node-id="MccwgWAxzQTbWwBXhknrCK">采集缺失</span></td><td data-page-node-id="0koy3riBnqJPIsyKADbu2u">今天这一轮没采到该号的快照（接口超时或号没跑）。<b data-page-node-id="6CtOx15BF9fY4bjpr8dPZz">入池 ≤2 天的新号不会打这个标</b>（它们本来就没有快照，顶部「今日入池」就是它们的总数）</td><td data-page-node-id="JMJJvJpOiSdduvjkL55wwS">偶尔出现不用管，连续几天要查</td></tr>
+    <tr data-page-node-id="F0wBi9F57SX0dVsgYGOVwr"><td data-page-node-id="4dG9GJ6Uiivf0jYLsYRgJk"><span class="badge b-red" data-page-node-id="zIoMw5tiDR20H5x39vUHIO">只收</span>/<span class="badge b-yellow" data-page-node-id="qeZ1CelGR8bYFfefMy76sD">长歌</span>（时长列）</td><td data-page-node-id="SyrpDsaG2qCFIGEP8jCCLc">时长 <b data-page-node-id="QBNHDD0H9chZqq5QWQEeyI">2:12 以下</b>标红、<b data-page-node-id="uCVTgh4NY9piGwq1gvP578">5:36 以上</b>标黄</td><td data-page-node-id="czKw3Ak68eoUMqXOaSKW8B">只是提示，10-22 修完后长短歌都能正常计入</td></tr>
     </tbody></table>
-    <b>三、号主来投诉「我的号不涨」时的排查顺序（照这个顺序问，一遍就能定位）：</b>
-    <br>① <b>先看 A 组（歌曲）</b>：有「歌曲无效·绑错歌 / 歌曲无效·查无此歌 / 共创歌曲·非主艺」→ 直接是歌的问题，让他改歌，不用再查别的；
-    <br>② <b>再看 B 组（账号）</b>：有「待复核」→ CK 已失效，号都要删了，先换 CK；
-    <br>③ <b>再看 C 组（周期）</b>：有「有播放·650为0·卡住」→ 先看提示里的实时复核结果。<b>实时已涨</b>的（灰标「实时已恢复」）直接回「数据采早了、已经涨了」；<b>实时仍 0%</b> 的才要号主去音乐人后台确认 650 任务还在不在 —— 后台<b>没有</b>「领取上期奖励 / 开启新一期」按钮，别让号主白找（详见下面第四节）；
-    <br>④ <b>再看入池天数</b>：入池 ≤2 天的号（顶部「今日入池」那批）进度低是正常爬坡，告诉他 21 天满、现在不用管；
-    <br>⑤ <b>都没有</b> → 说明号是正常的，只是 650 后台分批结算（见下条）。
-    <b>四、为什么没到 100% 却一天都没涨？</b>不是每天都该涨，按概率从高到低：
-    <br>① <b>650 是后台分批结算的，不是实时加</b>：实测中位号一晚能跳 +30~40%，然后停一两天再突然跳一大截，所以「今天 0」很常见；
-    <br>② <b>近 30 天滚动，会回吐</b>：30 天前的老播放到期退出，当天新增的有效播放少于退出的，进度就原地甚至下降（绿色负数就是这个）；
-    <br>③ <b>播放 ≠ 有效播放</b>：网易按账号/IP/完整播放去重，同一个出口刷的量会被合并或丢掉。「有播放·650为0」就是这一类的信号；
-    <br>④ <b>但连着 2 天以上 0% 且实时复核也是 0%，才要查任务本身</b>：650 任务是 <b>31 天一个周期、到点自动换期</b> —— 工作台返回的 <code>furtherTaskStartTime</code> 到 <code>furtherVipGetTime</code> <b>恒差 31 天</b>（11-05 抽样 9/9 都是 31.0 天），到期后进度自动归零重算，<b>不需要任何「领取 / 开启」操作</b>：任务卡片上只有「看攻略」一个按钮，抽样 <code>canOpen</code> 全是 false、<code>unlockVipRight</code> 全是 true（权益本来就是开的）。<b>「11/14 是周期结束没续期、让号主去领取上期奖励」是我们早先的误判</b>——11-05 拿这批号实时复查，8/12 当天已经是 100% 或 2~5%，只是快照采在结算之前。另外这两个时间戳在很多号上<b>停在上一个窗口不动</b>（抽样里有停在 8~9 月、进度却照常涨的），所以别拿它们判「当前周期是否到期」，看进度和实时复核就够。所以 0% 只有两种：① 网易当天结算还没跑（绝大多数，午后自己会好）；② 650 任务真被下掉/报名没成功（连续 8 天以上、实时也 0%）→ 这种只能重新报名或换号。
+    <b data-page-node-id="c0dsGJoxDFO5ljHA7vbNOr">三、号主来投诉「我的号不涨」时的排查顺序（照这个顺序问，一遍就能定位）：</b>
+    <br data-page-node-id="WU88KkytrbSPdFylltnUqs">① <b data-page-node-id="0tnvUM18Xwwvy7t7RdJIwj">先看 A 组（歌曲）</b>：有「歌曲无效·绑错歌 / 歌曲无效·查无此歌 / 共创歌曲·非主艺」→ 直接是歌的问题，让他改歌，不用再查别的；
+    <br data-page-node-id="QFxKoHQLAouKRv8EKyGnYW">② <b data-page-node-id="1U1yJgEHFCMa88zB3Kf0yn">再看 B 组（账号）</b>：有「待复核」→ CK 已失效，号都要删了，先换 CK；
+    <br data-page-node-id="pXvFvqg3LcHsvJ5VGOQg2t">③ <b data-page-node-id="DJ47dHLD03PctJsrDfFb1m">再看 C 组（周期）</b>：有「有播放·650为0·卡住」→ 先看提示里的实时复核结果。<b data-page-node-id="3VoKTxlAeFbGR0kH5Wbzzd">实时已涨</b>的（灰标「实时已恢复」）直接回「数据采早了、已经涨了」；<b data-page-node-id="QpEezrC6GQCiDHntDwrrS6">实时仍 0%</b> 的才要号主去音乐人后台确认 650 任务还在不在 —— 后台<b data-page-node-id="BCqDKPnRIaudGcURT67aoM">没有</b>「领取上期奖励 / 开启新一期」按钮，别让号主白找（详见下面第四节）；
+    <br data-page-node-id="l6mkdOvsDtzIA9cvzggz8r">④ <b data-page-node-id="OIYfAaYi3q8xC0mlRLCSXB">再看入池天数</b>：入池 ≤2 天的号（顶部「今日入池」那批）进度低是正常爬坡，告诉他 21 天满、现在不用管；
+    <br data-page-node-id="xsZyEEBZypKguE6FHSZVQz">⑤ <b data-page-node-id="vclegNO8DPQmRAqhcHYC7j">都没有</b> → 说明号是正常的，只是 650 后台分批结算（见下条）。
+    <b data-page-node-id="pPyqafqgjuW5H8Hdfes4js">四、为什么没到 100% 却一天都没涨？</b>不是每天都该涨，按概率从高到低：
+    <br data-page-node-id="Bu9U1UcD5pe9cgiZWNEBk8">① <b data-page-node-id="ezVi82Abg8ULXJXixbH3DN">650 是后台分批结算的，不是实时加</b>：实测中位号一晚能跳 +30~40%，然后停一两天再突然跳一大截，所以「今天 0」很常见；
+    <br data-page-node-id="yoe3XGx94vlI2yYQtyynZz">② <b data-page-node-id="qfknkGjXQtDykaty9VJNKq">近 30 天滚动，会回吐</b>：30 天前的老播放到期退出，当天新增的有效播放少于退出的，进度就原地甚至下降（绿色负数就是这个）；
+    <br data-page-node-id="CrOCKIbSOCwDPH0SdHNJXq">③ <b data-page-node-id="pKls27gBvEB5uBNjMxJ1d2">播放 ≠ 有效播放</b>：网易按账号/IP/完整播放去重，同一个出口刷的量会被合并或丢掉。「有播放·650为0」就是这一类的信号；
+    <br data-page-node-id="lIw7636O22wx9ILjUUUx58">④ <b data-page-node-id="yfLfHdC3X5HcTCkvF2YbsQ">但连着 2 天以上 0% 且实时复核也是 0%，才要查任务本身</b>：650 任务是 <b data-page-node-id="35kIf9em3x1Q2uKHiTiqPk">31 天一个周期、到点自动换期</b> —— 工作台返回的 <code data-page-node-id="dOMj1PI1qgvZJ4bjBS9hpy">furtherTaskStartTime</code> 到 <code data-page-node-id="5oTL5lrF8bbNFb0K5UXZKO">furtherVipGetTime</code> <b data-page-node-id="fc84tqlg5PZzzU0Da5iIc3">恒差 31 天</b>（11-05 抽样 9/9 都是 31.0 天），到期后进度自动归零重算，<b data-page-node-id="khiGYQh4RkxKITnQ3YHYtS">不需要任何「领取 / 开启」操作</b>：任务卡片上只有「看攻略」一个按钮，抽样 <code data-page-node-id="TGxpByZr47F4PSxmgFIrLL">canOpen</code> 全是 false、<code data-page-node-id="0dJfrocD6fwj0eNA1ExhrM">unlockVipRight</code> 全是 true（权益本来就是开的）。<b data-page-node-id="rllu0izTWFnfmglz8zfZWf">「11/14 是周期结束没续期、让号主去领取上期奖励」是我们早先的误判</b>——11-05 拿这批号实时复查，8/12 当天已经是 100% 或 2~5%，只是快照采在结算之前。另外这两个时间戳在很多号上<b data-page-node-id="rCGpBX8UGRLXUkrEh9EsqX">停在上一个窗口不动</b>（抽样里有停在 8~9 月、进度却照常涨的），所以别拿它们判「当前周期是否到期」，看进度和实时复核就够。所以 0% 只有两种：① 网易当天结算还没跑（绝大多数，午后自己会好）；② 650 任务真被下掉/报名没成功（连续 8 天以上、实时也 0%）→ 这种只能重新报名或换号。
 
-    <br>⑤ <b>「播放补了但总量没涨」看「净增≤0」</b>：近30日播放量是 30 天滚动窗口，今天补的播放会被 30 天前的老播放到期退出抵掉，看起来总量持平甚至略降，但播放确实补进去了。偶发一两天正常；连续 3 天以上净增≤0 才说明补的量追不上退的量，要加每号播放次数或换更热的歌。
-    <br><b>所以判断号有没有问题，看「今日零增长 / 净增≤0」连续几天 + 「近30日播放量」在涨还是在跌</b>：播放量在跌且 650 也不动 = 今天补的播放被 30 天前老量退出抵消（「净增≤0」，偶发正常）；播放量在涨但 650 一直不动 = 播放被判无效（「650未结算」，连续 3 天以上才查）；650 是 0% 的先把「实时复核」结果看完再动手。
+    <br data-page-node-id="JnAEaMOOAfmVBhREawBOlr">⑤ <b data-page-node-id="U6dkLtNlOthFnVg7bvLpdx">「播放补了但总量没涨」看「净增≤0」</b>：近30日播放量是 30 天滚动窗口，今天补的播放会被 30 天前的老播放到期退出抵掉，看起来总量持平甚至略降，但播放确实补进去了。偶发一两天正常；连续 3 天以上净增≤0 才说明补的量追不上退的量，要加每号播放次数或换更热的歌。
+    <br data-page-node-id="bles9yImorwMKuFfBcbQNM"><b data-page-node-id="wWaP5KM4houm8B3rQ0IZvx">所以判断号有没有问题，看「今日零增长 / 净增≤0」连续几天 + 「近30日播放量」在涨还是在跌</b>：播放量在跌且 650 也不动 = 今天补的播放被 30 天前老量退出抵消（「净增≤0」，偶发正常）；播放量在涨但 650 一直不动 = 播放被判无效（「650未结算」，连续 3 天以上才查）；650 是 0% 的先把「实时复核」结果看完再动手。
   </div></details>
-  <p id="kjP" style="font-size:12px;color:#888;margin:10px 0 0">数据口径：<b>650进度</b>=音乐人后台 650 任务完成度（近30日滚动，会回吐，100%=达标）；<b>近30日播放量</b>=工作台播放次数（≠有效播放，≠650进度；30 天滚动，今天补的量可能被 30 天前的老量退出抵掉 → 标「净增≤0」）；<b>650 实时复核</b>=对「快照 0% 但近30日播放≥650」的号直接查一次工作台当前进度（KV 缓存 30 分钟，不写回 rate、不动任何其它列）：实时有进度标灰「实时已恢复」，实时仍 0% 才继续标「有播放·650为0」；<b>较昨日</b>=今天快照-昨天快照，前一日无快照显示 —（数据断层，非故障；<b>今晚听歌</b>=按当前号池回放的今晚计划（每号本群歌单首数，已配平；加速档每天每首歌要几个听众，被稀释时标红）；顶部每个统计名的用词与标记列完全一致，搜索框直接搜那个词就能筛出对应行）；昨日≥80% 今日 0% 且播放量没塌的显示为灰色「周期归零」= 650 换新周期不是掉量（已从「今日下跌」剔除）；<b>笔记任务</b>=与 650 无关的同组小任务（发布图文笔记，按「已发x/4」显示：30 天内发布图文笔记天数≥4，4/4 即完成），显示 — 表示只有 650 一个任务；<b>时长</b>=登记歌曲长度（红=短歌&lt;2:12、黄=长歌&gt;5:36，仅提示，10-22 修完后都能正常计入）；<b>今日进度下的小字</b>=该行快照采集时间（北京时间；凌晨轮次边跑边采，不代表当天最终值，11:40 主采后的数才准）；各标记含义见上方「标记看不懂」对照表。<b>运行状态横条</b>：作业=两仓库最近一次定时轮次（GitHub API，5 分钟缓存）；应跑/实跑=按当前号池对所选日期回放的轮转计划与 runs 表核对（历史日期为近似值）；快照更新=该日快照最后写入时间（北京时间）；今日删号/待复核来自 D1。</p>
+  <p id="kjP" style="font-size:12px;color:#888;margin:10px 0 0" data-page-node-id="nuPz7pgE09pleT3HoAKpAo">数据口径：<b data-page-node-id="R5hS7ujyNIcxFp81aBcoVL">650进度</b>=音乐人后台 650 任务完成度（近30日滚动，会回吐，100%=达标）；<b data-page-node-id="vfeaQyYyTHRPniLyNu5jW0">近30日播放量</b>=工作台播放次数（≠有效播放，≠650进度；30 天滚动，今天补的量可能被 30 天前的老量退出抵掉 → 标「净增≤0」）；<b data-page-node-id="pi2BCqxfG67icaTPQE4P8z">650 实时复核</b>=对「快照 0% 但近30日播放≥650」的号直接查一次工作台当前进度（KV 缓存 30 分钟，不写回 rate、不动任何其它列）：实时有进度标灰「实时已恢复」，实时仍 0% 才继续标「有播放·650为0」；<b data-page-node-id="XNVZ0abW9yDOpkt3Fyv2n7">较昨日</b>=今天快照-昨天快照，前一日无快照显示 —（数据断层，非故障；<b data-page-node-id="ZhWT2Vr26sLWLLf2VmsKiG">今晚听歌</b>=按当前号池回放的今晚计划（每号本群歌单首数，已配平；加速档每天每首歌要几个听众，被稀释时标红）；顶部每个统计名的用词与标记列完全一致，搜索框直接搜那个词就能筛出对应行）；昨日≥80% 今日 0% 且播放量没塌的显示为灰色「周期归零」= 650 换新周期不是掉量（已从「今日下跌」剔除）；<b data-page-node-id="ER4mEcRjYh9kFk6S35ao62">笔记任务</b>=与 650 无关的同组小任务（发布图文笔记，按「已发x/4」显示：30 天内发布图文笔记天数≥4，4/4 即完成），显示 — 表示只有 650 一个任务；<b data-page-node-id="0fVFyu9LY09DfZ9WzGyC8X">时长</b>=登记歌曲长度（红=短歌&lt;2:12、黄=长歌&gt;5:36，仅提示，10-22 修完后都能正常计入）；<b data-page-node-id="tcyk6N8QngCUFYABBf28dc">今日进度下的小字</b>=该行快照采集时间（北京时间；凌晨轮次边跑边采，不代表当天最终值，11:40 主采后的数才准）；各标记含义见上方「标记看不懂」对照表。<b data-page-node-id="OWn1Q3fxAHV1GiWCJktqqn">运行状态横条</b>：作业=两仓库最近一次定时轮次（GitHub API，5 分钟缓存）；应跑/实跑=按当前号池对所选日期回放的轮转计划与 runs 表核对（历史日期为近似值）；快照更新=该日快照最后写入时间（北京时间）；今日删号/待复核来自 D1。</p>
 </div>
-<div class="modal" id="modal" hidden><div class="mbox">
-  <h3 id="mTitle">编辑账号</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="mSub"></p>
-  <label>改绑歌曲（粘贴 APP 分享链接，留空不改）</label><input id="eLink" placeholder="https://163.com/... 或 song?id=...">
-  <label>通知邮箱（留空不改）</label><input id="eEmail">
-  <label>客服（谁录的这条，留空不改）</label><select id="eAgent"><option value="">不修改</option></select>
-  <label>套餐（登记时买的时长，留空不改；<b>改套餐不会自动改有效期</b>，要一起改就把下面有效期也填上）</label>
-  <select id="ePlan"><option value="">不修改</option></select>
-  <label>有效期（天数 / 日期 / 永久，留空不改）</label><input id="eExp">
-  <label>暂停互听（只收不听）</label><select id="eNo"><option value="">不修改</option><option value="0">参与互听</option><option value="1">暂停互听</option></select>
+<div class="modal" id="modal" hidden data-page-node-id="HrNaAIFT1KILEXBoLc7f06"><div class="mbox" data-page-node-id="WOex3wAhapNmyUDkOVY0xj">
+  <h3 id="mTitle" data-page-node-id="hsdKqBm7YiKHZAcLQoTSTz">编辑账号</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="mSub" data-page-node-id="tlhtfU3BjD9FMhhgv4IMTc"></p>
+  <label data-page-node-id="O66bvBhFD32CJDDwZzbzkj">改绑歌曲（粘贴 APP 分享链接，留空不改）</label><input id="eLink" placeholder="https://163.com/... 或 song?id=..." data-page-node-id="3nXpyDLsf4vVskwyem0ma2">
+  <label data-page-node-id="KUwSYJUsNLKL6FZYDYNVPp">通知邮箱（留空不改）</label><input id="eEmail" data-page-node-id="DzuOMtQKa2ldToZrmknHtu">
+  <label data-page-node-id="0FTYOQJjlF38ckQl2EXWKW">客服（谁录的这条，留空不改）</label><select id="eAgent" data-page-node-id="CSh2oH1jmnna72yVveGcxc"><option value="" data-page-node-id="gvfLx5gd4j0EIiatcOXToG">不修改</option></select>
+  <label data-page-node-id="gv0dmUun7osH1t3lhWeOxJ">套餐（登记时买的时长，留空不改；<b data-page-node-id="aR5zbPPt97rZhKtYDoisRm">改套餐不会自动改有效期</b>，要一起改就把下面有效期也填上）</label>
+  <select id="ePlan" data-page-node-id="VKj6ivRHj3x4hPNhbRxD7U"><option value="" data-page-node-id="ZuamWHYp9HJJdBR41QKqC2">不修改</option></select>
+  <label data-page-node-id="e6BkUKU7dVPxZ0IKkWbNTq">有效期（天数 / 日期 / 永久，留空不改）</label><input id="eExp" data-page-node-id="lpKgwisFIaDfnuv8ujEAwZ">
+  <label data-page-node-id="iY8q7V7L54ThQRuAtqkF36">暂停互听（只收不听）</label><select id="eNo" data-page-node-id="l7xzRrPDuC3vtUE6HBxvJW"><option value="" data-page-node-id="NHHa4IoghkYFcWEWr0T2eN">不修改</option><option value="0" data-page-node-id="u5oRuqqnMuaH19AMunpxsD">参与互听</option><option value="1" data-page-node-id="LDXOAV3PP3Ahxl0vGgdSbP">暂停互听</option></select>
   <!-- ===== 2026-11-05：备注 + 补号 ===== -->
-  <div style="margin-top:14px;padding:10px 12px;background:#f7f9fb;border:1px solid #e6ebf1;border-radius:10px">
-    <label style="margin-top:0">备注（内部记录，号主看不到）</label>
-    <input id="eNote" maxlength="200" placeholder="例：11月原号 138xxxx 掉线，免费补登">
-    <label>补号标记（客户掉线后免费补的新号：<b>不计营收、不给客服提成</b>）</label>
-    <select id="eRb"><option value="">不修改</option><option value="1">是补号（免费补偿，不算钱）</option><option value="0">改成正常单（算钱）</option></select>
-    <p style="font-size:12px;color:#666;margin:6px 0 0" id="rbNow"></p>
-    <div id="rbBox" hidden style="margin-top:8px;border-top:1px dashed #dde3ea;padding-top:8px">
-      <label style="margin-top:0">① 找原单（填手机号 / 原网易 UID，原号早被删了也能查到）</label>
-      <div style="display:flex;gap:8px">
-        <input id="rbQ" placeholder="如 13800138000" style="flex:1">
-        <button class="mini" id="rbFind" type="button" style="margin-top:0">查原单</button>
+  <div style="margin-top:14px;padding:10px 12px;background:#f7f9fb;border:1px solid #e6ebf1;border-radius:10px" data-page-node-id="VV1aPIR6wdqhw49Ks2Dtaq">
+    <label style="margin-top:0" data-page-node-id="p012HbMSq5j0p6XIpSzfAn">备注（内部记录，号主看不到）</label>
+    <input id="eNote" maxlength="200" placeholder="例：11月原号 138xxxx 掉线，免费补登" data-page-node-id="G9MMyL8qiFg5VnpHXbumru">
+    <label data-page-node-id="JBjx3tgVP3V6WDXzaPHGcE">补号标记（客户掉线后免费补的新号：<b data-page-node-id="4Hd6LjGv3uEeQFwn3elI7e">不计营收、不给客服提成</b>）</label>
+    <select id="eRb" data-page-node-id="CSkjs5YpNdZSGpuBP5Q8BD"><option value="" data-page-node-id="aZFMAXlxVxFuFfEsRdP3oG">不修改</option><option value="1" data-page-node-id="iSOG1tgQvcGGYFpHRgEuu5">是补号（免费补偿，不算钱）</option><option value="0" data-page-node-id="yh23cyZZEZxSd2RIxNkhPv">改成正常单（算钱）</option></select>
+    <p style="font-size:12px;color:#666;margin:6px 0 0" id="rbNow" data-page-node-id="tb7rYLB7wJIYCDM1WYNGQG"></p>
+    <div id="rbBox" hidden style="margin-top:8px;border-top:1px dashed #dde3ea;padding-top:8px" data-page-node-id="K5Er3uIi2wkgYNz0hC2d2r">
+      <label style="margin-top:0" data-page-node-id="4Vc4Vex3RBqBncamqszDnK">① 找原单（填手机号 / 原网易 UID，原号早被删了也能查到）</label>
+      <div style="display:flex;gap:8px" data-page-node-id="DqbGGa17UDfNqzZFCozKl9">
+        <input id="rbQ" placeholder="如 13800138000" style="flex:1" data-page-node-id="j8fMe6aU8asz24I857rpDB">
+        <button class="mini" id="rbFind" type="button" style="margin-top:0" data-page-node-id="XF3P76eL4BqxhSiw4ww8cO">查原单</button>
       </div>
-      <div id="rbList" style="max-height:160px;overflow:auto;margin-top:6px;font-size:12.5px"></div>
-      <label>② 原单登记日（填了就自动算继承到期日）</label>
-      <input id="rbStart" placeholder="YYYY-MM-DD">
-      <p style="font-size:11.5px;color:#888;margin:6px 0 0" id="rbHint">到期日 = 原单登记日 + 本单套餐天数。这样客户不会因为补号白得剩下的月份；想手工指定到期日，就填上面的「有效期」，以你填的为准。</p>
-      <input type="hidden" id="rbFrom">
+      <div id="rbList" style="max-height:160px;overflow:auto;margin-top:6px;font-size:12.5px" data-page-node-id="GzXfzr6CaCcSNRDUC7OTuV"></div>
+      <label data-page-node-id="vs6TFzBCYC0VxYvFYdZDWt">② 原单登记日（填了就自动算继承到期日）</label>
+      <input id="rbStart" placeholder="YYYY-MM-DD" data-page-node-id="1lqTCr0qsYqKQ0Ky0Yyl6B">
+      <p style="font-size:11.5px;color:#888;margin:6px 0 0" id="rbHint" data-page-node-id="DMpeN3iXEduibrDsjvixhU">到期日 = 原单登记日 + 本单套餐天数。这样客户不会因为补号白得剩下的月份；想手工指定到期日，就填上面的「有效期」，以你填的为准。</p>
+      <input type="hidden" id="rbFrom" data-page-node-id="qudAAy05GOYj8vheJhxkOn">
     </div>
   </div>
-  <label>账号类型（公益号 = 只帮别人听歌，自己登记的歌不再分给别人听，也不签到）</label><select id="ePub"><option value="">不修改</option><option value="0">普通号（参加互听 + 签到）</option><option value="1">公益号（只帮别人听）</option></select>
-  <label>更换 CK（MUSIC_U，留空不改；保存前服务端会先校验有效性）</label><input id="eCk" placeholder="粘贴新的 MUSIC_U 值">
-  <div class="row2"><button id="eSave">保存修改</button><button class="warn" id="eDel">删除账号</button><button class="gray" id="eCancel">关闭</button></div>
-  <div class="msg" id="em"></div>
+  <label data-page-node-id="ItfoqFT0Vhs5FSKHnLrODX">账号类型（公益号 = 只帮别人听歌，自己登记的歌不再分给别人听，也不签到）</label><select id="ePub" data-page-node-id="mwPNtR6FGk8iu6XA3hrE4N"><option value="" data-page-node-id="H29cx9Pit6UfXUoH3FDLRy">不修改</option><option value="0" data-page-node-id="FQ0MyE3tOuOTJ9sNw1W4yw">普通号（参加互听 + 签到）</option><option value="1" data-page-node-id="fLGsxEjhxoV6tYQvs6hCYY">公益号（只帮别人听）</option></select>
+  <label data-page-node-id="2GbAtBiSHONv7xkL36BKdp">更换 CK（MUSIC_U，留空不改；保存前服务端会先校验有效性）</label><input id="eCk" placeholder="粘贴新的 MUSIC_U 值" data-page-node-id="fI85T8MhnV92rd1npbWfjO">
+  <div class="row2" data-page-node-id="8Q6ILLcFwzgEvwPIPan6x4"><button id="eSave" data-page-node-id="2kHoWhACZxF9OzHsMuTIG5">保存修改</button><button class="warn" id="eDel" data-page-node-id="KpY1SYPPDgFg5zqTz7F5xt">删除账号</button><button class="gray" id="eCancel" data-page-node-id="P4aIOu0AtgAJuGTIatblar">关闭</button></div>
+  <div class="msg" id="em" data-page-node-id="WjDjU7D5eZfeTsEuCtpcGe"></div>
 </div></div>
-<div class="modal" id="cfgModal" hidden><div class="mbox">
-  <h3>客服名单 / 套餐档位</h3>
-  <p style="font-size:12px;color:#888;margin:4px 0 0">改完保存立即生效：APK / EXE 下次登记前会自动拉到新名单，<b>不用重新打包</b>。只读口令进不来这一页。</p>
-  <div style="border:1px solid #f3e2c8;background:#fffaf1;border-radius:9px;padding:10px 12px;margin:10px 0 12px">
-    <div style="font-size:12.5px;font-weight:600;color:#8a6a3a;margin-bottom:7px">客服改名（名单 + 已登记的号 + 结算账本，一次全换）</div>
-    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-      <div><label style="margin-top:0">原名字</label><select id="rnOld" style="width:150px"></select></div>
-      <div><label style="margin-top:0">改成</label><input id="rnNew" placeholder="新名字" style="width:150px"></div>
-      <button class="mini" id="rnGo" style="margin-top:0;padding:9px 14px">执行改名</button>
+<div class="modal" id="cfgModal" hidden data-page-node-id="jCf32psVUJ6hGp0seZ9z3F"><div class="mbox" data-page-node-id="FDhIvV95QD8otxELRXUec1">
+  <h3 data-page-node-id="0MPtD5udhaiwecjogkCTGv">客服名单 / 套餐档位</h3>
+  <p style="font-size:12px;color:#888;margin:4px 0 0" data-page-node-id="EXgGjDFyLTlCDnfYgHtwjf">改完保存立即生效：APK / EXE 下次登记前会自动拉到新名单，<b data-page-node-id="1hLjH7Q6swVfdlbHE4C27c">不用重新打包</b>。只读口令进不来这一页。</p>
+  <div style="border:1px solid #f3e2c8;background:#fffaf1;border-radius:9px;padding:10px 12px;margin:10px 0 12px" data-page-node-id="CQGYMGXSKwkiinCc0aZqOP">
+    <div style="font-size:12.5px;font-weight:600;color:#8a6a3a;margin-bottom:7px" data-page-node-id="IpcP7hWDmOJx0be4MDv75E">客服改名（名单 + 已登记的号 + 结算账本，一次全换）</div>
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap" data-page-node-id="E295dd0hjdzzzQaEWlxhxd">
+      <div data-page-node-id="QnzsfGtGVP15o2Jci2F3yD"><label style="margin-top:0" data-page-node-id="j4nbLWTbIwn180FvzWfuFO">原名字</label><select id="rnOld" style="width:150px" data-page-node-id="GdTB3lK8UIOZFd5CEGGN7n"></select></div>
+      <div data-page-node-id="lbAYSmZHJiPazUIhm1vxGt"><label style="margin-top:0" data-page-node-id="LZt1gHtZmAizKRHuGTjjAY">改成</label><input id="rnNew" placeholder="新名字" style="width:150px" data-page-node-id="kO0pJUDTlTlzbhsVWrQGZg"></div>
+      <button class="mini" id="rnGo" style="margin-top:0;padding:9px 14px" data-page-node-id="EewuWaW26XgisggfCcQVTj">执行改名</button>
     </div>
-    <p style="font-size:11.5px;color:#96714a;margin:8px 0 0;line-height:1.7">⚠ 不要在下面的名单框里直接改字 —— 那只换了登记的<b>下拉选项</b>，<b>已登记的号和已经结算过的订单仍是旧名字</b>，而且系统分不清你是「改名」还是「删掉一个 + 新增一个」。要改名就用这里。</p>
+    <p style="font-size:11.5px;color:#96714a;margin:8px 0 0;line-height:1.7" data-page-node-id="GAx3frmADl7BEVewU8hGKL">⚠ 不要在下面的名单框里直接改字 —— 那只换了登记的<b data-page-node-id="3y3DaCMiBAeqBiuXGUFOPw">下拉选项</b>，<b data-page-node-id="g7ZAlBu36LhBANBwWX4lB7">已登记的号和已经结算过的订单仍是旧名字</b>，而且系统分不清你是「改名」还是「删掉一个 + 新增一个」。要改名就用这里。</p>
   </div>
-  <label>客服（一行一个，格式 <code>客服名</code> 或 <code>客服名|售后群号</code>；顺序即下拉顺序）</label>
+  <label data-page-node-id="4HLZHVB41gxqOpv2qIca4k">客服（一行一个，格式 <code data-page-node-id="oK1wcWGG2YSFa83yOWOQkP">客服名</code> 或 <code data-page-node-id="skm4vm7v4nPSDUaTVpCC8q">客服名|售后群号</code>；顺序即下拉顺序）</label>
   <textarea id="cAgents" rows="5" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:ui-monospace,Consolas,monospace"></textarea>
-  <p style="font-size:11.5px;color:#999;margin:6px 0 0">群号给登记成功邮件和到期提醒用（例：<code>徐|1129937451</code>）。不写竖线 = 该客服没配群号，邮件里会引导客户自己找客服。<br>下面的默认群号：老账号没记客服名时兜底用，留空 = 不兜底。</p>
-  <label style="margin-top:8px">默认售后群号（老号没记客服名时兜底，可留空）</label>
-  <input id="cDefGrp" inputmode="numeric" placeholder="如 1129937451" style="width:220px">
-  <label>套餐（一行一个，格式 <code>显示名=天数=单价</code>；天数填 0 表示永久，单价单位元）</label>
+  <p style="font-size:11.5px;color:#999;margin:6px 0 0" data-page-node-id="XPDwSH8AJSBIhl3uTu1iX6">群号给登记成功邮件和到期提醒用（例：<code data-page-node-id="olhuIBthqdzoUYGBR1tgRZ">徐|1129937451</code>）。不写竖线 = 该客服没配群号，邮件里会引导客户自己找客服。<br data-page-node-id="GscAy3lJJLONmeVUvDiQ5b">下面的默认群号：老账号没记客服名时兜底用，留空 = 不兜底。</p>
+  <label style="margin-top:8px" data-page-node-id="hYIBisohdCGbULKS5I31DU">默认售后群号（老号没记客服名时兜底，可留空）</label>
+  <input id="cDefGrp" inputmode="numeric" placeholder="如 1129937451" style="width:220px" data-page-node-id="AszHDmUkn6lpIBm9L2NdUt">
+  <label data-page-node-id="jqpAxkuv1x4ayUdbk8SbUq">套餐（一行一个，格式 <code data-page-node-id="JHhF9BHBNGcHJt6mShosYD">显示名=天数=单价</code>；天数填 0 表示永久，单价单位元）</label>
   <textarea id="cPlans" rows="6" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid #ddd;border-radius:8px;font-size:13px;font-family:ui-monospace,Consolas,monospace"></textarea>
-  <p style="font-size:11.5px;color:#999;margin:6px 0 0">例：<code>1月=30=3</code> / <code>半年=180=10</code> / <code>1年=365=15</code> / <code>2年=730=20</code> / <code>永久=0=80</code>。<br>单价的第三段不写就等于「没定价」，月度结算里会把它单列成「待补价」，<b>不会当 0 元算进合计</b>。删掉某个套餐不影响已登记的号（它们的套餐名照旧显示）。</p>
-  <div class="row2"><button id="cSave">保存</button><button class="gray" id="cCancel">关闭</button></div>
-  <div class="msg" id="cm"></div>
+  <p style="font-size:11.5px;color:#999;margin:6px 0 0" data-page-node-id="JP4OdIuHR5ij8O8jtHlCUw">例：<code data-page-node-id="NN1ilN2xz1w0ZoHTwzJzfz">1月=30=3</code> / <code data-page-node-id="va4pQ5IoFR7T9nE7EF113W">半年=180=10</code> / <code data-page-node-id="j3zm6brtwGwyCvKTS0O6ML">1年=365=15</code> / <code data-page-node-id="WFVGrDUnWzwaNPm1Ni71a3">2年=730=20</code> / <code data-page-node-id="aksU7jnUjRhfvDU3DOj3sb">永久=0=80</code>。<br data-page-node-id="RcThFKoPun6GOCJW5mW5Il">单价的第三段不写就等于「没定价」，月度结算里会把它单列成「待补价」，<b data-page-node-id="A2jTPlOFvzdKeEOgvQPZkl">不会当 0 元算进合计</b>。删掉某个套餐不影响已登记的号（它们的套餐名照旧显示）。</p>
+  <div class="row2" data-page-node-id="zV4asHhVO80G6GThNHSFWe"><button id="cSave" data-page-node-id="7jTSaP7bW5IVzHsWw9dClP">保存</button><button class="gray" id="cCancel" data-page-node-id="HdW55PCWlplBq619IYgwl4">关闭</button></div>
+  <div class="msg" id="cm" data-page-node-id="EbyLwChAbWXaFqWwDgs8LJ"></div>
 </div></div>
 <!-- ===== 2026-11-10：客服机器授权 ===== -->
-<div class="modal" id="devModal" hidden><div class="mbox" style="width:880px;max-height:90vh;overflow:auto">
-  <h3>设备授权（客服电脑）</h3>
-  <p style="font-size:12px;color:#888;margin:4px 0 0;line-height:1.75">新版客服软件第一次生成链接会报出自己的<b>机器码</b>，这里授权以后那台电脑才能继续生成。<br>
-  <b>待授权</b>的机器从第一次出现起有 <b>24 小时</b>宽限，超时没授权就会被拦住，并提示客服把机器码发给管理员。<br>
-  每台机器可以单独设每日上限（留空按 200）。<b>停用</b> = 立刻拦住但保留记录；<b>删除</b> = 彻底忘掉，下次再出现会重新变成待授权。<br>
-  ⚠ 机器码能挡住「软件被传到网上、陌生人下载就用」，<b>挡不住会逆向的人</b>（算法和口令都在软件里）。要彻底防白嫖得改成每个客服独立账号。</p>
-  <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:12px 0 6px;padding:10px 12px;background:#fffaf1;border:1px solid #f3e2c8;border-radius:9px">
-    <div><label style="margin-top:0">机器码</label><input id="dvCode" placeholder="如 A3F92K7Q8M1D" style="width:175px;font-family:ui-monospace,Consolas,monospace"></div>
-    <div><label style="margin-top:0">归哪个客服</label><select id="dvAgent" style="width:130px"></select></div>
-    <div><label style="margin-top:0">每日上限</label><input id="dvQuota" value="200" inputmode="numeric" style="width:88px"></div>
-    <button class="mini" id="dvAdd" style="margin-top:0;padding:9px 14px">添加 / 授权</button>
-    <button class="mini gray" id="dvReload" style="margin-top:0">刷新</button>
+<div class="modal" id="devModal" hidden data-page-node-id="q54R2sDlDKZYPlYUpdHkOW"><div class="mbox" style="width:880px;max-height:90vh;overflow:auto" data-page-node-id="w7yK0eWE19L2VGhM0BCQOY">
+  <h3 data-page-node-id="W8ZkDmdVe4YYVMo5I3WSdX">设备授权（客服电脑）</h3>
+  <p style="font-size:12px;color:#888;margin:4px 0 0;line-height:1.75" data-page-node-id="u6MpHE1SkrrrXMOv9ioZ7u">新版客服软件第一次生成链接会报出自己的<b data-page-node-id="zRJv7dgG4biBSCODosrBQd">机器码</b>，这里授权以后那台电脑才能继续生成。<br data-page-node-id="RtRdBeB3i7qsfvbUX5JLJe">
+  <b data-page-node-id="mKWLzHDIq1hcu5FmKzl1r4">待授权</b>的机器从第一次出现起有 <b data-page-node-id="IRq0c4lNYUBd7PPUuoqCWP">24 小时</b>宽限，超时没授权就会被拦住，并提示客服把机器码发给管理员。<br data-page-node-id="bEKYPMG1QXs19nNEtQi0Hd">
+  每台机器可以单独设每日上限（留空按 200）。<b data-page-node-id="W1ysquyWZsWFzTok95EpWo">停用</b> = 立刻拦住但保留记录；<b data-page-node-id="ksU6AFUb1j84jNPriYJCMZ">删除</b> = 彻底忘掉，下次再出现会重新变成待授权。<br data-page-node-id="HsC7IZTympu7LAOaOGRUVR">
+  ⚠ 机器码能挡住「软件被传到网上、陌生人下载就用」，<b data-page-node-id="3bWyb7pLlMVeNbrBxKdSm9">挡不住会逆向的人</b>（算法和口令都在软件里）。要彻底防白嫖得改成每个客服独立账号。</p>
+  <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:12px 0 6px;padding:10px 12px;background:#fffaf1;border:1px solid #f3e2c8;border-radius:9px" data-page-node-id="NPCqciAteXHwykHH5cQtiW">
+    <div data-page-node-id="ikzoOG6FMx4IDHqfJhW5Qd"><label style="margin-top:0" data-page-node-id="7gM5DJNfjlAZwClYmpXFwq">机器码</label><input id="dvCode" placeholder="如 A3F92K7Q8M1D" style="width:175px;font-family:ui-monospace,Consolas,monospace" data-page-node-id="RW6JVAnNq66wIA8RQ0Vs67"></div>
+    <div data-page-node-id="x1z4CS4aih4dIarTKsM7Ta"><label style="margin-top:0" data-page-node-id="STmREHPS941dO4urzrGwec">归哪个客服</label><select id="dvAgent" style="width:130px" data-page-node-id="QecY7nIDTq4F0SBitZIbtk"></select></div>
+    <div data-page-node-id="EVa4OIzkgflL6KzuHdT2H4"><label style="margin-top:0" data-page-node-id="JSktZyfjzPv8TLZC18EybG">每日上限</label><input id="dvQuota" value="200" inputmode="numeric" style="width:88px" data-page-node-id="9G9vCvSf2WIb4GGlI6evCN"></div>
+    <button class="mini" id="dvAdd" style="margin-top:0;padding:9px 14px" data-page-node-id="usoUkN9tUfpaOvHrhoAOCX">添加 / 授权</button>
+    <button class="mini gray" id="dvReload" style="margin-top:0" data-page-node-id="NdP55lG91FTYzhj5dCqEXz">刷新</button>
   </div>
-  <div id="dvBody"></div>
-  <div class="row2"><button class="gray" id="dvClose">关闭</button></div>
-  <div class="msg" id="dvm"></div>
+  <div id="dvBody" data-page-node-id="ikQOJgCnyJAYHvUgcTe2Cv"></div>
+  <div class="row2" data-page-node-id="Pdvz15SETxqlDL4ZPg1Drn"><button class="gray" id="dvClose" data-page-node-id="MyPSJ8WZxrxmg8BW4KhEek">关闭</button></div>
+  <div class="msg" id="dvm" data-page-node-id="bCb6V6q2lqHItCQaJQaBH4"></div>
 </div></div>
 <!-- ===== 2026-11-10：登记链接（新登记 / 续费 / 补登） ===== -->
-<div class="modal" id="rgModal" hidden><div class="mbox" style="width:880px;max-height:92vh;overflow:auto">
-  <h3>登记链接（发链接给买家，让他自己扫码登记）</h3>
-  <p style="font-size:12px;color:#888;margin:4px 0 0;line-height:1.75">
-  <b>三种类型不能混用：</b><br>
-  · <b>新登记</b> —— 新客户。收钱、算提成，到期日 = 今天 + 套餐天数。<br>
-  · <b>续费</b> —— 老客户付钱延期。收钱、算提成，到期日 = <b>原到期日 + 套餐天数</b>（剩下的一天天都不丢）；号已经掉线也能用，会以原单到期日为基准累加。<br>
-  · <b>补登</b> —— 号掉线了，免费补回。不收钱、不算提成，到期日<b>继承原单</b>（不延长）。<br>
-  ⚠ 续费和补登<b>必须先搜到原单</b>：类型是定在链接上的，客户后来换手机号、换网易号都不影响判定。原单已过期的不能补登（补登只在原套餐有效期内免费）。</p>
-  <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:12px 0 6px;padding:10px 12px;background:#fffaf1;border:1px solid #f3e2c8;border-radius:9px">
-    <div><label style="margin-top:0">类型</label><select id="rgKind" style="width:120px"><option value="new">新登记</option><option value="renew">续费</option><option value="fix">补登（免费）</option><option value="ckswap">换绑登录（免费）</option></select></div>
-    <div><label style="margin-top:0">客服</label><select id="rgAgent" style="width:110px"></select></div>
-    <div><label style="margin-top:0">套餐</label><select id="rgPlan" style="width:110px"></select></div>
-    <div><label style="margin-top:0">链接有效期</label><select id="rgHours" style="width:110px"><option value="24">24 小时</option><option value="72">3 天</option></select></div>
+<div class="modal" id="rgModal" hidden data-page-node-id="b4Ol0DqYwOmh5iaY3UEi5r"><div class="mbox" style="width:880px;max-height:92vh;overflow:auto" data-page-node-id="nbNyGaO9iVZP8w2lP40pHc">
+  <h3 data-page-node-id="MGum46Jkes9hDJWc4aIsq9">登记链接（发链接给买家，让他自己扫码登记）</h3>
+  <p style="font-size:12px;color:#888;margin:4px 0 0;line-height:1.75" data-page-node-id="Dbk6i5aOkU8TDkiWVn3U5P">
+  <b data-page-node-id="7U5EKHLBeofUAVCuyrVWWz">三种类型不能混用：</b><br data-page-node-id="fqJrdnvpld1wh80pTNKX4m">
+  · <b data-page-node-id="nwCi2ucjPAMSKDhBGxhz2Z">新登记</b> —— 新客户。收钱、算提成，到期日 = 今天 + 套餐天数。<br data-page-node-id="czImjzx1j21tEECwOCwwIx">
+  · <b data-page-node-id="WHOdpwtyEuHeFw3kQsCwrc">续费</b> —— 老客户付钱延期。收钱、算提成，到期日 = <b data-page-node-id="ku69KxN43J5ADozDUDe1Qq">原到期日 + 套餐天数</b>（剩下的一天天都不丢）；号已经掉线也能用，会以原单到期日为基准累加。<br data-page-node-id="CIIzIaV3FZCHAzbKBTx118">
+  · <b data-page-node-id="QId4bhDB4osABW73N37Bee">补登</b> —— 号掉线了，免费补回。不收钱、不算提成，到期日<b data-page-node-id="iGkEA1iHkCZ5Ivm2caWF5t">继承原单</b>（不延长）。<br data-page-node-id="3lfarfCOcYnukGY6d7dvry">
+  ⚠ 续费和补登<b data-page-node-id="M6A0fmmvlppBpa0gnUp6ny">必须先搜到原单</b>：类型是定在链接上的，客户后来换手机号、换网易号都不影响判定。原单已过期的不能补登（补登只在原套餐有效期内免费）。</p>
+  <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:12px 0 6px;padding:10px 12px;background:#fffaf1;border:1px solid #f3e2c8;border-radius:9px" data-page-node-id="KX1LaZhCr67fibDcPOrz5H">
+    <div data-page-node-id="tkaMLyHsEudnvh5RBoFe5X"><label style="margin-top:0" data-page-node-id="4W3xM1HDhKWfcCJZOGcSPZ">类型</label><select id="rgKind" style="width:120px" data-page-node-id="PyWKVKbf4yoBv1RXN0xthR"><option value="new" data-page-node-id="WsplSrTpH3lWDFjlqR7iZS">新登记</option><option value="renew" data-page-node-id="CZks0xLsvAJrYDeLp1Ggaj">续费</option><option value="fix" data-page-node-id="LJjVYjXbsZE895Q5MPHxpH">补登（免费）</option><option value="ckswap" data-page-node-id="2yhGRo62kmbRxBCBACoetD">换绑登录（免费）</option></select></div>
+    <div data-page-node-id="1zP4bN2LKerqxw65A5dYiP"><label style="margin-top:0" data-page-node-id="ZJ9EHtIP98CZeD5JRHap60">客服</label><select id="rgAgent" style="width:110px" data-page-node-id="c00OCk9suVvgsvJ20dIAQm"></select></div>
+    <div data-page-node-id="VHM0TXzg4SZZEWktOf6AA3"><label style="margin-top:0" data-page-node-id="KCLSLOQzMUUEedTXpIOKV4">套餐</label><select id="rgPlan" style="width:110px" data-page-node-id="887mZTiybAXtAAj4NKH1BW"></select></div>
+    <div data-page-node-id="mCCdG3YY2gCqMsS64qFz3b"><label style="margin-top:0" data-page-node-id="jwjMuAYWMFoIObCsPZ2IqS">链接有效期</label><select id="rgHours" style="width:110px" data-page-node-id="1yOD1peRL6wAQurDZaesQB"><option value="24" data-page-node-id="C2Y3Ib3O0rXv0FgJpoZvHw">24 小时</option><option value="72" data-page-node-id="Kvetx2cqHSq6cfqol2Xbt2">3 天</option></select></div>
   </div>
-  <div id="rgRefBox" hidden style="margin:0 0 10px;padding:10px 12px;background:#f6f9ff;border:1px solid #dbe6fb;border-radius:9px">
-    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-      <div><label style="margin-top:0">原单（客户手机号 或 网易 UID）</label><input id="rgRef" placeholder="如 13800138000 或 1234567890" style="width:250px" inputmode="numeric"></div>
-      <button class="mini gray" id="rgFind" style="margin-top:0">搜索原单</button>
+  <div id="rgRefBox" hidden style="margin:0 0 10px;padding:10px 12px;background:#f6f9ff;border:1px solid #dbe6fb;border-radius:9px" data-page-node-id="XzgdyxEGm3UNBUEsn5xCoj">
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap" data-page-node-id="vXIAAdCiOBF3rVJGjXHheX">
+      <div data-page-node-id="8NQlqqyyCqaBFRT0vC2n22"><label style="margin-top:0" data-page-node-id="UEpNPfdVw6ww7xuCn6LLwt">原单（客户手机号 或 网易 UID）</label><input id="rgRef" placeholder="如 13800138000 或 1234567890" style="width:250px" inputmode="numeric" data-page-node-id="JCtH31fEurCosqU5OzEEqC"></div>
+      <button class="mini gray" id="rgFind" style="margin-top:0" data-page-node-id="6JAsBPaPJYhptibtEeLSoA">搜索原单</button>
     </div>
-    <div id="rgRefOut" style="margin-top:8px"></div>
+    <div id="rgRefOut" style="margin-top:8px" data-page-node-id="8PD9epqD6d8rOAL0c0KGsM"></div>
   </div>
-  <div><label>备注（买家看不到，只记在这条链接上，方便你自己认）</label><input id="rgNote" maxlength="60" placeholder="如：11月 张先生 号掉线补登"></div>
-  <div class="row2"><button id="rgGo">生成链接</button><button class="gray" id="rgClose">关闭</button></div>
-  <div class="msg" id="rgm"></div>
-  <div id="rgOut"></div>
-  <div style="display:flex;gap:8px;align-items:center;margin:16px 0 6px;flex-wrap:wrap">
-    <h4 style="margin:0;font-size:13px">最近生成</h4>
+  <div data-page-node-id="1eFB57H3xbWYOPvCnkeB0t"><label data-page-node-id="nONOKEi87CupLpjhiKWnW7">备注（买家看不到，只记在这条链接上，方便你自己认）</label><input id="rgNote" maxlength="60" placeholder="如：11月 张先生 号掉线补登" data-page-node-id="IEx2nILuwwtVFvX92qCvso"></div>
+  <div class="row2" data-page-node-id="20GZIwDJOlpn6Kv6P1i4Fn"><button id="rgGo" data-page-node-id="loJVZO5yioHCjA1vpbAuK0">生成链接</button><button class="gray" id="rgClose" data-page-node-id="34YnYvzsBOkLTPo7G1ntBU">关闭</button></div>
+  <div class="msg" id="rgm" data-page-node-id="ymPRNwvhxkUMCMMNYZMJtS"></div>
+  <div id="rgOut" data-page-node-id="9IXQh7To9v6qwlCFt7UIkw"></div>
+  <div style="display:flex;gap:8px;align-items:center;margin:16px 0 6px;flex-wrap:wrap" data-page-node-id="KV8ivqBZBkZgI53vTJdgZg">
+    <h4 style="margin:0;font-size:13px" data-page-node-id="6ht6DEaMXpf05ayGRotcK1">最近生成</h4>
     <!-- 2026-11-10：原来只有「未使用/已使用/已作废」看起来像没有过期这一档。
          已过期是算出来的（state 仍是 unused、exp_at 过了），服务端已支持筛选。 -->
-    <select id="rgState" style="width:130px;font-size:12px;padding:4px 6px">
-      <option value="">全部状态</option>
-      <option value="unused">未使用（未过期）</option>
-      <option value="expired">已过期</option>
-      <option value="used">已使用</option>
-      <option value="void">已作废</option>
+    <select id="rgState" style="width:130px;font-size:12px;padding:4px 6px" data-page-node-id="WUGzNfQZ1kLbu4zsdkjv6M">
+      <option value="" data-page-node-id="EOaRAZO7uZKghRmVdmbZow">全部状态</option>
+      <option value="unused" data-page-node-id="Kk9h0uN6TLFCvhtAEBDBI6">未使用（未过期）</option>
+      <option value="expired" data-page-node-id="npuEnfsud5cJdiDrzArLos">已过期</option>
+      <option value="used" data-page-node-id="VbjyWG3daxLE4SSln0IXoj">已使用</option>
+      <option value="void" data-page-node-id="nzh1VWIG4G2TuDp4cgFfg1">已作废</option>
     </select>
     <!-- 2026-11-11：链接查询（与 APK / EXE 同一套 q 参数）。粘整条链接、填 8 位编码、
          或填客户手机号都认；查询是服务端真查（编码走主键、手机号走 phone 条件），
          不是在这 25 条里过滤，老链接也查得到。 -->
-    <input id="rgQ" placeholder="查询：粘链接 / 编码或手机号的任意几位（≥3 位）" style="flex:1;min-width:190px;font-size:12px;padding:5px 8px;border:1px solid #ddd;border-radius:6px">
-    <button class="mini" id="rgQBt" style="margin-top:0">查询</button>
-    <button class="mini gray" id="rgQAll" style="margin-top:0">显示全部</button>
+    <input id="rgQ" placeholder="查询：粘链接 / 编码或手机号的任意几位（≥3 位）" style="flex:1;min-width:190px;font-size:12px;padding:5px 8px;border:1px solid #ddd;border-radius:6px" data-page-node-id="Ha1iKZURvtQHtUu67FAW2P">
+    <button class="mini" id="rgQBt" style="margin-top:0" data-page-node-id="jiJE4uCWD7BqRwDDTikXvV">查询</button>
+    <button class="mini gray" id="rgQAll" style="margin-top:0" data-page-node-id="wIGmcGLqNhYCkCrmCVWPHB">显示全部</button>
   </div>
-  <div id="rgList"></div>
+  <div id="rgList" data-page-node-id="ivrzZX6oYE8r558ZhzZGvf"></div>
 </div></div>
 <!-- ===== 2026-11-05：月度结算 ===== -->
-<div class="modal" id="lgModal" hidden><div class="mbox" style="width:980px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
-  <h3>月度结算</h3>
-  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">按<b>登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br><b>退单</b>只认「控制台<b>手动删号</b>」（钱退客户、服务没做完），不计收入不计提成；<b>CK 失效被自动判死</b>的号钱已经收了、没有任何退款动作，订单照常生效，<b>照算收入与提成</b>。补号单、公益赠号/手动号也都不计营收、不计提成，各自单列。</p>
-  <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
-    <div><label style="margin-top:0">月份</label><input type="month" id="lgMonth" style="width:150px"></div>
-    <div><label style="margin-top:0">群</label><select id="lgPool" style="width:130px"><option value="hz" selected>主群</option><option value="">全部（含定制群）</option><option value="dz">定制群</option></select></div>
-    <div><label style="margin-top:0">客服</label><select id="lgAgent" style="width:160px"><option value="">全部客服</option></select></div>
-    <button class="mini" id="lgGo" style="margin-top:0;padding:9px 16px">查询</button>
-    <button class="mini gray" id="lgCsv" style="margin-top:0">导出明细CSV</button>
+<div class="modal" id="lgModal" hidden data-page-node-id="BoYUT3Xge9plC5bYuwubxZ"><div class="mbox" style="width:980px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column" data-page-node-id="a7O9OC6D5MHjkuJCRLmaKB">
+  <h3 data-page-node-id="UdrTq5hoC9RfjVUBIquDRK">月度结算</h3>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65" data-page-node-id="3TFYezCB0MGSGo36avOkie">按<b data-page-node-id="6UyW2vCWsKY8NRRHcZrJgp">登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br data-page-node-id="9YzFOhi1QS8oPY6upw2EZ7"><b data-page-node-id="14WCYpTA89Dzh9ixWJEZ7W">退单</b>只认「控制台<b data-page-node-id="aKApDulKctDRDJk7xMHD3B">手动删号</b>」（钱退客户、服务没做完），不计收入不计提成；<b data-page-node-id="iidunKIQeoEzZwNXXVUbdb">CK 失效被自动判死</b>的号钱已经收了、没有任何退款动作，订单照常生效，<b data-page-node-id="WElPBBCjI8xiBoIUfV1KH2">照算收入与提成</b>。补号单、公益赠号/手动号也都不计营收、不计提成，各自单列。</p>
+  <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap" data-page-node-id="N6NHtQR494Bfr2cTMAc9gr">
+    <div data-page-node-id="CDytaEmtjzABvoQSu8cUwh"><label style="margin-top:0" data-page-node-id="A28TlLhyU9ASWeKB9oPSt2">月份</label><input type="month" id="lgMonth" style="width:150px" data-page-node-id="58dfCeoi6FlPd5AyG3eMs6"></div>
+    <div data-page-node-id="LvVn47Kikc1M8daxH8aVi9"><label style="margin-top:0" data-page-node-id="EFucejLN8iq2yeNHoYN8X8">群</label><select id="lgPool" style="width:130px" data-page-node-id="qgescWIkh0lDTnGQRzaZXj"><option value="hz" selected data-page-node-id="t4EZu2ZhtXtcLyD2YwgkCR">主群</option><option value="" data-page-node-id="AD2WxhM03XoOKCyYIjlM8e">全部（含定制群）</option><option value="dz" data-page-node-id="1JnBSWhG86KaV7iABGdFxP">定制群</option></select></div>
+    <div data-page-node-id="1C1QnxKZWOHgvUfsjcrM2m"><label style="margin-top:0" data-page-node-id="TJ3NGUBDLAEaJXIpKlNBSX">客服</label><select id="lgAgent" style="width:160px" data-page-node-id="BJB2mV5McQqckn4rf8TA8K"><option value="" data-page-node-id="Zg54Z7ZUQJj5DvZkJgAagk">全部客服</option></select></div>
+    <button class="mini" id="lgGo" style="margin-top:0;padding:9px 16px" data-page-node-id="qmQbsAA5WCyD3PZw3DaRc9">查询</button>
+    <button class="mini gray" id="lgCsv" style="margin-top:0" data-page-node-id="bETofNsDIwEiXxfZwctks8">导出明细CSV</button>
   </div>
-  <div id="lgBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto"></div>
-  <div class="row2"><button class="gray" id="lgClose">关闭</button></div>
-  <div class="msg" id="lgm"></div>
+  <div id="lgBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto" data-page-node-id="3azi1aTVVSDWVT4uJkP8Wn"></div>
+  <div class="row2" data-page-node-id="Ss0mAQFYKPDTfV8wFAHnqm"><button class="gray" id="lgClose" data-page-node-id="PqiR5iUTdlWPkLAYaKXwM1">关闭</button></div>
+  <div class="msg" id="lgm" data-page-node-id="KNrznckvVNEen5MIH1Jy5Z"></div>
 </div></div>
 <!-- ===== 2026-11-15：历史登记查询 + 待挽回清单 ===== -->
-<div class="modal" id="rcModal" hidden><div class="mbox" style="width:1040px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
-  <h3>历史登记 / 待挽回</h3>
-  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65"><b>查登记记录</b>：输 UID / 手机号 / 账号名任意片段（≥3 位），跨群跨月把成交台账 + 删号流水拼成一条线，<b>号删了照常能查到</b>。状态标记：<b>在池</b>＝正常运行；<b>公益·到期未续</b>＝套餐到期降级（续费即恢复）；<b>已通知重登</b>＝CK 失效已通知号主还没处理；<b>CK失效·已删</b>＝自动判死删号；<b>手动删·退单</b>＝控制台手动删（结算口径=退单）。<br><b>待挽回清单</b>＝「该打电话了」的名单：CK 失效判死后没回来的 + 到期降公益没续费的，按可挽回金额排序。补号单与赠号不计金额。每行「复制」可复制手机号，到「登记链接」→ 续费/补登 → 查原单 粘贴即可生成补登链接。</p>
-  <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
-    <div style="flex:1;min-width:230px"><label style="margin-top:0">搜索（UID / 手机号 / 账号名片段）</label><input id="rcQ" placeholder="如 13800138000 或 3301849028" style="width:100%"></div>
-    <button class="mini" id="rcGo" style="margin-top:0;padding:9px 16px">查登记记录</button>
-    <div><label style="margin-top:0">判死回看</label><select id="rcDays" style="width:110px"><option value="30" selected>近 30 天</option><option value="60">近 60 天</option><option value="90">近 90 天</option></select></div>
-    <button class="mini" id="rcRescue" style="margin-top:0;padding:9px 16px">待挽回清单</button>
+<div class="modal" id="rcModal" hidden data-page-node-id="SYduKjYggyAR8uBx3pESri"><div class="mbox" style="width:1040px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column" data-page-node-id="ZWPBOyxaKNIUaE4OFyb68W">
+  <h3 data-page-node-id="owfEHpGCKh0cuaxDg2B0iB">历史登记 / 待挽回</h3>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65" data-page-node-id="26AcF9mHMjaiPK5vtxZdrG"><b data-page-node-id="vHMfxUwdDB9zhvT3BFDUid">查登记记录</b>：输 UID / 手机号 / 账号名任意片段（≥3 位），跨群跨月把成交台账 + 删号流水拼成一条线，<b data-page-node-id="969KPZnCwUqtbBoDAuH1dQ">号删了照常能查到</b>。状态标记：<b data-page-node-id="7yYzFN3kgRtjbmiGFKZ5AO">在池</b>＝正常运行；<b data-page-node-id="qAo1wzSRfbrGedrBZTyhnE">公益·到期未续</b>＝套餐到期降级（续费即恢复）；<b data-page-node-id="eCCCcJRFzLEW6sK0FCN36m">已通知重登</b>＝CK 失效已通知号主还没处理；<b data-page-node-id="iAASERz1oC2n1gkxSsoZhD">CK失效·已删</b>＝自动判死删号；<b data-page-node-id="evRMOSImLnGvhbW3h8UEj8">手动删·退单</b>＝控制台手动删（结算口径=退单）。<br data-page-node-id="sCsJgqMqC0BpbzLD2MuXrB"><b data-page-node-id="rNuyewNIFYMgGIzIOFeRU3">待挽回清单</b>＝「该打电话了」的名单：CK 失效判死后没回来的 + 到期降公益没续费的，按可挽回金额排序。补号单与赠号不计金额。每行「复制」可复制手机号，到「登记链接」→ 续费/补登 → 查原单 粘贴即可生成补登链接。</p>
+  <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap" data-page-node-id="PDVunllxj0bArwQxIBnlP6">
+    <div style="flex:1;min-width:230px" data-page-node-id="KjjtjixW7IXXk420wUhAzH"><label style="margin-top:0" data-page-node-id="Cidk9aSCEvuboNNs7rOKK5">搜索（UID / 手机号 / 账号名片段）</label><input id="rcQ" placeholder="如 13800138000 或 3301849028" style="width:100%" data-page-node-id="QF0Pr6j1GR2dTyjHzRGK6a"></div>
+    <button class="mini" id="rcGo" style="margin-top:0;padding:9px 16px" data-page-node-id="fmBX90IbXdDKcqP6Swva47">查登记记录</button>
+    <div data-page-node-id="YNIfHZycmlZtaF7EgMXA4Z"><label style="margin-top:0" data-page-node-id="0ONyF2r4lNz2g521lghWx5">判死回看</label><select id="rcDays" style="width:110px" data-page-node-id="doRO160S6DV17UcE8z8bgD"><option value="30" selected data-page-node-id="fn8BZW8mYOvMG6bZMYPH0J">近 30 天</option><option value="60" data-page-node-id="uKQ2rFCntNAJt458qdwQzK">近 60 天</option><option value="90" data-page-node-id="brbFJAm14EnyRmEDFclsR4">近 90 天</option></select></div>
+    <button class="mini" id="rcRescue" style="margin-top:0;padding:9px 16px" data-page-node-id="TnwX8g66n4fNX5GKCEFknw">待挽回清单</button>
   </div>
-  <div id="rcBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto"></div>
-  <div class="row2"><button class="gray" id="rcClose">关闭</button></div>
-  <div class="msg" id="rcm"></div>
+  <div id="rcBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto" data-page-node-id="xREY8URDG7l6tuqwahlrt5"></div>
+  <div class="row2" data-page-node-id="hMTvrMqibZ3wv4Yy3fsCna"><button class="gray" id="rcClose" data-page-node-id="L64GYRerH2zswYgizFwC1K">关闭</button></div>
+  <div class="msg" id="rcm" data-page-node-id="qWqgk28EsFSRTjV4zMZLJI"></div>
 </div></div>
 <!-- ===== 2026-11-15 方案④：账号详情弹窗（手机卡片上的「详情」按钮；桌面 infoBtn 隐藏不可达）=====
      只读展示该行全部字段（数据源 render 时的 window.ROWS[i]），满权限时给「编辑」按钮走原 openEdit。 -->
-<div class="modal" id="infoModal" hidden><div class="mbox" id="infoBox">
-  <h3 id="infoTitle">账号详情</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="infoSub"></p>
-  <div id="infoBody" style="margin-top:10px"></div>
-  <div class="row2"><button class="gray" id="infoClose">关闭</button></div>
+<div class="modal" id="infoModal" hidden data-page-node-id="6HpiU5UmfrPZ8lUIWiN2Kj"><div class="mbox" id="infoBox" data-page-node-id="JPeAYz32g1x6exQUKltOJi">
+  <h3 id="infoTitle" data-page-node-id="nl5knxNSilQ0qJcXVORCgb">账号详情</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="infoSub" data-page-node-id="wJUrtlrTXbtiWldkYpBkLW"></p>
+  <div id="infoBody" style="margin-top:10px" data-page-node-id="c2UTGHw2z3Xpn4HLjaoNZ0"></div>
+  <div class="row2" data-page-node-id="BrKnCT8gOifJOapeZ8KY4h"><button class="gray" id="infoClose" data-page-node-id="ZTYnwS3fZTdz4XpHXQ1dGJ">关闭</button></div>
 </div></div>
 <script>
 var TOKEN=null, DATA=null, POOLF='all';
