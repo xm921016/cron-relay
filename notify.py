@@ -87,10 +87,39 @@ def mail_ready():
 _BRAND_RED = "#DD001B"
 
 
+def _group_span(line):
+    """群号行专用样式（2026-11-15 用户要求：加红、加大、更醒目）。
+
+    正文 15px，这里 20px 加粗 + 品牌红 + 浅红底 + 左侧红条，视觉上单独成块，
+    避免号主一眼扫过去漏掉群号。
+    """
+    return (
+        '<span style="display:inline-block;margin:6px 0;padding:9px 15px;'
+        'background:#fff0f0;border-left:4px solid ' + _BRAND_RED + ';border-radius:6px;'
+        'color:' + _BRAND_RED + ';font-size:20px;font-weight:bold;'
+        'line-height:1.5;">' + line + "</span>"
+    )
+
+
+def _mark_group_lines(esc):
+    """把段落内**每一行**「售后群：…」都换成放大加红块。
+
+    为什么按行而不是按段判断：群号在这套模板里有两种落位 ——
+    · 独立成段（songfix/nomus/songchange/expire 等：前后都是空行）
+    · 夹在段落中间（notify_reg_ok：上一行是报喜、下一行是「以后…在群里通知」）
+    旧实现只认「整段以售后群：开头」，第二种落位完全没高亮，群号混在正文里看不见。
+    esc 是已转义文本，行分隔符此时已是 <br>。
+    """
+    lines = esc.split("<br>")
+    return "<br>".join(
+        _group_span(x) if x.strip().startswith("售后群：") else x for x in lines
+    )
+
+
 def _html_wrap(body):
     """纯文本正文 → 卡片式 HTML。约定：
     · 空行（\\n\\n）分段；段内换行（\\n）转 <br>
-    · 「售后群：」开头 → 浅红高亮块
+    · 任意位置的「售后群：」行 → 放大加红块（见 _mark_group_lines）
     · 「——」开头 → 落款，小号灰字
     其余一律正常段落。"""
     blocks = []
@@ -99,11 +128,12 @@ def _html_wrap(body):
         st = para.strip()
         if st.startswith("——"):
             blocks.append('<p style="margin:28px 0 2px;font-size:13px;color:#9aa0a6;">' + esc + "</p>")
-        elif st.startswith("售后群："):
-            blocks.append('<div style="margin:4px 0 18px;padding:12px 16px;background:#fff5f5;'
-                          'border-radius:8px;color:' + _BRAND_RED + ';font-weight:bold;">' + esc + "</div>")
         else:
-            blocks.append('<p style="margin:0 0 18px;line-height:2;">' + esc + "</p>")
+            esc = _mark_group_lines(esc)
+            if st.startswith("售后群："):
+                blocks.append('<div style="margin:4px 0 18px;">' + esc + "</div>")
+            else:
+                blocks.append('<p style="margin:0 0 18px;line-height:2;">' + esc + "</p>")
     inner = "".join(blocks)
     return (
         '<div style="background:#f4f6f8;padding:28px 16px;">'
