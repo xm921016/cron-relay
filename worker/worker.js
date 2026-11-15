@@ -9267,7 +9267,11 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .dr .dn{flex:0 0 auto}
   .runbar{gap:6px;margin-bottom:10px}
   .rb{min-width:0;flex:1 1 100%;padding:7px 10px;font-size:11.5px}
-  .twrap{border:0;border-radius:0;max-height:none!important;height:auto!important;overflow:visible;background:transparent}
+  /* 2026-11-15：恢复手机端列表框锁定（用户要求与电脑版一致：账号列表中间内滚，
+     删号记录/对照表/底部说明不用滚过几百行就能看到）。
+     10-26 的「压底」事故根因是当时 overflow:visible 覆盖了基础 overflow:auto——
+     只锁高不内滚才溢出；现在保留内滚，锁高安全。 */
+  .twrap{border:0;border-radius:0;background:transparent;overflow-y:auto}
   .twrap table,.twrap tbody{display:block}
   .twrap thead{display:none}
   .twrap tr{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;background:#fff;
@@ -9352,7 +9356,6 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini gray" id="btnDev" style="display:none" title="按客服电脑授权：未授权的机器码不能生成登记链接">设备授权</button>
     <button class="mini gray" id="btnReg" style="display:none" title="生成买家自助登记链接；续费/补登必须选原单，类型定在链接上">登记链接</button>
     <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限可见）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应">历史登记</button>
-    <button class="mini gray" id="btnDead" title="一键跳到底部的删号记录 / 待复核区并展开（不用再滚过整个号池列表）">删号记录</button>
     <button class="mini gray" id="btnOut">退出</button>
   </div>
   <div class="twrap"><table><thead><tr>
@@ -9673,7 +9676,9 @@ $('stats').onclick=function(ev){
 //   就按 240px 的位置排版，直接压在账号卡片上（用户 10-26 截图里的错乱就是这个）。
 function fitTable(){
   var w=document.querySelector('.twrap');if(!w)return;
-  if(window.innerWidth<=860||!w.offsetParent){w.style.maxHeight='';return;}
+  if(!w.offsetParent){w.style.maxHeight='';return;}
+  /* 2026-11-15：手机端（<=860px）也锁高——用户要求与电脑版一致的「锁定中间账号列表」。
+     卡片流在列表框内部滚动；删号记录/对照表紧跟框底，不用滚过全部账号。 */
   var docTop=w.getBoundingClientRect().top+(window.pageYOffset||0);
   var h=window.innerHeight-docTop-18;
   w.style.maxHeight=(h>240?h:240)+'px';
@@ -10838,12 +10843,7 @@ $('btnRescue').onclick=function(){
 };
 /* 2026-11-15：一键跳到删号记录区 —— 号池几百行，滚到底太累（用户反馈）。
    展开并平滑滚过去；数据还没回来（hidden）也先摘掉 hidden，loadData 回填列表。 */
-$('btnDead').onclick=function(){
-  var d=$('deadBox');
-  if(!d)return;
-  d.hidden=false;d.open=true;
-  try{d.scrollIntoView({behavior:'smooth',block:'start'});}catch(e){d.scrollIntoView();}
-};
+
 
 // ===== 2026-10-27：客服名单 / 套餐档位维护（只读口令看不到这个按钮，服务端也会拦）=====
 // 客服一行一个；套餐一行一个「显示名=天数」，天数 0 = 永久。改完保存，APK/EXE 下次登记自动拿到。
