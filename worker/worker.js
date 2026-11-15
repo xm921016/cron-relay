@@ -7884,6 +7884,10 @@ async function handle(request) {
       const hitDeadOnly = TH.dead.filter(d => !seenKeyH[histKey(d.pool, d.uid)]
         && !seenUidH[nrmH(d.uid)]
         && (nrmH(d.uid).indexOf(qH) >= 0 || nrmH(d.name).indexOf(qH) >= 0)).slice(0, 50);
+      for (const d of hitDeadOnly) { seenKeyH[histKey(d.pool, d.uid)] = 1; seenUidH[nrmH(d.uid)] = 1; }
+      // 还在池里但从没写过台账的（手动加号 / 公益赠号 / 台账之前的遗留）：也补进来，否则搜「在池却无台账」会误答查无此号
+      const hitAccOnly = TH.acc.filter(a => !seenUidH[nrmH(a.uid)]
+        && (nrmH(a.uid).indexOf(qH) >= 0 || nrmH(a.name).indexOf(qH) >= 0)).slice(0, 50);
       const rowOfH = (r, fromLed) => {
         const st = stateOfH(r.uid, r.pool);
         return { id: fromLed ? r.id : 0, pool: r.pool, uid: nrmH(r.uid), name: nrmH(r.name),
@@ -7896,7 +7900,7 @@ async function handle(request) {
           deadReason: st.reason || (fromLed ? '' : nrmH(r.reason)), deadAt: st.at || (fromLed ? '' : nrmH(r.at)),
           notice: noticeOfH(r.pool, r.uid) };
       };
-      return json({ ok: true, q: qH, rows: hitLed.map(r => rowOfH(r, true)).concat(hitDeadOnly.map(d => rowOfH(d, false))),
+      return json({ ok: true, q: qH, rows: hitLed.map(r => rowOfH(r, true)).concat(hitDeadOnly.map(d => rowOfH(d, false))).concat(hitAccOnly.map(a => rowOfH(a, false))),
         scanned: { accounts: TH.acc.length, ledger: TH.led.length, dead_log: TH.dead.length } }, 200, CORS);
     }
     /* ---- P1 待挽回清单（2026-11-15）----
