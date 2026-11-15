@@ -11235,7 +11235,9 @@ $('btnCsv').onclick=function(){
         lb.hidden=true;mb.hidden=false;applyRole(o.d.role);loadData();
       }else{
         lb.hidden=false;mb.hidden=true;
-        $('lm').textContent=(o.d&&o.d.message)||'免密登录失败，请重新输入控制台口令';$('lm').className='msg err';
+        // 2026-11-15：兜底文案改成不带「登录失败/口令」字样 —— 带 #pw= 免密进来的壳（EXE/APK）
+        // 旧版看到这句会以为口令错了把本机记住的口令清掉，网络抖动一次就得重输一次。
+        $('lm').textContent=(o.d&&o.d.message)||'免密进入没成功，请手动重新登录';$('lm').className='msg err';
       }
     }).catch(function(){
       lb.hidden=false;mb.hidden=true;
