@@ -9347,12 +9347,27 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .rgwrap{border:0;border-radius:0;background:transparent;overflow-y:auto}
   .rgwrap thead{display:none}
   .rgwrap table,.rgwrap tbody{display:block}
-  .rgwrap tr{display:block;background:#fff;border:1px solid #e4e9f0;border-radius:10px;margin:8px 0;padding:8px 11px}
-  .rgwrap td{display:block;padding:2px 0;border:0;font-size:12px;line-height:1.6;color:#33506e;white-space:normal}
+  /* 2026-11-15 二稿（用户反馈竖排右侧太空）：6 列网格紧凑卡片 ——
+     行1 类型·状态 | 生成时间(右) / 行2 编码(大) | 套餐(右) / 行3 客服·买家·登记 / 行4 备注 | 操作(右) */
+  .rgwrap tr{display:grid;grid-template-columns:repeat(6,1fr);gap:2px 6px;background:#fff;border:1px solid #e4e9f0;border-radius:10px;margin:8px 0;padding:9px 11px}
+  .rgwrap td{display:block;min-width:0;padding:0;border:0;font-size:12px;line-height:1.6;color:#33506e;white-space:normal}
   .rgwrap td[data-l]::before{content:attr(data-l) ' ';color:#9aa5b1;font-size:10px;margin-right:3px}
-  .rgwrap td[data-l="编码"]{padding:2px 0 6px}
+  .rgwrap td[data-l="类型"]{grid-column:1/2;grid-row:1;align-self:center}
+  .rgwrap td[data-l="状态"]{grid-column:2/4;grid-row:1;align-self:center;font-weight:700;color:#17324f}
+  .rgwrap td[data-l="状态"]::before{font-weight:400}
+  .rgwrap td[data-l="生成时间"]{grid-column:4/7;grid-row:1;text-align:right;font-size:11px;color:#8a97a5}
+  .rgwrap td[data-l="生成时间"]::before{color:#b3bcc4}
+  .rgwrap td[data-l="编码"]{grid-column:1/4;grid-row:2;padding:3px 0 0}
   .rgwrap td[data-l="编码"]::before{display:none}
-  .rgwrap td[data-l="编码"] span{font-size:15px;font-weight:700;letter-spacing:.5px}
+  .rgwrap td[data-l="编码"] span{font-size:16px;font-weight:700;letter-spacing:.5px}
+  .rgwrap td[data-l="套餐"]{grid-column:4/7;grid-row:2;text-align:right;font-size:11px;color:#5b6b7d;align-self:end}
+  .rgwrap td[data-l="客服"]{grid-column:1/3;grid-row:3}
+  .rgwrap td[data-l="买家"]{grid-column:3/5;grid-row:3}
+  .rgwrap td[data-l="登记时间"]{grid-column:5/7;grid-row:3;font-size:11px;color:#8a97a5}
+  .rgwrap td[data-l="登记时间"]::before{color:#b3bcc4}
+  .rgwrap td[data-l="备注"]{grid-column:1/5;grid-row:4;font-size:11px;color:#8a97a5}
+  .rgwrap td[data-l="操作"]{grid-column:5/7;grid-row:4;justify-self:end;align-self:center}
+  .rgwrap td[data-l="操作"] button{padding:6px 14px}
   .rgwrap td[data-l="备注"]:empty{display:none}
   /* ===== 2026-11-15 方案④「单页 + 详情弹窗」（用户在④预览拍板）—— 18:28 二次返工 =====
      第一版只做了收纳重排、观感仍像桌面压缩版，用户打回；本次照预览稿 .card4/.chips/.seg
@@ -9428,8 +9443,8 @@ body:has(.modal:not([hidden])){overflow:hidden}
   /* 19:05 简化：今日650 下不再显示进度条，纯数字 */
   .twrap .pbar6{display:none}
   /* meta 两行小字：客服|歌曲 一行，入池|套餐 一行（标签灰前缀、值右对齐防挤压） */
-  .twrap td:nth-child(4){grid-column:1/3;grid-row:3;padding:6px 0 0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .twrap td:nth-child(7){grid-column:3/7;grid-row:3;padding:6px 0 0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+  .twrap td:nth-child(4){grid-column:1/4;grid-row:3;padding:6px 0 0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .twrap td:nth-child(7){grid-column:4/7;grid-row:3;padding:6px 0 0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
   .twrap td:nth-child(15){grid-column:1/3;grid-row:4;padding:3px 0 0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .twrap td:nth-child(17){grid-column:3/7;grid-row:4;padding:3px 0 0;font-size:11px;text-align:right}
   /* 底部：分隔线上 标记(badge流) | 按钮(详情蓝实心+编辑描边) */
@@ -10671,15 +10686,19 @@ function openInfo(i){
     +'</div>'
     +(e.note?('<div class="dsec">'+kv('备注',esc(e.note))+'</div>'):'')
     +'<div class="dsec"><i>标记</i>'+(r.markHtml||'<span style="color:#bbb">正常</span>')+'</div>';
-  if(ROLE==='full')bodyH+='<div class="row2"><button id="infoEdit">编辑</button><button class="gray" id="infoClose2">关闭</button></div>';
+  /* 2026-11-15：编辑按钮动态插进弹窗底部唯一的 row2（模板自带一个关闭）。
+     原来在 infoBody 里再拼一行「编辑+关闭」，和模板底部的关闭重复 —— 弹窗出现两个关闭（买家实测）。 */
+  if(ROLE==='full'){
+    var oldEb=$('infoEdit');if(oldEb&&oldEb.parentNode)oldEb.parentNode.removeChild(oldEb);
+    var eb2=document.createElement('button');
+    eb2.id='infoEdit';eb2.textContent='编辑';
+    eb2.onclick=function(){$('infoModal').hidden=true;openEdit(r.pool,e.uid,e.name);};
+    $('infoClose').parentNode.insertBefore(eb2,$('infoClose'));
+  }
   $('infoTitle').textContent='账号详情';
   $('infoSub').textContent='该号全部字段；完整标记说明见「标记对照表」';
   $('infoBody').innerHTML=bodyH;
   $('infoModal').hidden=false;
-  var eb=$('infoEdit');
-  if(eb)eb.onclick=function(){$('infoModal').hidden=true;openEdit(r.pool,e.uid,e.name);};
-  var cb=$('infoClose2');
-  if(cb)cb.onclick=function(){$('infoModal').hidden=true;};
 }
 $('infoClose').onclick=function(){$('infoModal').hidden=true;};
 function doEdit(pool,e,action){
