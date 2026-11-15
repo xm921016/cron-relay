@@ -5297,9 +5297,21 @@ async function handle(request) {
          而同一批口令在 /console 又是能登录看数据的，口径分裂。这是纯读接口，放宽不放大写权限；
          写操作（/api/admin/entry 等）维持只认 ADMIN_PASS 不变。 */
       const noPassAtAll = !c.adminPass && !c.consolePass && !c.consoleRoPass;
-      if (noPassAtAll) return json({ message: '尚未设置管理密码：请在 Cloudflare KV 中添加 ADMIN_PASS 键（任意长随机字符串）' }, 503, CORS);
+      /* 2026-11-15：三个口令键有任一读失败（cfg() 里每个 get 都是 .catch(() => null)，
+         KV 抖一下就变 null）时，不能把「配置读不到」当成「口令错」报 403 ——
+         APK 号池页存了口令，收到 403/含「密码」字样的失败就会清掉本机口令，
+         下次打开又要重输（用户实测「有时候要求重新输入」的根因）。
+         所以：一个都没读到 → 503；读到了一些但都对不上且至少一键是 null → 也按读失败处理 503；
+         只有三个键都读到了、确实对不上，才是真正的 403「管理密码错误」。
+         文案刻意不带「密码/口令」字样，防止 APK 端的误清正则误伤。 */
+      const passKeyNull = c.adminPass == null || c.consolePass == null || c.consoleRoPass == null;
       const poolViewOk = !!body.pass && (body.pass === c.adminPass || body.pass === c.consolePass || body.pass === c.consoleRoPass);
-      if (!poolViewOk) return json({ message: '管理密码错误' }, 403, CORS);
+      if (!poolViewOk) {
+        if (noPassAtAll || (!!body.pass && passKeyNull)) {
+          return json({ message: '服务端配置暂时读不到（KV 抖动或尚未配置），请稍后点刷新重试' }, 503, CORS);
+        }
+        return json({ message: '管理密码错误' }, 403, CORS);
+      }
       /* 2026-11-09：原来每次刷新管理页都跑一遍 pruneExpired()（重建全池 + 到期号逐个写 KV +
          可能刷一次 pool 快照）。而「到期降级公益号」早已挪进每日 cron（scheduled 里
          ctx.waitUntil(pruneExpired())，2026-10-29 的事），这里再跑等于每刷新一次多一份写副作用。
@@ -6161,15 +6173,26 @@ async function handle(request) {
        2026-11-10：EXE 里有生成口令、没有控制台口令，所以不能复用 /api/console/findorder。
        这里只按「完整手机号 / 完整网易 UID」精确查（两条单条件查询，都走索引），
        不用 LIKE —— ledger 全表扫描在额度打满时最容易被拖死。 */
+    /* 2026-11-15：给 regtoken_find 开 CORS（同 /api/pool 口径）—— APK ck.html（file:// 页面）
+       要加「查原单」按钮，续费/补登前先查手机号/UID 有没有原单、到期日多少，不用白生成一次。
+       接口本身仍要 pass（REG_PASS 或控制台满权口令），开 CORS 不放大权限。 */
+    if (url.pathname === '/api/regtoken_find' && request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      } });
+    }
     if (url.pathname === '/api/regtoken_find' && request.method === 'POST') {
       let bf;
       try { bf = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const CORSF = { 'Access-Control-Allow-Origin': '*' };
       const pwf = await regPass();
       let okf = !!pwf && String(bf.pass || '') === pwf;
       if (!okf) okf = await consoleAuthFull(bf);
-      if (!okf) return json({ ok: false, message: pwf ? '生成口令不正确' : '生成口令未配置' }, 403);
+      if (!okf) return json({ ok: false, message: pwf ? '生成口令不正确' : '生成口令未配置' }, 403, CORSF);
       const qf = String(bf.q || '').replace(/[^0-9A-Za-z_-]/g, '').slice(0, 40);
-      if (qf.length < 5) return json({ ok: false, message: '请输完整手机号 或 完整网易 UID' }, 400);
+      if (qf.length < 5) return json({ ok: false, message: '请输完整手机号 或 完整网易 UID' }, 400, CORSF);
       const COLS = 'uid,name,plan,exp,day,start,rb';
       let rows = await d1All('SELECT ' + COLS + ' FROM ledger WHERE pool=? AND uid=? ORDER BY day DESC, id DESC LIMIT 5',
                              [POOL_NAME, qf]);
@@ -6177,7 +6200,7 @@ async function handle(request) {
         rows = await d1All('SELECT ' + COLS + ' FROM ledger WHERE pool=? AND name=? ORDER BY day DESC, id DESC LIMIT 5',
                            [POOL_NAME, qf]);
       }
-      if (rows === null) return json({ ok: false, message: '数据库读不到，请稍后再试（不是没有原单）' }, 503);
+      if (rows === null) return json({ ok: false, message: '数据库读不到，请稍后再试（不是没有原单）' }, 503, CORSF);
       const uids = [...new Set(rows.map(r => String(r.uid || '')).filter(Boolean))];
       const alive = {};
       if (uids.length) {
@@ -6189,7 +6212,7 @@ async function handle(request) {
         uid: String(r.uid || ''), name: String(r.name || ''), plan: String(r.plan || ''),
         exp: String(r.exp || ''), day: String(r.day || ''), start: String(r.start || ''),
         rb: Number(r.rb) || 0, alive: !!alive[String(r.uid)],
-      })) });
+      })) }, 200, CORSF);
     }
     if (url.pathname === '/api/regtoken_list' && request.method === 'POST') {
       let b2;
@@ -6978,7 +7001,7 @@ async function handle(request) {
         // 删除后 mail_queue 里仍要给他发信，故豁免「必须在池」校验，email/name/agent/exp
         // 回退用队列行自带值；其余 kind 维持原护栏不动。
         if (!a && String(p.kind || '') !== 'relogin2') why = '账号已不在池里（被删/迁移）';
-        else if (!String(a.email || '').trim()) why = '未登记邮箱';
+        else if (!String((a ? a.email : p.email) || '').trim()) why = '未登记邮箱';
         else if (String(p.kind || '').indexOf('exp') === 0) {
           if (Number(a.pub) === 1) why = '已降级公益号（永久有效，不提醒）';
           else if (String(a.exp || '').slice(0, 10) !== String(p.ref || '')) why = 'exp 已变更（续费了），本轮作废';
@@ -7386,7 +7409,11 @@ async function handle(request) {
         POOL.get('PEER_URL').catch(() => null),
         buildPlan(date).catch(() => null),
         d1ok() ? d1All('SELECT pool,uid FROM runs WHERE day=?', [date]).catch(() => null) : Promise.resolve(null),
-        d1ok() ? d1All('SELECT pool,uid,name,reason,at FROM dead_log ORDER BY at DESC LIMIT 12').catch(() => null) : Promise.resolve(null),
+        // 2026-11-15：原来 LIMIT 12 太少（客服翻不到早上的删号）。改成【近 3 天】全部。
+        // dead_log 表很小（2026-11-15 实测约 260 行），带 at>= 过滤 + ORDER BY 的代价可忽略；
+        // at 是 bjStamp() 的【北京时间】字符串，cutoff 也要按 UTC+8 折算后取 'YYYY-MM-DD HH:MM:SS'。
+        d1ok() ? d1All('SELECT pool,uid,name,reason,at FROM dead_log WHERE at >= ? ORDER BY at DESC',
+                      [new Date(Date.now() + 8 * 3600e3 - 3 * 86400e3).toISOString().slice(0, 19).replace('T', ' ')]).catch(() => null) : Promise.resolve(null),
         d1ok() ? d1All("SELECT pool,uid,name,suspect_at,relogin_at FROM accounts WHERE suspect_at!='' ORDER BY suspect_at DESC").catch(() => null) : Promise.resolve(null),
         d1ok() ? d1All('SELECT pool,MAX(at) AS last FROM snapshots WHERE day=? GROUP BY pool', [date]).catch(() => null) : Promise.resolve(null),
         fetchActionsStatus(),
@@ -9321,6 +9348,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
     <button class="mini gray" id="btnCfg" style="display:none">客服名单</button>
     <button class="mini gray" id="btnDev" style="display:none" title="按客服电脑授权：未授权的机器码不能生成登记链接">设备授权</button>
     <button class="mini gray" id="btnReg" style="display:none" title="生成买家自助登记链接；续费/补登必须选原单，类型定在链接上">登记链接</button>
+    <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限可见）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应">历史登记</button>
     <button class="mini gray" id="btnOut">退出</button>
   </div>
   <div class="twrap"><table><thead><tr>
@@ -10345,7 +10373,8 @@ function renderRunbar(){
     // 2026-10-26：10-23 那批清理脚本把 name 写成「manual:<uid>」了，D1 已就地修正，
     // 这里再兜一层，避免老数据或别处再传脏值。
     function nmTxt(n){ return esc(String(n||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'')); }
-    D.slice(0,12).forEach(function(d){dh+='<tr><td>'+(d.pool==='hz'?'主群':'定制')+'</td><td class="num">'+esc(d.uid)+'</td><td>'+nmTxt(d.name)+'</td><td>'+rsTxt(d.reason)+'</td><td>'+ntTxt(d)+'</td><td class="num">'+esc((d.at||'').slice(5,16))+'</td></tr>';});
+    // 2026-11-15：删号列不再 slice(0,12) —— 服务端已按「近 3 天」过滤，全部展示；待复核仍最多 12 条
+    D.forEach(function(d){dh+='<tr><td>'+(d.pool==='hz'?'主群':'定制')+'</td><td class="num">'+esc(d.uid)+'</td><td>'+nmTxt(d.name)+'</td><td>'+rsTxt(d.reason)+'</td><td>'+ntTxt(d)+'</td><td class="num">'+esc((d.at||'').slice(5,16))+'</td></tr>';});
     S.slice(0,12).forEach(function(s){
       // 2026-11-04：已发过重登提醒的单独标出来 —— 这类号已摘出听众环、不再占应跑名额，
       // 状态是「等号主重新登记」，跟刚判出来还没通知的待复核不是一回事。
