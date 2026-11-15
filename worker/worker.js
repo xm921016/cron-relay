@@ -8070,7 +8070,7 @@ async function handle(request) {
         "SUM(CASE WHEN " + GIFT + " THEN 1 ELSE 0 END) giftCnt, " +
         "SUM(CASE WHEN rb=0 AND price IS NOT NULL THEN price ELSE 0 END) money, " +
         "SUM(CASE WHEN rb=0 AND price IS NULL AND NOT " + GIFT + " THEN 1 ELSE 0 END) unpriced";
-      const [byPlan, byAgent, byPool, bySrc, rows, cfgNow, byAgentAll, accRows, goneRows, deadRows] = await Promise.all([
+      const [byPlan, byAgent, byPool, bySrc, rows, cfgNow, byAgentAll, accRows, goneRows, deadRows, pubRows] = await Promise.all([
         d1All('SELECT plan, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY plan ORDER BY cnt DESC', params),
         d1All('SELECT agent, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY agent ORDER BY cnt DESC', params),
         d1All('SELECT pool, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY pool', params),
@@ -8082,7 +8082,8 @@ async function handle(request) {
         // 下拉框要用「这个人之外还有谁」，所以客服列表不带 agent 过滤
         d1All('SELECT agent, COUNT(*) cnt FROM ledger WHERE ' + WH + ' GROUP BY agent ORDER BY cnt DESC', paramsBase),
         // 号在不在：用来给明细打「号已删」，并统计对账差额（账本只增不改，删号不会抹掉成交）
-        d1All('SELECT uid FROM accounts' + (poolF ? ' WHERE pool=?' : ''), poolF ? [poolF] : []),
+        // 2026-11-15：加 pub —— 口径 1「付费期内手动转公益按退单」要靠它认出公益号。
+        d1All('SELECT uid, pub FROM accounts' + (poolF ? ' WHERE pool=?' : ''), poolF ? [poolF] : []),
         // 2026-11-13：号已删的单改成「逐单取出」，供下面按【删除原因】分流。
         // 为什么不再用原来的 4 个 SUM：11-13 起结算要区分「谁删的号」——
         //   手动删（manual）= 退单退钱；CK 失效自动判死（cookie_invalid）= 订单照常生效、继续算钱。
@@ -8101,15 +8102,27 @@ async function handle(request) {
         // 所以不设时间上限。dead_log.at 是北京时间字符串，与 ledger.day（北京日期）可直接比大小。
         d1All('SELECT pool,uid,reason,at FROM dead_log WHERE at>=? ORDER BY id ASC LIMIT 5000',
           [month + '-01']),
+        // 2026-11-15 口径 1：在池公益号涉及的本月成交单（逐单取出，用于判「付费期内手动转公益」）。
+        // JOIN 走 accounts 主键 (pool,uid)，行数 = 本月成交且现在 pub=1 的单（通常 0~几行），远离五万红线。
+        d1All('SELECT l.pool, l.uid, l.day, l.rb, l.price, l.name, l.exp, ' +
+          'CASE WHEN l.rb=0 AND l.price IS NOT NULL THEN 1 ELSE 0 END priced ' +
+          'FROM ledger l JOIN accounts a ON a.pool=l.pool AND a.uid=l.uid ' +
+          'WHERE ' + WL + ' AND a.pub=1', params),
       ]);
       // 2026-11-05 晚：账本读失败（D1 配额用尽 / 抖动）时不能一声不响地回一张残缺的结算表 ——
       // D1 在额度用尽时是**随机打单个查询**的（这次实测：byPlan 出来了 333 单，byPool 却失败，
       // 于是「成交单数」显示 0，看着像本月没成交）。只要有一路聚合没拿到就直接回 503。
-      if (!byPlan || !byAgent || !byPool || !bySrc || !rows || !goneRows || !deadRows) {
+      if (!byPlan || !byAgent || !byPool || !bySrc || !rows || !goneRows || !deadRows || !pubRows) {
         return json({ message: '账本读取失败：' + d1ErrHint() + '（不是本月没有成交，是数据库这次没读出来，请稍后重试）' }, 503, CORS);
       }
       const aliveSet = new Set();
-      for (const r of (accRows || [])) aliveSet.add(String(r.uid == null ? '' : r.uid));
+      // 2026-11-15：pubSet = 当前 pub=1 的号（口径 1 判「付费期内手动转公益」用）
+      const pubSet = new Set();
+      for (const r of (accRows || [])) {
+        const u = String(r.uid == null ? '' : r.uid);
+        aliveSet.add(u);
+        if (Number(r.pub) === 1) pubSet.add(u);
+      }
       const num = (x) => Number(x) || 0;
       const fix = (arr) => (arr || []).map(r => ({
         k: r.plan !== undefined ? r.plan : (r.agent !== undefined ? r.agent : r.pool),
@@ -8152,6 +8165,31 @@ async function handle(request) {
         }
         return best ? best.reason : '';
       };
+      /* 2026-11-15 口径 1（用户拍板）：付费期内被【手动】转公益的号 = 服务提前终止，按退单算。
+         判据（全部满足才扣，缺一不扣）：
+           ① 号还在池里且 pub=1 —— 不在池里的单走 dead_log 分流，跟这里无关；
+           ② 非补号、非赠号 —— 这两类本来就不算钱不算提成；
+           ③ dead_log 里该单登记日之后【没有】expired_pub 流水 —— 有流水 = 到期自动降公益
+             （11-05 起降级必写），服务期是客户自己用完的，订单照常生效，不扣；
+           ④ 这笔单的到期日还没到（exp > 今天北京时间）—— 服务确实没做完。
+         手动设公益不落 dead_log，只能靠「pub=1 + 无 expired_pub 流水 + exp 未到期」反推。
+         exp 缺失 / 格式不对 → 保守不扣（宁可不少算收入，不凭空判一笔退单）。 */
+      const pubKillOf = (r) => {
+        const u = String(r.uid == null ? '' : r.uid);
+        if (!aliveSet.has(u) || !pubSet.has(u)) return false;
+        if (num(r.rb) === 1) return false;
+        if (isGift(r.name)) return false;
+        const arr = deadMap[String(r.pool == null ? '' : r.pool) + '|' + u] || [];
+        const dd = String(r.day || '').slice(0, 10);
+        for (const x of arr) {
+          if (dd && x.at.slice(0, 10) < dd) continue;
+          if (x.reason === 'expired_pub') return false;   // 到期自动降公益 = 服务自然结束
+        }
+        const ex = String(r.exp || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(ex)) return false;
+        const today = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+        return ex > today;
+      };
       const outRows = (rows || []).map(r => {
         const al = aliveSet.has(String(r.uid == null ? '' : r.uid));
         return {
@@ -8162,6 +8200,7 @@ async function handle(request) {
           rb: num(r.rb), rbFrom: num(r.rb_from), remark: String(r.remark || ''), src: String(r.src || ''),
           gift: isGift(r.name) ? 1 : 0, alive: al ? 1 : 0,
           deadReason: al ? '' : deadReasonOf(r.pool, r.uid, r.day),
+          pubKill: al ? (pubKillOf(r) ? 1 : 0) : 0,
         };
       });
       // 逐单分流：用 goneRows（按单查出、没有 1200 截断）算钱，不用上面只有 1200 条的明细
@@ -8184,6 +8223,18 @@ async function handle(request) {
         }
       }
       t.goneMoney = Math.round(t.goneMoney * 100) / 100;
+      // 2026-11-15 口径 1：付费期内手动转公益的单（在池 pub=1、无 expired_pub 流水、exp 未到期）
+      // = 服务提前终止，按退单处理：扣收入、扣提成，与手动删退单分开单列展示。
+      let pubRefundCnt = 0, pubRefundMoney = 0, pubValidCnt = 0;
+      for (const r of (pubRows || [])) {
+        if (!pubKillOf(r)) continue;
+        pubRefundCnt++;
+        pubRefundMoney += (Number(r.priced) === 1) ? (Number(r.price) || 0) : 0;
+        pubValidCnt++;
+      }
+      t.pubRefund = pubRefundCnt;                                      // 公益·提前终止：付费期内手动转公益
+      t.pubRefundMoney = Math.round(pubRefundMoney * 100) / 100;
+      t.pubValid = pubValidCnt;
       t.aliveMoney = Math.round((t.money - t.goneMoney) * 100) / 100;   // 号还在池里的金额
       t.refund = refundCnt;                                            // 退单：只看手动删
       t.refundMoney = Math.round(refundMoney * 100) / 100;
@@ -8192,12 +8243,13 @@ async function handle(request) {
       t.killedMoney = Math.round(killedMoney * 100) / 100;
       t.unknownDead = unknownCnt;                                      // 号已删但查不到删除原因
       t.unknownMoney = Math.round(unknownMoney * 100) / 100;
-      // 实收 = 账面上已定价的单 − 手动删的退单（CK 判死的照收，不扣）
-      t.realMoney = Math.round((t.money - t.refundMoney) * 100) / 100;
+      // 实收 = 账面上已定价的单 − 手动删的退单 − 公益提前终止的退单（CK 判死的照收，不扣）
+      t.realMoney = Math.round((t.money - t.refundMoney - t.pubRefundMoney) * 100) / 100;
       t.goneValid = refundValid;
       // 2026-11-13：有效单（算提成）= 总单 − 补号单 − 赠号/手动号 − 【手动删的】退单。
-      // CK 失效判死的单不再扣：订单生效，客服该拿的提成照给。
-      t.valid = Math.max(0, t.cnt - t.rbCnt - t.giftCnt - t.goneValid);
+      // 2026-11-15 口径 1 再减：付费期内手动转公益的退单（到期自动降公益的不扣）。
+      // CK 失效判死的单不扣：订单生效，客服该拿的提成照给。
+      t.valid = Math.max(0, t.cnt - t.rbCnt - t.giftCnt - t.goneValid - t.pubValid);
       /* 2026-11-10：按登记类型汇总，回答「这个月开了多少新单 / 收了多少续费 / 免费补了多少号」。
          src 取值：new=新登记 / renew=续费 / fix=补号（rb=1）。
          历史数据 src 全是 'reg'（旧代码只写这一个值，分不出新/续），一律归到「新登记」，
@@ -10572,10 +10624,11 @@ function lgRender(o){
   // 否则「实际收入」跟「成交单数 × 单价」对不上时没人知道差额去哪了。
   // 口径顺序按「先看钱、再看提成、最后看构成」排：收入 → 有效单 → 成交 → 退单 → 判死 → 未知 → 补号/赠号/待补价。
   var h='<div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-bottom:12px">'
-    +lgStat('实际收入（元）',lgMoney(t.realMoney),false,'只扣手动删')
+    +lgStat('实际收入（元）',lgMoney(t.realMoney),false,'扣退单+公益终止')
     +lgStat('有效单（算提成）',(t.valid||0),false,'判死不扣')
     +lgStat('成交单数',(t.cnt||0),false,(t.gone||0)>0?('含已删号 '+t.gone+' 单'):'全部有效')
     +lgStat('退单·手动删',(t.refund||0),(t.refund||0)>0,lgMoney(t.refundMoney)+' 元')
+    +lgStat('公益·提前终止',(t.pubRefund||0),(t.pubRefund||0)>0,lgMoney(t.pubRefundMoney)+' 元')
     +lgStat('判死·仍计费',(t.killed||0),false,lgMoney(t.killedMoney)+' 元')
     +lgStat('删除原因未知',(t.unknownDead||0),(t.unknownDead||0)>0,lgMoney(t.unknownMoney)+' 元')
     +lgStat('补号单',(t.rbCnt||0),false,'不算钱')
@@ -10608,8 +10661,15 @@ function lgRender(o){
       +'<span style="color:#a32d2d">■ 退单</span>（控制台<b>手动删</b>，'+(t.refund||0)+' 单 '+lgMoney(t.refundMoney)+' 元）：客户钱退了、服务也没做完，<b>不计收入、不计提成</b>；<br>'
       +'<span style="color:#5f5e5a">■ 判死·仍计费</span>（<b>CK 失效自动判死</b>，'+(t.killed||0)+' 单 '+lgMoney(t.killedMoney)+' 元）：钱已经收了、没有任何退款动作，订单<b>照常生效</b>，继续算收入、继续给客服算提成。'
       +((t.unknownDead||0)>0?('<br><span style="color:#b06a00">■ 删除原因未知</span>（'+(t.unknownDead||0)+' 单 '+lgMoney(t.unknownMoney)+' 元）：号已不在池里，但删号流水里查不到记录（该表 10-22 才开始记）。<b>按订单生效算钱</b>，建议到「删号记录」人工核对。'):'')
-      +'<br>成交 '+t.cnt+' 单 / 账面 '+lgMoney(t.money)+' 元，扣掉退单后：实际收入 <b>'+lgMoney(t.realMoney)+' 元</b>、有效单 <b>'+(t.valid||0)+'</b> 单。</p>';
+      +'</p>';
   }
+  // 2026-11-15 口径 1：付费期内被手动转公益的单，按退单算（在池 pub=1、无到期降级流水、套餐未到期）
+  if((t.pubRefund||0)>0){
+    h+='<p style="font-size:11.5px;color:#a32d2d;margin:0 0 8px;line-height:1.7">'
+      +'<span style="color:#a32d2d">■ 公益·提前终止</span>（'+(t.pubRefund||0)+' 单 '+lgMoney(t.pubRefundMoney)+' 元）：号还在池里但已被<b>手动转成公益号</b>（删号流水里没有「到期降级」记录），且这单的套餐<b>还没到期</b> —— 服务提前终止，按退单算：<b>不计收入、不计提成</b>。<br>'
+      +'<span style="color:#777">到期自动降公益的号不在此列：那是客户把买的服务期用完了，订单照常生效、照算提成。</span></p>';
+  }
+  h+='<p style="font-size:11.5px;color:#777;margin:0 0 8px">成交 '+t.cnt+' 单 / 账面 '+lgMoney(t.money)+' 元，扣掉退单'+((t.pubRefund||0)>0?'与公益提前终止':'')+'后：实际收入 <b>'+lgMoney(t.realMoney)+' 元</b>、有效单 <b>'+(t.valid||0)+'</b> 单。</p>';
   // 2026-11-05：三张分组表改并排（原来一张一行，竖向占掉大半屏，害得整个弹窗要滚）。
   // 并排后高度只取决于最高的那张，弹窗外层不再出滚动条，只有下面的成交明细自己滚。
   h+='<div style="display:flex;gap:10px;align-items:flex-start;margin-top:10px">'
@@ -10640,12 +10700,12 @@ function lgRender(o){
       +'<td style="'+MD+'">'+lgKind(r)+'</td>'
       +'<td style="'+MD+'">'+esc(r.day)+'</td>'
       +'<td style="'+MD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
-      +'<td style="'+MD+';max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.name||r.uid)+'">'+esc(String(r.name||r.uid||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))
-        +(r.alive?'':(r.deadReason==='manual'
+      +'<td style="'+MD+';max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.name||r.uid)+'">'      +esc(String(r.name||r.uid||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))
+        +(r.pubKill?' <span class="badge b-red" title="号仍在池里但已被手动转成公益号，且本单套餐未到期：按退单算，不计收入、不计提成">公益·退单</span>':(r.alive?'':(r.deadReason==='manual'
           ?' <span class="badge b-red" title="控制台手动删号：判定退单，不计收入、不计提成">退单</span>'
           :(r.deadReason==='cookie_invalid'
             ?' <span class="badge b-gray" title="CK 失效被自动判死：钱已收、没有退款动作，订单照常生效，照算收入与提成">判死·计费</span>'
-            :' <span class="badge b-yellow" title="号已不在池里，但删号流水查不到记录（该表 2026-10-22 才开始记）：默认按订单生效算钱，建议到「删号记录」人工核对">删除·未知</span>')))
+            :' <span class="badge b-yellow" title="号已不在池里，但删号流水查不到记录（该表 2026-10-22 才开始记）：默认按订单生效算钱，建议到「删号记录」人工核对">删除·未知</span>'))))
         +(r.gift?' <span class="badge b-yellow" title="公益赠号或手动加的号，不是客户买的，不算提成">赠号</span>':'')
       +'</td>'
       +'<td style="'+MD+'">'+esc(r.agent||'—')+'</td>'
@@ -10691,7 +10751,7 @@ $('lgCsv').onclick=function(){
   for(var i=0;i<LGDATA.rows.length;i++){var r=LGDATA.rows[i];
     out.push([r.day,r.pool==='hz'?'主群':'定制群',String(r.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'),r.uid,r.agent,r.plan,
       r.rb?'0':(r.gift?'赠号':(r.price==null?'':r.price)),r.rb?'补号':'',
-      r.alive?'':(r.deadReason==='manual'?'退单':(r.deadReason==='cookie_invalid'?'判死·仍计费':'删除·未知')),
+      r.pubKill?'公益·退单':(r.alive?'':(r.deadReason==='manual'?'退单':(r.deadReason==='cookie_invalid'?'判死·仍计费':'删除·未知'))),
       r.remark]);}
   var csv='\\ufeff'+out.map(function(a){return a.map(function(v){return '"'+String(v==null?'':v).replace(/"/g,'""')+'"';}).join(',');}).join('\\r\\n');
   var a=document.createElement('a');
