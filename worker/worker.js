@@ -9352,6 +9352,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini gray" id="btnDev" style="display:none" title="按客服电脑授权：未授权的机器码不能生成登记链接">设备授权</button>
     <button class="mini gray" id="btnReg" style="display:none" title="生成买家自助登记链接；续费/补登必须选原单，类型定在链接上">登记链接</button>
     <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限可见）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应">历史登记</button>
+    <button class="mini gray" id="btnDead" title="一键跳到底部的删号记录 / 待复核区并展开（不用再滚过整个号池列表）">删号记录</button>
     <button class="mini gray" id="btnOut">退出</button>
   </div>
   <div class="twrap"><table><thead><tr>
@@ -10834,6 +10835,14 @@ $('btnRescue').onclick=function(){
   $('rcm').textContent='';$('rcBody').innerHTML='';
   $('rcModal').hidden=false;
   rcRescue();   // 打开先看待挽回清单（最常用）；上方搜索框随时可切「查登记记录」
+};
+/* 2026-11-15：一键跳到删号记录区 —— 号池几百行，滚到底太累（用户反馈）。
+   展开并平滑滚过去；数据还没回来（hidden）也先摘掉 hidden，loadData 回填列表。 */
+$('btnDead').onclick=function(){
+  var d=$('deadBox');
+  if(!d)return;
+  d.hidden=false;d.open=true;
+  try{d.scrollIntoView({behavior:'smooth',block:'start'});}catch(e){d.scrollIntoView();}
 };
 
 // ===== 2026-10-27：客服名单 / 套餐档位维护（只读口令看不到这个按钮，服务端也会拦）=====
