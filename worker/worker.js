@@ -9296,6 +9296,16 @@ body:has(.modal:not([hidden])){overflow:hidden}
 .deadbox{margin:10px 0 0;font-size:12px;color:#555}
 .deadbox summary{cursor:pointer;color:#3b6d11;padding:4px 0}
 .deadbox table{margin-top:6px;border:1px solid #eee;border-radius:8px}
+/* ===== 2026-11-15 方案④手机整页重做：桌面端只新增下面这几个「隐藏/不可达」件，渲染零变化 =====
+   infoBtn（卡片上的详情按钮）只在 <=860px 显示；筛选面板/工具抽屉/遮罩/工具按钮是手机专属容器；
+   #infoBody 的 kv 样式放基础层，保证任何环境打开详情弹窗都可读。 */
+.infoBtn{display:none}
+.mdrawer,.mmask,.mpanel,.mOnly{display:none}
+#infoBody .dsec{background:#f6f8fb;border-radius:10px;padding:9px 12px;margin-bottom:8px}
+#infoBody .dsec i{font-style:normal;color:#9aa5b1;font-size:11px;display:block;margin-bottom:3px}
+#infoBody .kv{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;padding:4px 0;border-bottom:1px dashed #eef1f5}
+#infoBody .kv i{flex:0 0 auto;margin-bottom:0}
+#infoBody .kv b{font-weight:600;text-align:right;word-break:break-all}
 /* 手机端（<=860px）把 17 列表格改成卡片流。纯 CSS、零 JS 改动 —— 判定口径与桌面端完全同一份，
    只是换了个呈现方式；桌面端（>860px）一行都不受影响。列名读 td 的 data-l（见 render），
    这里只排显示顺序，顺序同 thead：
@@ -9328,14 +9338,51 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap{border:0;border-radius:0;background:transparent;overflow-y:auto}
   .twrap table,.twrap tbody{display:block}
   .twrap thead{display:none}
-  /* 2026-11-15 手机卡片 v4 = 预览方案 A-1「紧凑流线」（用户在 A/A-1/A-2/A-3 预览里选定）：
-     ① 头部一行 = 池badge + 账号名(粗、超长省略) + 有效期(右侧灰pill带标签)；
-     ② 播放 KPI 一排 5 格（昨日650/今日650/较昨日/近30日播放/笔记任务）灰底圆角居中，
-        今日650格内附微型进度条（.pbar6，桌面 display:none）；
-     ③ 其余字段（客服/UID/歌曲/音乐人/时长/邮箱/套餐/入池/备注）按「标签：值」小字两列流，
-        歌曲独占整行；nv 空值格隐藏，hidden 后剩余格由 grid dense 回填；
-     ④ 底部一行 = 标记(badge流) 左 + 编辑按钮 右，同一行省高度；
-     序号隐藏；桌面表格不受影响（全部规则在媒体查询内）。 */
+  /* ===== 2026-11-15 方案④「单页 + 详情弹窗」整页重做（用户在④预览拍板，替代 v4/A-1）=====
+     ① 不加分页导航：APK 外层已有四页签，页面内再嵌导航会双重底栏（16:45 分析结论）；
+     ② 常用信息上卡片，全字段进卡片「详情」弹窗（infoBtn，桌面 CSS 隐藏）；
+     ③ 低频工具按钮由 JS 原样搬进右上「工具」抽屉、筛选控件搬进「筛选」面板
+        （搬的是同一批 DOM 节点，事件与 applyRole 权限显隐全部照旧生效，桌面可逆搬回）；
+     ④ 统计卡/套餐汇总/运行状态压成横滑 chips；
+     ⑤ 有效期 pill 占 2 列，修复 v4 的「有效期：202…」截断。
+     桌面端（>860px）零影响。 */
+  /* 顶部三块压成横滑条 */
+  .stats{display:flex;flex-wrap:nowrap;overflow-x:auto;gap:6px;margin-bottom:10px;padding-bottom:2px}
+  .stat{flex:0 0 auto;min-width:66px;max-width:112px}
+  .plans{flex-wrap:nowrap;overflow-x:auto;gap:6px}
+  .pl{flex:0 0 auto}
+  .runbar{flex-wrap:nowrap;overflow-x:auto;gap:6px}
+  .rb{min-width:0;flex:0 0 auto;max-width:86%}
+  /* 手机专属件：筛选面板（顶部下拉）/ 工具抽屉（右侧）/ 遮罩 */
+  .mpanel{position:fixed;left:0;right:0;top:0;background:#fff;z-index:60;box-shadow:0 6px 24px rgba(0,0,0,.22);border-radius:0 0 14px 14px;padding:12px;display:none}
+  .mpanel.on{display:block}
+  .mph{font-size:14px;font-weight:700;color:#17324f;display:flex;align-items:center;margin-bottom:4px}
+  .mph span{margin-left:auto;color:#999;cursor:pointer;padding:2px 6px}
+  .mpanel select,.mpanel input{width:100%}
+  .mpanel label{font-size:11px;color:#888;display:block;margin:8px 0 3px}
+  .dr{width:100%;justify-content:space-between;padding:3px 5px}
+  .dr input{flex:1;min-width:0;padding:7px 4px;font-size:12px}
+  .dr .dn{flex:0 0 auto}
+  .mmask{position:fixed;inset:0;background:rgba(15,25,40,.35);z-index:55;display:none}
+  .mmask.on{display:block}
+  .mdrawer{position:fixed;top:0;right:0;bottom:0;width:78%;max-width:330px;background:#fff;z-index:61;box-shadow:-8px 0 24px rgba(0,0,0,.25);transform:translateX(105%);transition:transform .2s;display:flex;flex-direction:column}
+  .mdrawer.on{transform:translateX(0)}
+  .mdh{padding:14px;font-size:15px;font-weight:700;color:#17324f;display:flex;align-items:center}
+  .mdh span{margin-left:auto;color:#999;cursor:pointer;padding:2px 6px}
+  .mdbody{flex:1;overflow-y:auto;padding:0 14px 16px}
+  .mdbody h5{font-size:10.5px;color:#9aa5b1;margin:10px 0 6px;font-weight:600}
+  .mdbody .mini{display:block;width:100%;margin-bottom:8px;padding:11px;font-size:13px;text-align:left}
+  /* 工具栏：池tab 一行 + 搜索/筛选/工具 一行（低频件被 JS 搬走，只剩这些） */
+  .tools{gap:6px;margin-bottom:8px}
+  .tools input,.tools select,.tools button,.mini{padding:8px 10px;font-size:12.5px}
+  .tools .tab{flex:1 1 29%;text-align:center;padding:8px 0}
+  .mOnly{display:inline-block}
+  #q{flex:1;min-width:120px}
+  /* 列表框保持锁高内滚（与电脑版一致，10-26 压底事故与 11-15 恢复记录见上） */
+  .twrap{border:0;border-radius:0;background:transparent;overflow-y:auto}
+  .twrap table,.twrap tbody{display:block}
+  .twrap thead{display:none}
+  /* 卡片：沿用 v4 的 6 列 dense grid 结构，改动=①有效期 pill 占 2 列修截断；②操作列加「详情」 */
   .twrap tr{display:grid;grid-template-columns:repeat(6,1fr);grid-auto-flow:dense;gap:4px 8px;
     background:#fff;border:1px solid #e8eaee;border-radius:13px;padding:10px 12px 9px;margin:0 0 9px}
   .twrap td{display:block;min-width:0;border:0;padding:1px 0;font-size:11.5px;line-height:1.5;color:#33506e;white-space:normal}
@@ -9344,14 +9391,14 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap td .snap-at{font-size:10px;color:#9aa5b1}
   .twrap td.nv{display:none}
   .twrap td:nth-child(1){display:none}
-  /* 头部行 */
+  /* 头部行：池badge + 账号名(3列) + 有效期pill(2列，不再挤在1列里截断) */
   .twrap td:nth-child(2){grid-column:1/2;grid-row:1;align-self:center}
-  .twrap td:nth-child(3){grid-column:2/6;grid-row:1;font-size:15px;font-weight:700;color:#17324f;
+  .twrap td:nth-child(3){grid-column:2/5;grid-row:1;font-size:15px;font-weight:700;color:#17324f;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;align-self:center;padding:2px 0}
-  .twrap td:nth-child(16){grid-column:6/7;grid-row:1;justify-self:end;align-self:center;display:flex;align-items:center;
-    background:#f0f2f5;border-radius:20px;padding:3px 8px;font-size:10.5px;font-weight:700;color:#33506e;white-space:nowrap;max-width:100%}
-  .twrap td:nth-child(16)::before{font-size:9px;font-weight:400;margin-right:3px}
-  /* KPI 行：5 格灰底 */
+  .twrap td:nth-child(16){grid-column:5/7;grid-row:1;justify-self:end;align-self:center;display:flex;align-items:center;
+    background:#f0f2f5;border-radius:20px;padding:3px 8px;font-size:10.5px;font-weight:700;color:#33506e;white-space:nowrap;max-width:100%;overflow:hidden}
+  .twrap td:nth-child(16)::before{font-size:9px;font-weight:400;margin-right:3px;flex:0 0 auto}
+  /* KPI 行：5 格灰底（昨日/今日/较昨日/近30日/笔记），今日650格带微型进度条 */
   .twrap td:nth-child(10),.twrap td:nth-child(11),.twrap td:nth-child(12),.twrap td:nth-child(13),.twrap td:nth-child(14){
     display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
     background:#f6f8fb;border-radius:8px;padding:5px 2px 4px;text-align:center;font-weight:700;color:#17324f}
@@ -9374,10 +9421,13 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap td:nth-child(17){grid-column:4/7}
   .twrap td:nth-child(15){grid-column:1/4}
   .twrap td:nth-child(18){grid-column:4/7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  /* 底部：标记 左 + 操作 右 同一行 */
+  /* 底部：标记 左 + 操作(详情/编辑) 右 同一行 */
   .twrap td:nth-child(19){grid-column:1/4;display:flex;flex-wrap:wrap;gap:3px;align-items:center;padding-top:6px}
   .twrap td:nth-child(20){grid-column:4/7;display:flex;gap:5px;align-items:center;padding-top:6px}
-  .twrap td:nth-child(20) button{flex:1;padding:6px 0;font-size:11.5px;text-align:center;border-radius:8px}
+  .twrap td:nth-child(20) button{flex:1;padding:7px 0;font-size:11.5px;text-align:center;border-radius:8px}
+  .twrap td:nth-child(20) .infoBtn{flex:0 0 34%;background:#255ea6;color:#fff;border-color:#255ea6}
+  /* 「数据口径」在手机端被 JS 包进折叠 details（kjWrap），给个跟 deadbox 一致的观感 */
+  .kjbox{font-size:11.5px;color:#666;line-height:1.7}
   /* 「删号记录」6 列表 / 「标记对照表」3 列表，在 360px 下每列只剩几十 px，会被挤成一字一行。
      手机端改成一条一条的块：删号记录 → 首行 池+UID+账号，下面 原因/通知/时间 各占一行带标签；
      对照表 → 标记一行、意思一行、要怎么处理一行（前缀「意思｜」「处理｜」代替表头）。桌面端不受影响。 */
@@ -9423,6 +9473,9 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <span class="dr" id="dr" title="入池日期范围：只看这段时间登记进池的号。只填一端也行（只填左边=这天及以后，只填右边=这天及以前），两边都空=全部。清空点右边的 ×"><input type="date" id="date" title="入池起始日（含）"><em>~</em><input type="date" id="dateTo" title="入池结束日（含）"><i class="dn" id="dn"></i><span class="dx" id="dClear" title="清除入池日期范围">×</span></span>
     <input id="q" placeholder="搜索：账号 / 邮箱 / UID / 歌曲ID / 客服">
     <select id="sort"><option value="default">排序：默认</option><option value="delta">排序：日涨幅↓</option><option value="rate">排序：今日进度↓</option></select>
+    <!-- 2026-11-15 方案④：手机专属入口（桌面 .mOnly 隐藏）。筛选面板/工具抽屉里的控件由 JS 从本栏搬过去，事件不变 -->
+    <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期/排序）">筛选</button>
+    <button class="mini mOnly" id="btnMore" title="工具箱（导出CSV/月度结算/客服名单/设备授权/登记链接/历史登记/退出）">工具</button>
     <button class="mini" id="btnCsv">导出CSV</button>
     <button class="mini" id="btnRefresh">刷新</button>
     <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成">月度结算</button>
@@ -9432,6 +9485,12 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限可见）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应">历史登记</button>
     <button class="mini gray" id="btnOut">退出</button>
   </div>
+  <!-- ===== 2026-11-15 方案④：手机端筛选面板 / 遮罩 / 工具抽屉（桌面 display:none）=====
+       控件不是复制是搬运：JS 把 #fagent/#fplan/#dr/#sort 搬进面板、七个低频按钮搬进抽屉，
+       同一批 DOM 节点，onclick/addEventListener 与 applyRole 的显隐全部照旧生效；>860px 原样搬回。 -->
+  <div id="filterPanel" class="mpanel"><div class="mph">筛选 <span id="fpClose">✕</span></div><div id="fpSlot"></div></div>
+  <div id="mMask" class="mmask"></div>
+  <div id="toolDrawer" class="mdrawer"><div class="mdh">工具箱 <span id="tdClose">✕</span></div><div class="mdbody" id="tdSlot"></div></div>
   <div class="twrap"><table><thead><tr>
     <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人" class="thin">邮箱</th><th class="thin">绑定歌曲</th><th title="该号自己的音乐人昵称（acc_meta 元数据回填；没同步到显示 —）。限宽约 5 个字，超长截断成 …，鼠标悬停看全名。2026-11-11 起不再显示歌的歌手列表与 ✓/✗（共创人太多把行撑太高），绑错歌判定走标记列" class="thin">音乐人</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="笔记任务（发布图文笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">笔记<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成">备注</th><th>标记</th><th>操作</th>
   </tr></thead><tbody id="tb"></tbody></table></div>
@@ -9486,7 +9545,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <br>⑤ <b>「播放补了但总量没涨」看「净增≤0」</b>：近30日播放量是 30 天滚动窗口，今天补的播放会被 30 天前的老播放到期退出抵掉，看起来总量持平甚至略降，但播放确实补进去了。偶发一两天正常；连续 3 天以上净增≤0 才说明补的量追不上退的量，要加每号播放次数或换更热的歌。
     <br><b>所以判断号有没有问题，看「今日零增长 / 净增≤0」连续几天 + 「近30日播放量」在涨还是在跌</b>：播放量在跌且 650 也不动 = 今天补的播放被 30 天前老量退出抵消（「净增≤0」，偶发正常）；播放量在涨但 650 一直不动 = 播放被判无效（「650未结算」，连续 3 天以上才查）；650 是 0% 的先把「实时复核」结果看完再动手。
   </div></details>
-  <p style="font-size:12px;color:#888;margin:10px 0 0">数据口径：<b>650进度</b>=音乐人后台 650 任务完成度（近30日滚动，会回吐，100%=达标）；<b>近30日播放量</b>=工作台播放次数（≠有效播放，≠650进度；30 天滚动，今天补的量可能被 30 天前的老量退出抵掉 → 标「净增≤0」）；<b>650 实时复核</b>=对「快照 0% 但近30日播放≥650」的号直接查一次工作台当前进度（KV 缓存 30 分钟，不写回 rate、不动任何其它列）：实时有进度标灰「实时已恢复」，实时仍 0% 才继续标「有播放·650为0」；<b>较昨日</b>=今天快照-昨天快照，前一日无快照显示 —（数据断层，非故障；<b>今晚听歌</b>=按当前号池回放的今晚计划（每号本群歌单首数，已配平；加速档每天每首歌要几个听众，被稀释时标红）；顶部每个统计名的用词与标记列完全一致，搜索框直接搜那个词就能筛出对应行）；昨日≥80% 今日 0% 且播放量没塌的显示为灰色「周期归零」= 650 换新周期不是掉量（已从「今日下跌」剔除）；<b>笔记任务</b>=与 650 无关的同组小任务（发布图文笔记，按「已发x/4」显示：30 天内发布图文笔记天数≥4，4/4 即完成），显示 — 表示只有 650 一个任务；<b>时长</b>=登记歌曲长度（红=短歌&lt;2:12、黄=长歌&gt;5:36，仅提示，10-22 修完后都能正常计入）；<b>今日进度下的小字</b>=该行快照采集时间（北京时间；凌晨轮次边跑边采，不代表当天最终值，11:40 主采后的数才准）；各标记含义见上方「标记看不懂」对照表。<b>运行状态横条</b>：作业=两仓库最近一次定时轮次（GitHub API，5 分钟缓存）；应跑/实跑=按当前号池对所选日期回放的轮转计划与 runs 表核对（历史日期为近似值）；快照更新=该日快照最后写入时间（北京时间）；今日删号/待复核来自 D1。</p>
+  <p id="kjP" style="font-size:12px;color:#888;margin:10px 0 0">数据口径：<b>650进度</b>=音乐人后台 650 任务完成度（近30日滚动，会回吐，100%=达标）；<b>近30日播放量</b>=工作台播放次数（≠有效播放，≠650进度；30 天滚动，今天补的量可能被 30 天前的老量退出抵掉 → 标「净增≤0」）；<b>650 实时复核</b>=对「快照 0% 但近30日播放≥650」的号直接查一次工作台当前进度（KV 缓存 30 分钟，不写回 rate、不动任何其它列）：实时有进度标灰「实时已恢复」，实时仍 0% 才继续标「有播放·650为0」；<b>较昨日</b>=今天快照-昨天快照，前一日无快照显示 —（数据断层，非故障；<b>今晚听歌</b>=按当前号池回放的今晚计划（每号本群歌单首数，已配平；加速档每天每首歌要几个听众，被稀释时标红）；顶部每个统计名的用词与标记列完全一致，搜索框直接搜那个词就能筛出对应行）；昨日≥80% 今日 0% 且播放量没塌的显示为灰色「周期归零」= 650 换新周期不是掉量（已从「今日下跌」剔除）；<b>笔记任务</b>=与 650 无关的同组小任务（发布图文笔记，按「已发x/4」显示：30 天内发布图文笔记天数≥4，4/4 即完成），显示 — 表示只有 650 一个任务；<b>时长</b>=登记歌曲长度（红=短歌&lt;2:12、黄=长歌&gt;5:36，仅提示，10-22 修完后都能正常计入）；<b>今日进度下的小字</b>=该行快照采集时间（北京时间；凌晨轮次边跑边采，不代表当天最终值，11:40 主采后的数才准）；各标记含义见上方「标记看不懂」对照表。<b>运行状态横条</b>：作业=两仓库最近一次定时轮次（GitHub API，5 分钟缓存）；应跑/实跑=按当前号池对所选日期回放的轮转计划与 runs 表核对（历史日期为近似值）；快照更新=该日快照最后写入时间（北京时间）；今日删号/待复核来自 D1。</p>
 </div>
 <div class="modal" id="modal" hidden><div class="mbox">
   <h3 id="mTitle">编辑账号</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="mSub"></p>
@@ -9637,6 +9696,13 @@ body:has(.modal:not([hidden])){overflow:hidden}
   <div id="rcBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto"></div>
   <div class="row2"><button class="gray" id="rcClose">关闭</button></div>
   <div class="msg" id="rcm"></div>
+</div></div>
+<!-- ===== 2026-11-15 方案④：账号详情弹窗（手机卡片上的「详情」按钮；桌面 infoBtn 隐藏不可达）=====
+     只读展示该行全部字段（数据源 render 时的 window.ROWS[i]），满权限时给「编辑」按钮走原 openEdit。 -->
+<div class="modal" id="infoModal" hidden><div class="mbox" id="infoBox">
+  <h3 id="infoTitle">账号详情</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="infoSub"></p>
+  <div id="infoBody" style="margin-top:10px"></div>
+  <div class="row2"><button class="gray" id="infoClose">关闭</button></div>
 </div></div>
 <script>
 var TOKEN=null, DATA=null, POOLF='all';
@@ -10277,6 +10343,9 @@ function render(){
     var opCell=(ROLE==='full')
       ? '<button class="mini" style="padding:4px 10px;font-size:12px" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'">编辑</button>'
       : '<span style="color:#c9ced6;font-size:12px">只读</span>';
+    // 2026-11-15 方案④：卡片加「详情」按钮（手机端显示；桌面 .infoBtn display:none，渲染零变化）。
+    // 只读弹窗展示本行全部字段，data-info=行号直接索引 window.ROWS；编辑仍走原 openEdit。
+    opCell='<button class="mini infoBtn" data-info="'+i+'" title="查看该号全部字段">详情</button>'+opCell;
     // 2026-11-05：备注列 + 补号标签。
     // 「补」的意义在结账时才体现：这行是客户掉线后免费补的号，钱不算、客服也不提成。
     var noteCell='';
@@ -10306,6 +10375,7 @@ function render(){
       +'<td>'+opCell+'</td></tr>';
   });
   $('tb').innerHTML=h||'<tr><td colspan="20" style="text-align:center;color:#999;padding:20px">没有匹配的账号</td></tr>';
+  window.ROWS=rows;   // 2026-11-15 方案④：详情弹窗数据源（详情按钮 data-info=i 直接索引）
 }
 // 点顶部的套餐卡片 = 直接按这个套餐筛选（再点一次取消）
 function pickPlan(label){
@@ -10538,12 +10608,61 @@ $('rbFind').onclick=function(){
     }
   }).catch(function(){$('rbList').innerHTML='<span style="color:#a32d2d">网络错误</span>';});
 };
-// 事件委托：表格内点「编辑」按钮（data-pool 属性路由到 openEdit），不受行重绘影响
+// 事件委托：表格内点「详情」/「编辑」按钮（data-info→openInfo，data-pool→openEdit），不受行重绘影响
 $('tb').addEventListener('click',function(ev){
   var b=ev.target;
-  while(b&&b!==this&&!(b.getAttribute&&b.getAttribute('data-pool')))b=b.parentNode;
-  if(b&&b!==this&&b.getAttribute)openEdit(b.getAttribute('data-pool'),b.getAttribute('data-uid')||'',b.getAttribute('data-name')||'');
+  while(b&&b!==this&&!(b.getAttribute&&(b.getAttribute('data-info')!=null||b.getAttribute('data-pool'))))b=b.parentNode;
+  if(!b||b===this||!b.getAttribute)return;
+  if(b.getAttribute('data-info')!=null){openInfo(parseInt(b.getAttribute('data-info'),10)||0);return;}
+  openEdit(b.getAttribute('data-pool'),b.getAttribute('data-uid')||'',b.getAttribute('data-name')||'');
 });
+// ===== 2026-11-15 方案④：账号详情弹窗（手机卡片「详情」按钮）=====
+// 数据源 window.ROWS[i]（render 时存的当前筛选+排序后的行），只读展示全部字段；
+// 满权限给「编辑」按钮 → 关闭本弹窗走原 openEdit（编辑/删号/补号逻辑一个字没动）。
+function openInfo(i){
+  var r=(window.ROWS||[])[i];
+  if(!r)return;
+  var e=r.e,a=r.a,p=r.p;
+  function kv(k,v){return '<div class="kv"><i>'+k+'</i><b>'+v+'</b></div>';}
+  var dur=(DATA.durs||{})[r.pool+'|'+e.uid]||(DATA.durs||{})[e.uid]||((a&&a.dur)||0);
+  var durTxt=dur>0?(Math.floor(dur/60)+':'+('0'+(dur%60)).slice(-2)):'—';
+  var rateTxt=(a&&a.rate!=null)?(a.rate+'%'):'—';
+  var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
+  var ai=r.ai||artistInfo(e);
+  var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
+  var bodyH='<div class="dsec">'
+    +kv('池',r.pool==='hz'?'主群':'定制群')
+    +kv('账号',esc(String(e.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·')))
+    +kv('UID',esc(e.uid))
+    +kv('客服',e.agent?esc(e.agent):'—')
+    +kv('邮箱',e.email?esc(e.email):'未绑')
+    +kv('入池',esc(String(e.added||'').slice(0,10)))
+    +kv('有效期',esc(e.exp||'永久'))
+    +kv('套餐',e.plan?esc(e.plan):'未标注')
+    +'</div>'
+    +'<div class="dsec">'
+    +kv('昨日650',(p&&p.rate!=null)?(p.rate+'%'):'—')
+    +kv('今日650',rateTxt+(a&&a.at?('（采于 '+bjTime(a.at)+'）'):''))
+    +kv('较昨日',dTxt)
+    +kv('近30日播放',(a&&a.rpc30!=null)?String(a.rpc30):'—')
+    +kv('笔记任务',otherMis(a))
+    +kv('歌曲',songTxt)
+    +kv('音乐人',ai.mus?esc(ai.mus):'—')
+    +kv('时长',durTxt)
+    +'</div>'
+    +(e.note?('<div class="dsec">'+kv('备注',esc(e.note))+'</div>'):'')
+    +'<div class="dsec"><i>标记</i>'+(r.markHtml||'<span style="color:#bbb">正常</span>')+'</div>';
+  if(ROLE==='full')bodyH+='<div class="row2"><button id="infoEdit">编辑</button><button class="gray" id="infoClose2">关闭</button></div>';
+  $('infoTitle').textContent='账号详情';
+  $('infoSub').textContent='该号全部字段；完整标记说明见「标记对照表」';
+  $('infoBody').innerHTML=bodyH;
+  $('infoModal').hidden=false;
+  var eb=$('infoEdit');
+  if(eb)eb.onclick=function(){$('infoModal').hidden=true;openEdit(r.pool,e.uid,e.name);};
+  var cb=$('infoClose2');
+  if(cb)cb.onclick=function(){$('infoModal').hidden=true;};
+}
+$('infoClose').onclick=function(){$('infoModal').hidden=true;};
 function doEdit(pool,e,action){
   var t=JSON.parse(TOKEN||'{}');
   var body={user:t.user,pass:t.pass,pool:pool,action:action,uid:e.uid,name:e.name};
@@ -11308,6 +11427,52 @@ $('btnCsv').onclick=function(){
   a.download='650控制台_'+(DATA?DATA.date:todayBJ())+'.csv';
   document.body.appendChild(a);a.click();document.body.removeChild(a);
 };
+/* ===== 2026-11-15 方案④：手机端布局同步（节点搬运，桌面端零影响、可逆、幂等）=====
+   ≤860px：把筛选控件(#fagent/#fplan/#dr/#sort)搬进「筛选」面板、七个低频工具按钮搬进「工具」
+   抽屉、「数据口径」长段包进折叠 details(kjWrap)；>860px：按记录的原锚点逐一搬回原位。
+   搬的是同一批 DOM 节点 → onclick / addEventListener / applyRole 的显隐全部照旧生效。
+   桌面端节点从未离开原位，渲染与改前一致。 */
+var MQM=window.matchMedia('(max-width:860px)');
+var MOV=[];
+function mGrab(id){var el=$(id);if(!el)return null;MOV.push({el:el,par:el.parentNode,next:el.nextSibling});return el;}
+function mRestoreAll(){
+  for(var i=MOV.length-1;i>=0;i--){var m=MOV[i];
+    if(m.el.parentNode!==m.par&&m.par){m.par.insertBefore(m.el,m.next);}}
+  MOV.length=0;
+  var kj=$('kjWrap');
+  if(kj&&$('kjP')){kj.parentNode.insertBefore($('kjP'),kj);kj.parentNode.removeChild(kj);}
+}
+function mDeployMobile(){
+  if(MOV.length)return;
+  var fids=['fagent','fplan','dr','sort'],fs=$('fpSlot');
+  if(fs){fids.forEach(function(id){var el=mGrab(id);if(el)fs.appendChild(el);});}
+  var tids=['btnCsv','btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnOut'],ts=$('tdSlot');
+  if(ts){tids.forEach(function(id){var el=mGrab(id);if(el)ts.appendChild(el);});}
+  var kp=$('kjP');
+  if(kp&&!$('kjWrap')){
+    var d=document.createElement('details');d.id='kjWrap';d.className='deadbox kjbox';
+    var s=document.createElement('summary');s.textContent='数据口径（点开查看）';
+    d.appendChild(s);d.appendChild(kp);
+    var lg=$('legendBox');
+    if(lg&&lg.parentNode)lg.parentNode.insertBefore(d,lg.nextSibling);else if(kp.parentNode)kp.parentNode.appendChild(d);
+  }
+}
+function syncLayout(){
+  var dr=$('toolDrawer'),fp=$('filterPanel'),mk=$('mMask');
+  if(MQM.matches){mDeployMobile();}
+  else{
+    mRestoreAll();
+    if(dr)dr.classList.remove('on');if(fp)fp.classList.remove('on');if(mk)mk.classList.remove('on');
+  }
+}
+if($('btnMore'))$('btnMore').onclick=function(){syncLayout();var d=$('toolDrawer'),mk=$('mMask');if(d)d.classList.add('on');if(mk)mk.classList.add('on');};
+if($('btnFilter'))$('btnFilter').onclick=function(){syncLayout();var f=$('filterPanel'),mk=$('mMask');if(f)f.classList.toggle('on');if(mk)mk.classList.toggle('on',f&&f.classList.contains('on'));};
+if($('tdClose'))$('tdClose').onclick=function(){var d=$('toolDrawer'),mk=$('mMask');if(d)d.classList.remove('on');if(mk)mk.classList.remove('on');};
+if($('fpClose'))$('fpClose').onclick=function(){var f=$('filterPanel'),mk=$('mMask');if(f)f.classList.remove('on');if(mk)mk.classList.remove('on');};
+if($('mMask'))$('mMask').onclick=function(){var d=$('toolDrawer'),f=$('filterPanel'),mk=$('mMask');if(d)d.classList.remove('on');if(f)f.classList.remove('on');mk.classList.remove('on');};
+if(MQM.addEventListener)MQM.addEventListener('change',syncLayout);else if(MQM.addListener)MQM.addListener(syncLayout);
+window.addEventListener('resize',syncLayout);
+syncLayout();
 (function(){
   // 2026-10-27 21:05：入池日期范围默认留空 = 全部号（不筛）。要看某段就自己填。
   $('dateTo').value='';
