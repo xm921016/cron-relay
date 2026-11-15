@@ -2674,6 +2674,39 @@ async function d1LogDead(entries, reason) {
   }
 }
 
+/* ============================================================================
+   P0/P1 只读快照（2026-11-15）：「历史登记查询」与「待挽回清单」共用的四张小表。
+   为什么全表拉回来在 JS 里拼：
+     ① 这四张表都很小（2026-11-15 实测镜像：accounts≈1290 / ledger≈1420 / dead_log≈260
+        / dead_notice≈60），四条全表 SELECT 一次并发 ≈ 4,400 行 rows_read，约等于半次
+        控制台首屏（≈8,200），且只在客服点开弹窗时才跑，不进任何 cron；
+     ② 按 uid 片段搜必须 LIKE（走不了索引），拆成 SQL 反而每次各扫一遍 ledger，
+        不如一次拉全量、JS 过滤，查多少次都不多花一行；
+     ③ accounts.uid / dead_log.uid 没有单独索引，IN (...) 要么全表扫要么按 chunk 翻倍，
+        全量拉一次反而最省。
+   ⚠ 铁律 3c：任何一路读失败（null）都整体返回 null，调用方一律 503，绝不当空表。
+   ============================================================================ */
+async function histTables() {
+  if (!d1ok()) return null;
+  const [acc, led, dead, notice] = await Promise.all([
+    d1All('SELECT pool,uid,name,email,pub,exp,added,agent,plan,relogin_at FROM accounts'),
+    d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,remark,src FROM ledger'),
+    d1All('SELECT id,pool,uid,name,reason,at FROM dead_log ORDER BY at DESC'),
+    d1All('SELECT pool,uid,name,email,removed_at,state,kind,sent_at,skip_reason FROM dead_notice'),
+  ]);
+  if (!acc || !led || !dead || !notice) return null;
+  return { acc: acc, led: led, dead: dead, notice: notice };
+}
+// 赠号判定（与月度结算 GIFT 口径逐字一致）：name:/manual:/带「公益」的不是客户买的，不算挽回金额
+function histIsGift(nm) {
+  const s = String(nm || '');
+  return /^name:/.test(s) || /^manual:/.test(s) || s.indexOf('公益') >= 0;
+}
+// P0/P1 的键：pool|uid（dead_log / dead_notice / accounts 都是按池+号定位）
+function histKey(p, u) {
+  return String(p == null ? '' : p) + '|' + String(u == null ? '' : u);
+}
+
 // 北京时间时间戳（YYYY-MM-DD HH:MM:SS），dead_log / dead_notice 统一口径，字符串可比大小
 function bjStamp(ms) {
   return new Date((ms != null ? ms : Date.now()) + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19);
@@ -7796,6 +7829,173 @@ async function handle(request) {
     //   所以「12 月回头查 11 月一共多少钱」必须能一次算出来，且不受后续删号/改套餐影响。
     // 数据源是 ledger 成交流水（不是 accounts 当前状态）。
     // ⚠ 只认满权限口令：只读口令是给客服用的，绝不能让他们看到全群营收和各客服金额。
+    /* ---- P0 历史登记查询（2026-11-15）----
+       一个框回答「这个号我登记过没有」：输 UID / 手机号 / 账号名任意片段（≥3 位），
+       跨群跨月把 ledger（成交台账，只增不改）+ dead_log（删号流水）+ accounts（现况）
+       + dead_notice（通知状态）拼成一条时间线。号删了照常能查到——这正是流水表存在的意义。
+       原来「查原单」藏在编辑弹窗的补号区里，号删光了就没入口；这个接口把查询变成一等公民。
+       额度：四张小表全量一次 ≈4,400 行（见 histTables 注释），JS 里过滤，不再按 SQL LIKE 反复扫。 */
+    if (url.pathname === '/api/console/history' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let bodyH;
+      try { bodyH = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(bodyH))) {
+        const whoH = await consoleRole(bodyH);
+        return json({ message: whoH === 'ro' ? '当前是只读口令：历史登记查询只对群主开放' : '账号或密码错误' }, 403, CORS);
+      }
+      const qH = String(bodyH.q == null ? '' : bodyH.q).trim().replace(/[^0-9A-Za-z_:@.\-]/g, '');
+      if (qH.length < 3) return json({ message: '请输至少 3 位（UID / 手机号 / 账号名片段）' }, 400, CORS);
+      const TH = await histTables();
+      if (!TH) return json({ message: '数据库读取失败：' + d1ErrHint() + '（不是查无记录，是这次没读出来，请稍后重试）' }, 503, CORS);
+      const nrmH = s => String(s == null ? '' : s);
+      const accByUidH = {}, deadByKeyH = {}, deadPubByUidH = {}, noticeByKeyH = {};
+      for (const a of TH.acc) { const u = nrmH(a.uid); if (u && !accByUidH[u]) accByUidH[u] = a; }
+      for (const d of TH.dead) {                       // dead_log 已按 at DESC，同键第一条=最近一次
+        const k = histKey(d.pool, d.uid);
+        if (!deadByKeyH[k]) deadByKeyH[k] = d;
+        if (d.reason === 'expired_pub' && !deadPubByUidH[nrmH(d.uid)]) deadPubByUidH[nrmH(d.uid)] = d;
+      }
+      for (const n of TH.notice) { const k = histKey(n.pool, n.uid); if (!noticeByKeyH[k]) noticeByKeyH[k] = n; }
+      const stateOfH = (uid, pool) => {
+        const u = nrmH(uid);
+        const a = accByUidH[u] || null;
+        if (a) {
+          if (nrmH(a.relogin_at)) return { st: 'relogin', pool: a.pool, exp: a.exp };
+          if (Number(a.pub) === 1) {
+            const dp = deadPubByUidH[u] || deadByKeyH[histKey(a.pool, u)];
+            return { st: 'pub', pool: a.pool, exp: a.exp, pubAt: dp ? nrmH(dp.at) : '' };
+          }
+          return { st: 'alive', pool: a.pool, exp: a.exp };
+        }
+        const d = deadByKeyH[histKey(pool, uid)];
+        if (d) return { st: 'dead', reason: d.reason, at: nrmH(d.at) };
+        return { st: 'gone' };
+      };
+      const noticeOfH = (pool, uid) => {
+        const n = noticeByKeyH[histKey(pool, uid)];
+        return n ? { state: nrmH(n.state), at: nrmH(n.removed_at), kind: nrmH(n.kind) } : null;
+      };
+      const hitLed = TH.led.filter(r => nrmH(r.uid).indexOf(qH) >= 0 || nrmH(r.name).indexOf(qH) >= 0)
+        .sort((a, b) => (nrmH(b.day) + String(b.id == null ? 0 : b.id)).localeCompare(nrmH(a.day) + String(a.id == null ? 0 : a.id)))
+        .slice(0, 200);
+      const seenKeyH = {}, seenUidH = {};
+      for (const r of hitLed) { seenKeyH[histKey(r.pool, r.uid)] = 1; seenUidH[nrmH(r.uid)] = 1; }
+      // 台账里查不到、删号流水里有的（公益赠号 / 手动加的号）：补在后面，否则「登记过没有」会漏答
+      const hitDeadOnly = TH.dead.filter(d => !seenKeyH[histKey(d.pool, d.uid)]
+        && !seenUidH[nrmH(d.uid)]
+        && (nrmH(d.uid).indexOf(qH) >= 0 || nrmH(d.name).indexOf(qH) >= 0)).slice(0, 50);
+      const rowOfH = (r, fromLed) => {
+        const st = stateOfH(r.uid, r.pool);
+        return { id: fromLed ? r.id : 0, pool: r.pool, uid: nrmH(r.uid), name: nrmH(r.name),
+          agent: fromLed ? nrmH(r.agent) : '', plan: fromLed ? nrmH(r.plan) : '',
+          price: (fromLed && r.price != null) ? Number(r.price) : null,
+          day: fromLed ? nrmH(r.day) : '', start: fromLed ? nrmH(r.start) : '', exp: fromLed ? nrmH(r.exp) : '',
+          rb: fromLed ? (Number(r.rb) || 0) : 0, remark: fromLed ? nrmH(r.remark) : '', src: fromLed ? nrmH(r.src) : '',
+          gift: histIsGift(r.name) ? 1 : 0,
+          st: st.st, stPool: st.pool || '', stExp: st.exp || '', pubAt: st.pubAt || '',
+          deadReason: st.reason || (fromLed ? '' : nrmH(r.reason)), deadAt: st.at || (fromLed ? '' : nrmH(r.at)),
+          notice: noticeOfH(r.pool, r.uid) };
+      };
+      return json({ ok: true, q: qH, rows: hitLed.map(r => rowOfH(r, true)).concat(hitDeadOnly.map(d => rowOfH(d, false))),
+        scanned: { accounts: TH.acc.length, ledger: TH.led.length, dead_log: TH.dead.length } }, 200, CORS);
+    }
+    /* ---- P1 待挽回清单（2026-11-15）----
+       「该收钱但断了」的号一屏列完，按可挽回金额排序：
+       ① CK 失效判死且至今没回任何池（uid 在任一群 accounts 里就算回了——迁移/重登不算流失）
+       ② 已降公益（pub=1 且非赠号）＝套餐到期没续，号还挂着但已不出量
+       ③ 已通知重登还没处理的（relogin_at 非空；11-09 起判死即删，这类是历史遗留，有就顺手列出）
+       金额口径与月度结算一致：rb=1（补号）与赠号不算钱；price=null=台账里没这号（多半是赠号）。
+       额度：同 histTables，一次 ≈4,400 行。 */
+    if (url.pathname === '/api/console/rescue' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let bodyR;
+      try { bodyR = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(bodyR))) {
+        const whoR = await consoleRole(bodyR);
+        return json({ message: whoR === 'ro' ? '当前是只读口令：待挽回清单只对群主开放' : '账号或密码错误' }, 403, CORS);
+      }
+      const daysR = Math.min(90, Math.max(7, Number(bodyR.days) || 30));
+      const TR = await histTables();
+      if (!TR) return json({ message: '数据库读取失败：' + d1ErrHint() + '（不是没有流失，是这次没读出来，请稍后重试）' }, 503, CORS);
+      const nrmR = s => String(s == null ? '' : s);
+      const todayR = beijingDate();
+      const cutoffR = dateMinusN(todayR, daysR);
+      const accByUidR = {}, noticeByKeyR = {}, deadPubByUidR = {};
+      for (const a of TR.acc) { const u = nrmR(a.uid); if (u && !accByUidR[u]) accByUidR[u] = a; }
+      for (const n of TR.notice) { const k = histKey(n.pool, n.uid); if (!noticeByKeyR[k]) noticeByKeyR[k] = n; }
+      for (const d of TR.dead) { if (d.reason === 'expired_pub' && !deadPubByUidR[nrmR(d.uid)]) deadPubByUidR[nrmR(d.uid)] = d; }
+      // 每个 uid 的最近一单台账（挽回时要知道：原套餐 / 谁录的 / 删时还剩几天没用完）
+      const lastLedR = {};
+      for (const r of TR.led) {
+        const u = nrmR(r.uid); if (!u) continue;
+        const cur = lastLedR[u];
+        if (!cur || nrmR(r.day) > nrmR(cur.day)
+          || (nrmR(r.day) === nrmR(cur.day) && Number(r.id == null ? 0 : r.id) > Number(cur.id == null ? 0 : cur.id))) lastLedR[u] = r;
+      }
+      const priceOfR = u => {
+        const r = lastLedR[u];
+        if (!r) return null;                                   // 台账无记录：显示「无台账」不计金额
+        if (Number(r.rb) === 1 || histIsGift(r.name)) return 0; // 补号/赠号不产生挽回金额
+        return r.price == null ? null : Number(r.price);
+      };
+      const noticeOfR = (pool, uid) => {
+        const n = noticeByKeyR[histKey(pool, uid)];
+        return n ? { state: nrmR(n.state), at: nrmR(n.removed_at), kind: nrmR(n.kind) } : null;
+      };
+      const dNum = s => /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? Date.parse(String(s).slice(0, 10) + 'T00:00:00Z') : NaN;
+      // ① 判死未回池（dead_log 已按 at DESC，同 pool|uid 只取最近一次）
+      const killed = [], killedSeen = {};
+      for (const d of TR.dead) {
+        if (d.reason !== 'cookie_invalid') continue;
+        const at = nrmR(d.at);
+        if (at.slice(0, 10) < cutoffR) continue;
+        const u = nrmR(d.uid), k = histKey(d.pool, u);
+        if (killedSeen[k]) continue;
+        killedSeen[k] = 1;
+        if (accByUidR[u]) continue;                            // 任一群还在池里=已回池，不算流失
+        const led = lastLedR[u] || null;
+        const left = (led && !isNaN(dNum(led.exp)) && !isNaN(dNum(at)))
+          ? Math.round((dNum(led.exp) - dNum(at)) / 86400000) : null;
+        killed.push({ pool: d.pool, uid: u, name: nrmR(d.name), deadAt: at,
+          plan: led ? nrmR(led.plan) : '', agent: led ? nrmR(led.agent) : '', day: led ? nrmR(led.day) : '',
+          price: priceOfR(u), leftDays: left, notice: noticeOfR(d.pool, u) });
+      }
+      killed.sort((a, b) => (Number(b.price) || 0) - (Number(a.price) || 0) || String(b.deadAt).localeCompare(String(a.deadAt)));
+      // ② 到期降公益未续（accounts 还挂着 pub=1 的非赠号）
+      const pubLost = [];
+      for (const a of TR.acc) {
+        if (Number(a.pub) !== 1 || histIsGift(a.name)) continue;
+        const u = nrmR(a.uid);
+        const dp = deadPubByUidR[u];
+        // 降级日只认 dead_log 的 expired_pub 流水；没有流水的（11-05 口径前就在池里的公益号）
+        // 宁可显示「—」也不拿 added（入池日）凑数——那会把逾期天数虚报成几十天
+        const since = dp ? nrmR(dp.at).slice(0, 10) : '';
+        const over = (since && !isNaN(dNum(since)) && !isNaN(dNum(todayR)))
+          ? Math.round((dNum(todayR) - dNum(since)) / 86400000) : null;
+        const led = lastLedR[u] || null;
+        pubLost.push({ pool: a.pool, uid: u, name: nrmR(a.name), added: nrmR(a.added), pubAt: dp ? nrmR(dp.at) : '',
+          plan: led ? nrmR(led.plan) : nrmR(a.plan), agent: led ? nrmR(led.agent) : nrmR(a.agent),
+          day: led ? nrmR(led.day) : '', price: priceOfR(u), overDays: over });
+      }
+      pubLost.sort((a, b) => (Number(b.price) || 0) - (Number(a.price) || 0) || String(b.pubAt).localeCompare(String(a.pubAt)));
+      // ③ 已通知重登未处理
+      const relogin = [];
+      for (const a of TR.acc) {
+        const ra = nrmR(a.relogin_at);
+        if (!ra) continue;
+        const u = nrmR(a.uid);
+        const led = lastLedR[u] || null;
+        relogin.push({ pool: a.pool, uid: u, name: nrmR(a.name), since: ra,
+          plan: led ? nrmR(led.plan) : nrmR(a.plan), agent: led ? nrmR(led.agent) : nrmR(a.agent),
+          day: led ? nrmR(led.day) : '', price: priceOfR(u) });
+      }
+      relogin.sort((a, b) => String(b.since).localeCompare(String(a.since)));
+      const sumPrice = arr => Math.round(arr.reduce((s, r) => s + ((r.price == null ? 0 : Number(r.price) > 0) ? Number(r.price) : 0), 0) * 100) / 100;
+      return json({ ok: true, days: daysR, cutoff: cutoffR, today: todayR,
+        totals: { killedCnt: killed.length, killedMoney: sumPrice(killed),
+                  pubCnt: pubLost.length, pubMoney: sumPrice(pubLost), reloginCnt: relogin.length },
+        killed: killed, pub: pubLost, relogin: relogin }, 200, CORS);
+    }
     if (url.pathname === '/api/console/ledger' && request.method === 'POST') {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let body;
@@ -9308,6 +9508,20 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <div class="row2"><button class="gray" id="lgClose">关闭</button></div>
   <div class="msg" id="lgm"></div>
 </div></div>
+<!-- ===== 2026-11-15：历史登记查询 + 待挽回清单 ===== -->
+<div class="modal" id="rcModal" hidden><div class="mbox" style="width:1040px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
+  <h3>历史登记 / 待挽回</h3>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65"><b>查登记记录</b>：输 UID / 手机号 / 账号名任意片段（≥3 位），跨群跨月把成交台账 + 删号流水拼成一条线，<b>号删了照常能查到</b>。状态标记：<b>在池</b>＝正常运行；<b>公益·到期未续</b>＝套餐到期降级（续费即恢复）；<b>已通知重登</b>＝CK 失效已通知号主还没处理；<b>CK失效·已删</b>＝自动判死删号；<b>手动删·退单</b>＝控制台手动删（结算口径=退单）。<br><b>待挽回清单</b>＝「该打电话了」的名单：CK 失效判死后没回来的 + 到期降公益没续费的，按可挽回金额排序。补号单与赠号不计金额。每行「复制」可复制手机号，到「登记链接」→ 续费/补登 → 查原单 粘贴即可生成补登链接。</p>
+  <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
+    <div style="flex:1;min-width:230px"><label style="margin-top:0">搜索（UID / 手机号 / 账号名片段）</label><input id="rcQ" placeholder="如 13800138000 或 3301849028" style="width:100%"></div>
+    <button class="mini" id="rcGo" style="margin-top:0;padding:9px 16px">查登记记录</button>
+    <div><label style="margin-top:0">判死回看</label><select id="rcDays" style="width:110px"><option value="30" selected>近 30 天</option><option value="60">近 60 天</option><option value="90">近 90 天</option></select></div>
+    <button class="mini" id="rcRescue" style="margin-top:0;padding:9px 16px">待挽回清单</button>
+  </div>
+  <div id="rcBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto"></div>
+  <div class="row2"><button class="gray" id="rcClose">关闭</button></div>
+  <div class="msg" id="rcm"></div>
+</div></div>
 <script>
 var TOKEN=null, DATA=null, POOLF='all';
 // 2026-10-27：ROLE='full' 满权限 / 'ro' 只读（只能看，编辑、删号、客服名单全部关掉）。
@@ -9470,6 +9684,7 @@ function applyRole(role){
   var brg=$('btnReg');if(brg)brg.style.display=full?'':'none';
   // 2026-11-05：结算涉及金额，只有满权限能看到入口（服务端也拦）
   var bl=$('btnLedger');if(bl)bl.style.display=full?'':'none';
+  var brs=$('btnRescue');if(brs)brs.style.display=full?'':'none';
   var t=$('ptitle');
   if(t){
     var old=document.getElementById('roTag');
@@ -10444,6 +10659,142 @@ $('btnLedger').onclick=function(){
   $('lgm').textContent='';$('lgBody').innerHTML='';
   $('lgModal').hidden=false;
   lgLoad();
+};
+
+// ===== 2026-11-15：历史登记查询 + 待挽回清单（只读，服务端与月度结算同一套满权限口令）=====
+// 状态标记口径（用户要求特殊记录单独标记）：
+//   在池(绿) / 公益·到期未续(黄) / 已通知重登(黄) / CK失效·已删(灰) / 手动删·退单(红) / 无流水(灰)
+function rcStateBadge(r){
+  if(r.st==='alive')return '<span class="badge b-green">在池</span>';
+  if(r.st==='relogin')return '<span class="badge b-yellow" title="CK 已失效、已通知号主重登，还没处理">已通知重登</span>';
+  if(r.st==='pub')return '<span class="badge b-yellow" title="套餐到期降成公益号：自己的歌不再被听，续费即恢复">公益·到期未续</span>';
+  if(r.st==='dead'){
+    if(r.deadReason==='manual')return '<span class="badge b-red" title="控制台手动删号，结算口径=退单">手动删·退单</span>';
+    if(r.deadReason==='cookie_invalid')return '<span class="badge b-gray" title="CK 失效自动判死删号">CK失效·已删</span>';
+    if(r.deadReason==='expired_pub')return '<span class="badge b-yellow">到期降公益</span>';
+    return '<span class="badge b-gray">'+esc(r.deadReason||'已删')+'</span>';
+  }
+  return '<span class="badge b-gray" title="不在池里、删号流水里也没有（2026-10-22 前删的号没有流水）">无流水</span>';
+}
+function rcNoticeTxt(n){
+  if(!n)return '';
+  var s=String(n.state||'');
+  if(s==='sent')return ' <span class="good">已通知</span>';
+  if(s==='claimed')return ' <span class="muted">发送中</span>';
+  if(s==='skip_returned')return ' <span class="good">已回池·不发</span>';
+  if(s==='skip_noemail')return ' <span class="muted">无邮箱·不发</span>';
+  if(s==='pending')return ' <span class="muted">待判·12h</span>';
+  return '';
+}
+function rcMoney(v){
+  if(v==null)return '<span style="color:#b06a00" title="台账里没有这号的成交记录（多半是赠号/手动号）">无台账</span>';
+  if(Number(v)===0)return '<span style="color:#999" title="补号单或赠号，不计挽回金额">—</span>';
+  return lgMoney(Number(v));
+}
+function rcHist(){
+  var t=JSON.parse(TOKEN||'{}'),q=$('rcQ').value.trim();
+  if(q.replace(/[^0-9A-Za-z]/g,'').length<3){$('rcm').textContent='请输至少 3 位（UID / 手机号 / 账号名片段）';$('rcm').className='msg err';return;}
+  $('rcm').textContent='查询中…';$('rcm').className='msg';$('rcGo').disabled=true;$('rcBody').innerHTML='';
+  api('/api/console/history',{user:t.user,pass:t.pass,q:q}).then(function(o){
+    $('rcGo').disabled=false;
+    if(!(o.ok&&o.d&&o.d.ok)){$('rcm').textContent=(o.d&&o.d.message)||'查询失败';$('rcm').className='msg err';return;}
+    $('rcm').textContent='';$('rcm').className='msg';
+    var rs=o.d.rows||[];
+    if(!rs.length){$('rcBody').innerHTML='<p style="color:#888">没查到任何登记或删号记录（成交台账从 2026-10-10 起记，删号流水从 2026-10-22 起记，更早的没有）。</p>';return;}
+    var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;position:sticky;top:0;border-bottom:1px solid #e6e8ec;text-align:left';
+    var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
+    var h='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px"><thead><tr>'
+      +'<th style="'+TH+'">群</th><th style="'+TH+'">登记日</th><th style="'+TH+'">账号</th><th style="'+TH+'">UID</th>'
+      +'<th style="'+TH+'">客服</th><th style="'+TH+'">套餐</th><th style="'+TH+'">金额</th><th style="'+TH+'">到期</th>'
+      +'<th style="'+TH+'">状态</th><th style="'+TH+'">备注</th></tr></thead><tbody>';
+    for(var i=0;i<rs.length;i++){var r=rs[i];
+      h+='<tr'+(i%2?' style="background:#fafbfc"':'')+'>'
+        +'<td style="'+TD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
+        +'<td style="'+TD+'">'+esc(r.day||'—')+(r.rb?' <span class="badge b-blue">补</span>':'')+(r.gift?' <span class="badge b-yellow">赠</span>':'')+'</td>'
+        +'<td style="'+TD+';max-width:160px;overflow:hidden;text-overflow:ellipsis">'+esc(String(r.name||'—').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</td>'
+        +'<td style="'+TD+'" class="num">'+esc(r.uid)+'</td>'
+        +'<td style="'+TD+'">'+esc(r.agent||'—')+'</td>'
+        +'<td style="'+TD+'">'+esc(r.plan||'未标注')+'</td>'
+        +'<td style="'+TD+';text-align:right">'+rcMoney(r.price)+'</td>'
+        +'<td style="'+TD+'">'+esc(r.exp||'—')+'</td>'
+        +'<td style="'+TD+'">'+rcStateBadge(r)
+          +(r.st==='dead'&&r.deadAt?' <span class="muted">'+esc(String(r.deadAt).slice(5,16))+'</span>':'')
+          +(r.st==='pub'&&r.pubAt?' <span class="muted" title="降公益时间">'+esc(String(r.pubAt).slice(5,10))+'</span>':'')
+          +rcNoticeTxt(r.notice)+'</td>'
+        +'<td style="'+TD+';color:#777;max-width:180px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.remark||'')+'">'+esc(r.remark||'')+'</td>'
+      +'</tr>';
+    }
+    h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">本次扫描：台账 '+esc(String((o.d.scanned||{}).ledger))+' 行 · 删号流水 '+esc(String((o.d.scanned||{}).dead_log))+' 行 · 在池 '+esc(String((o.d.scanned||{}).accounts))+' 行（固定四张小表，约 0.09% 日读额度）</p>';
+    $('rcBody').innerHTML=h;
+  }).catch(function(){$('rcGo').disabled=false;$('rcm').textContent='网络错误';$('rcm').className='msg err';});
+}
+function rcRescue(){
+  var t=JSON.parse(TOKEN||'{}');
+  $('rcm').textContent='统计中…';$('rcm').className='msg';$('rcRescue').disabled=true;$('rcBody').innerHTML='';
+  api('/api/console/rescue',{user:t.user,pass:t.pass,days:Number($('rcDays').value)||30}).then(function(o){
+    $('rcRescue').disabled=false;
+    if(!(o.ok&&o.d&&o.d.ok)){$('rcm').textContent=(o.d&&o.d.message)||'查询失败';$('rcm').className='msg err';return;}
+    $('rcm').textContent='';$('rcm').className='msg';
+    var d=o.d,tt=d.totals||{};
+    var h='<p style="margin:0 0 10px;font-size:12.5px">回看窗口：<b>'+esc(String(d.cutoff))+'</b> 起（'+esc(String(d.days))+' 天）。'
+      +'① CK失效未回池 <b>'+esc(String(tt.killedCnt))+'</b> 个 · 可挽回约 <b style="color:#a32d2d">'+lgMoney(tt.killedMoney)+'</b> 元；'
+      +'② 到期降公益未续 <b>'+esc(String(tt.pubCnt))+'</b> 个 · 约 <b style="color:#a32d2d">'+lgMoney(tt.pubMoney)+'</b> 元；'
+      +'③ 已通知重登未处理 <b>'+esc(String(tt.reloginCnt))+'</b> 个。</p>';
+    function rcTbl(title,note,rows,kind){
+      var s='<h4 style="margin:14px 0 6px;font-size:13px">'+title+' <span style="font-weight:400;color:#888;font-size:11.5px">'+note+'</span></h4>';
+      if(!rows.length)return s+'<p style="color:#888;font-size:12.5px;margin:0 0 6px">（无）</p>';
+      var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;border-bottom:1px solid #e6e8ec;text-align:left';
+      var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
+      s+='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px"><thead><tr>'
+        +'<th style="'+TH+'">群</th><th style="'+TH+'">账号</th><th style="'+TH+'">UID</th><th style="'+TH+'">原套餐</th>'
+        +'<th style="'+TH+'">客服</th><th style="'+TH+'">原单登记日</th>';
+      if(kind==='killed')s+='<th style="'+TH+'">删号时间</th><th style="'+TH+'" title="删号那天距台账到期日还剩几天：正数=没用完就掉了">删时剩余</th>';
+      if(kind==='pub')s+='<th style="'+TH+'">降公益日</th><th style="'+TH+'">逾期</th>';
+      if(kind==='relogin')s+='<th style="'+TH+'">通知日</th>';
+      s+='<th style="'+TH+'">挽回金额</th><th style="'+TH+'">操作</th></tr></thead><tbody>';
+      for(var i=0;i<rows.length;i++){var r=rows[i];
+        var phone=String(r.name||'').replace(/^qr:.+/,'').replace(/^manual:/,'');
+        var cp=/^[0-9]{5,}$/.test(phone)?phone:String(r.uid||'');
+        s+='<tr'+(i%2?' style="background:#fafbfc"':'')+'>'
+          +'<td style="'+TD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
+          +'<td style="'+TD+'">'+esc(String(r.name||'—').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</td>'
+          +'<td style="'+TD+'" class="num">'+esc(r.uid)+'</td>'
+          +'<td style="'+TD+'">'+esc(r.plan||'未标注')+'</td>'
+          +'<td style="'+TD+'">'+esc(r.agent||'—')+'</td>'
+          +'<td style="'+TD+'">'+esc(r.day||'—')+'</td>';
+        if(kind==='killed')s+='<td style="'+TD+'">'+esc(String(r.deadAt||'').slice(5,16))+'</td><td style="'+TD+'">'+(r.leftDays==null?'—':(r.leftDays>0?r.leftDays+' 天':'<span style="color:#a32d2d">已过期</span>'))+'</td>';
+        if(kind==='pub')s+='<td style="'+TD+'">'+esc(String(r.pubAt||'').slice(0,10)||'—')+'</td><td style="'+TD+'">'+(r.overDays==null?'—':r.overDays+' 天')+'</td>';
+        if(kind==='relogin')s+='<td style="'+TD+'">'+esc(String(r.since||'').slice(0,10))+'</td>';
+        s+='<td style="'+TD+';text-align:right">'+rcMoney(r.price)+'</td>'
+          +'<td style="'+TD+'"><button class="mini" data-rc-copy="'+esc(cp)+'" title="复制后到「登记链接」→ 续费/补登 → 查原单 粘贴">复制</button></td>'
+        +'</tr>';
+      }
+      return s+'</tbody></table>';
+    }
+    h+=rcTbl('① CK失效判死 · 至今没回池','删后号主没再登记（迁移/重登的已自动剔除，不算流失）',d.killed||[],'killed');
+    h+=rcTbl('② 到期降公益 · 未续费','套餐到期号还挂在池里（只帮别人听），续费即恢复',d.pub||[],'pub');
+    h+=rcTbl('③ 已通知重登 · 未处理','历史遗留口径（现在判死是即删），号主重新登记后自动恢复',d.relogin||[],'relogin');
+    h+='<p style="font-size:11px;color:#999;margin:8px 0 0">口径：挽回金额=该号最近一笔非补号、非赠号的台账价（与月度结算一致）；「无台账」=台账里没有成交记录（多半是赠号），不计金额。</p>';
+    $('rcBody').innerHTML=h;
+    var bts=$('rcBody').querySelectorAll('[data-rc-copy]');
+    for(var k=0;k<bts.length;k++){
+      bts[k].onclick=function(){
+        var v=this.getAttribute('data-rc-copy')||'',self=this;
+        var done=function(){self.textContent='已复制';setTimeout(function(){self.textContent='复制';},1200);};
+        if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(v).then(done,function(){window.prompt('手动复制：',v);});}
+        else{window.prompt('手动复制：',v);}
+      };
+    }
+  }).catch(function(){$('rcRescue').disabled=false;$('rcm').textContent='网络错误';$('rcm').className='msg err';});
+}
+$('rcGo').onclick=rcHist;
+$('rcRescue').onclick=rcRescue;
+$('rcQ').onkeydown=function(e){if(e&&(e.key==='Enter'||e.keyCode===13))rcHist();};
+$('rcClose').onclick=function(){$('rcModal').hidden=true;};
+$('btnRescue').onclick=function(){
+  $('rcm').textContent='';$('rcBody').innerHTML='';
+  $('rcModal').hidden=false;
+  rcRescue();   // 打开先看待挽回清单（最常用）；上方搜索框随时可切「查登记记录」
 };
 
 // ===== 2026-10-27：客服名单 / 套餐档位维护（只读口令看不到这个按钮，服务端也会拦）=====
