@@ -463,8 +463,32 @@ jobs:
         id: signin
         continue-on-error: true
         run: |
-          N=$(python -c "import json;print(len(json.load(open('accounts.json'))['accounts']))")
-          if [ "$N" -gt 0 ]; then python signin.py; else echo "本片无账号，跳过签到"; fi
+          # 2026-11-15 用户指示：只保留大号 17316702006 签到，其余号全部停用（核心=播放量）。
+          # 背景：11-15 凌晨 hz 21 号（同日同源簇）会话被整批踢，判死非签到直接所致
+          # （全池都签到，仅该簇死）。但 signin.py 每晚每号 6~8 个写接口（App 签到/
+          # 积分商城/任务领积分/VIP 任务/VIP 成长值/音乐人任务领奖）对播放量零贡献，
+          # 是机房 IP 上最大的自动化行为暴露面，故其余号停用。
+          # 实现：把大号从 accounts.json 过滤到 accounts_signin.json（不动原文件，
+          # notes.py 仍用全量名单），经 SIGNIN_CONFIG 传给 signin.py。
+          # 大号强制 roles=signin；source 标 Secrets = signin.py 只签到、不判死不删号
+          # （大号的验活/判死由 run.py 播放链路负责，不在这里重复）。
+          python - <<'PY'
+          import json
+          cfg = json.load(open('accounts.json', encoding='utf-8'))
+          keep = [a for a in cfg.get('accounts', []) if str(a.get('name')) == '17316702006']
+          for a in keep:
+              a['roles'] = 'signin'
+          cfg['accounts'] = keep
+          cfg['source'] = 'Secrets'
+          json.dump(cfg, open('accounts_signin.json', 'w', encoding='utf-8'), ensure_ascii=False)
+          print('signin 大号命中:', len(keep))
+          PY
+          N=$(python -c "import json;print(len(json.load(open('accounts_signin.json'))['accounts']))")
+          if [ "$N" -gt 0 ]; then
+            SIGNIN_CONFIG=accounts_signin.json python signin.py
+          else
+            echo "本片无大号 17316702006，跳过签到（2026-11-15 起只保留大号签到）"
+          fi
       - name: notes publish (per-account every day, NOTES_EVERY_DAYS 可调)
         id: notes
         continue-on-error: true

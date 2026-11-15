@@ -532,7 +532,10 @@ def main():
         logger.info(f"随机等待 {wait_seconds} 秒后开始签到...")
         time.sleep(wait_seconds)
 
-        cfg = load_config("accounts.json")
+        # 2026-11-15：支持 SIGNIN_CONFIG 指定配置文件（缺省仍读 accounts.json，行为不变）。
+        # run.yml 每片把大号 17316702006 过滤到 accounts_signin.json 后传入，
+        # 其余号不再签到（用户指示：核心=播放量）。
+        cfg = load_config(os.environ.get("SIGNIN_CONFIG", "accounts.json"))
         accounts = cfg.get("accounts", [])
         # 2026-10-31：账号来源标记（由 make_accounts.py 写入）。"Secrets" 表示本轮
         # /api/assign 失败、退回了 Secrets 分片里的老快照，CK 未必是当前值 —— 这种
