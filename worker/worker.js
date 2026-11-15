@@ -6730,7 +6730,7 @@ async function handle(request) {
         [new Date(Date.parse(today + 'T00:00:00Z') - 2 * 86400000).toISOString().slice(0, 10), today]);
       const sfAccs = await d1All("SELECT pool,uid,name,email,agent,exp,song,added FROM accounts WHERE pool=? AND pub=0 AND email<>'' AND song<>''", [POOL_NAME]);
       const sfMeta = await d1All('SELECT song,name,dur,n_artists,artists,first_artist,gone FROM song_meta', []);
-      const sfQ = await d1All("SELECT uid,kind,ref,created_at FROM mail_queue WHERE kind IN ('songfix','songfix2','songfix3','songchange') AND pool=?", [POOL_NAME]);
+      const sfQ = await d1All("SELECT uid,kind,ref,created_at FROM mail_queue WHERE kind IN ('songfix','songfix2','songfix3','songchange','nomus') AND pool=?", [POOL_NAME]);
       const sfArt = await d1All('SELECT uid,artist_id FROM acc_meta', []);
       const sfOk = sfSnap !== null && sfAccs !== null && sfMeta !== null && sfQ !== null && sfArt !== null;
       if (!sfOk) {
@@ -6866,6 +6866,23 @@ async function handle(request) {
           const mine = sfArtMap[uid] || '';
           if (await trySwap(uid, a, song, mine, true)) continue;
           await trySongfixMail(uid, 'songfix3', a, song);
+        }
+        // —— nomus：非音乐人号提醒（2026-11-15 新增）——
+        // acc_meta 确认 artist_id=''（该号没有音乐人身份）→ 普通用户号登记的歌，播放永远不计入 650，
+        // 登记即空转。账号级问题（不是歌的问题），不走 songfix 冻结环 —— 那套要求 snapshots.rate
+        // 非空 + 本人音乐人 id，非音乐人两个都不满足。口径对齐控制台「非音乐人」标记文案。
+        // ref=歌曲 id：同号同歌只发一封（唯一键含已 sent 行，天然去重）；号主换歌后仍是非音乐人
+        // 会再收到一封，属合理提醒。同一首歌已被 songfix 系触达过的不重复打扰。
+        for (const a of sfAccs) {
+          const uid = String(a.uid);
+          if (sfHandled.has(uid)) continue;
+          if (sfArtMap[uid] !== '') continue;   // undefined=acc_meta 还没同步、非''=确认有音乐人身份，都不发
+          const song = String(a.song || '');
+          if (!song) continue;
+          if (sfQueued[uid + '|songfix|' + song] || sfQueued[uid + '|songfix2|' + song] || sfQueued[uid + '|songfix3|' + song]) continue;
+          sfCnt.found++;
+          sfHandled.add(uid);
+          await trySongfixMail(uid, 'nomus', a, song);
         }
       }
       // 2026-11-13：闸门已前置（读全成功后立即落），走到这里说明本轮读写都完成。
@@ -9624,7 +9641,7 @@ function computeMarks(r, susSet){
   //   acc_meta 没有该号记录 → 保持原通用文案（等元数据同步）。
   if(!isPub&&a&&a.rate==null&&e.song&&!(e.added&&e.added>=DATA.date)){
     var _am=DATA.artists?DATA.artists[String(e.uid)]:null;
-    if(_am&&_am[0]==='')add('b-red','非音乐人','acc_meta 已确认该账号没有音乐人身份：拿普通用户号登记的歌，播放永远不会计入 650。不是号主去后台点开通能解决的 —— 找买家核实身份：要么换成音乐人号，要么按非音乐人号重新定价（11-11 实测 12 个无650任务号里 7 个是这类）');
+    if(_am&&_am[0]==='')add('b-red','非音乐人','acc_meta 已确认该账号没有音乐人身份：拿普通用户号登记的歌，播放永远不会计入 650。不是号主去后台点开通能解决的 —— 找买家核实身份：要么换成音乐人号，要么按非音乐人号重新定价（11-11 实测 12 个无650任务号里 7 个是这类）。系统已自动发邮件提醒号主（nomus，同号同歌只发一封），客服跟进即可，不用再单独通知');
     else if(_am&&_am[0])add('b-gray','无650任务','后台没返回 650 任务：该号音乐人身份已确认（'+(_am[1]||'音乐人')+'），但任务没开通 —— 多为实习期未转正（官方 90 天，实习期里特殊权益开不了，实测实习号维持天数恒为 0），转正后在音乐人后台开通，进度才从 0 开始爬；也可能卡在号主侧认证（有号超 90 天仍未转正）。用「号体检」工具实时复核 canOpen/状态确认根因');
     else add('b-gray','无650任务','后台没返回 650 任务：可能不是音乐人、没报名该任务或歌曲未过审，让号主去音乐人后台确认（账号元数据还没同步，用「号体检」工具实时复核可分辨是不是音乐人）');
   }

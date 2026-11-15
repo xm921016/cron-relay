@@ -394,6 +394,34 @@ def notify_songfix_bad(email, nickname, name, group=""):
     return send_user_email(email, subject, body)
 
 
+def notify_nomus(email, nickname, name, group=""):
+    """非音乐人提醒（2026-11-15 新增，kind=nomus）：
+
+    触发：acc_meta 已确认该账号没有音乐人身份（artist_id=''）——普通用户号登记的歌，
+    播放永远不会计入 650，登记即空转。与 songfix 系的区别：这是**账号级**问题，
+    不是歌的问题，换歌解决不了；文案口径对齐控制台「非音乐人」标记：
+    要么核实/更换音乐人号，要么按非音乐人号重新商量安排。
+    走 mail_queue 队列（kind=nomus，ref=歌曲 id，同号同歌只发一封）。
+    """
+    if not (email or "").strip():
+        return False
+    subject = "【网易音乐人650任务】你的账号还没有音乐人身份，播放无法计入任务"
+    body = (
+        f"你好，{_who(nickname, name)}：\n\n"
+        "跟你说一个数据核查结果：你的账号登记参与听歌任务后，进度一直没有增长。\n\n"
+        "经核查，原因是这个账号目前还没有「网易音乐人」身份——平台只把音乐人本人作品\n"
+        "的播放计入 650 播放任务，普通用户账号不管每天播放多少，都不会计入任务数据。\n"
+        "这是账号身份的问题，不是歌的问题，换歌也解决不了。\n\n"
+        "请到售后群联系客服核实一下账号的实际情况：\n"
+        "① 如果你以为这个号是音乐人号，请先去网易云音乐人后台确认身份状态，再跟客服说明；\n"
+        "② 如果这个号本来就不是音乐人号，也请联系客服，双方按非音乐人号重新商量登记安排。\n\n"
+        "如果你已经在处理了，请忽略这封邮件，或者到售后群跟客服说一声。\n\n"
+        + _group_line(group) + "\n\n"
+        "——" + SIGN
+    )
+    return send_user_email(email, subject, body)
+
+
 def notify_songchange(email, nickname, name, group="", song_old="", song_new="", notmine=False):
     """主动换歌通知（2026-11-13 新增，kind=songchange）：
 
@@ -503,6 +531,10 @@ if __name__ == "__main__":
             exp = sys.argv[5] if len(sys.argv) >= 6 else "2026-12-06"
             dys = int(sys.argv[6]) if len(sys.argv) >= 7 else 30
             ok = notify_expire(to, "", aname, grp, exp, dys)
+        elif tpl == "nomus":
+            aname = sys.argv[3] if len(sys.argv) >= 4 else "你的账号"
+            grp = sys.argv[4] if len(sys.argv) >= 5 else ""
+            ok = notify_nomus(to, "", aname, grp)
         else:
             ok = send_user_email(
                 to,
@@ -510,5 +542,5 @@ if __name__ == "__main__":
                 "如果你收到这封邮件，说明直邮通道工作正常。\n\n——" + SIGN,
             )
         sys.exit(0 if ok else 1)
-    print("usage: python notify.py <to_email> [relogin|regok|expire <name> <group> [exp] [days]]")
+    print("usage: python notify.py <to_email> [relogin|regok|expire|nomus <name> <group> [exp] [days]]")
     sys.exit(2)

@@ -166,6 +166,9 @@ def main():
                 elif kind == "songfix3":
                     # 2026-11-13 新增：绑错歌（独唱但唯一作者不是他）/查无此歌（下架删除）的换歌提醒
                     ok = notify.notify_songfix_bad(t.get("email"), "", who, t.get("group") or "")
+                elif kind == "nomus":
+                    # 2026-11-15 新增：非音乐人号提醒（acc_meta 确认 artist_id=''，账号级问题，换歌无用）
+                    ok = notify.notify_nomus(t.get("email"), "", who, t.get("group") or "")
                 else:
                     print(f"   [{who}] 未知类型 {kind}，跳过")
                     ok = False
