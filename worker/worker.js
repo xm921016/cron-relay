@@ -9299,6 +9299,11 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap td:nth-child(6){order:16;flex:1 1 45%;word-break:break-all}
   .twrap td:nth-child(18){order:20;flex:0 0 100%;padding-top:6px;margin-top:4px;border-top:1px solid #f2f4f6}
   .twrap td:nth-child(18) button{width:100%}
+  /* 2026-11-15：空值格子（只含淡色「—/公益」占位）被 order 排到卡片末行时，
+     白底淡字看起来像一大块空白（用户截图反馈）。手机卡片流直接隐藏这些格子；
+     桌面表格的列占位不受影响（规则在媒体查询内）。备注/邮箱/歌曲/歌手空值命中。 */
+  .twrap td[data-l]:has(>span[style*="color:#bbb"]){display:none}
+  .twrap td[data-l="UID"]{color:#475569;font-weight:600}
   /* 2026-10-27：列名不再用 nth-child 硬编码，改成读 td 的 data-l 属性。
      原来每加一列都要手工重排 15 条 nth-child，10-26 就因为对不上出过一次排版事故；
      改用 data-l 后只有「显示顺序」还需要 nth-child，标签永远跟着格子走。 */
