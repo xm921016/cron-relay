@@ -169,6 +169,10 @@ def main():
                 elif kind == "nomus":
                     # 2026-11-15 新增：非音乐人号提醒（acc_meta 确认 artist_id=''，账号级问题，换歌无用）
                     ok = notify.notify_nomus(t.get("email"), "", who, t.get("group") or "")
+                elif kind == "relogin2":
+                    # 2026-11-15 新增：网易官方波动口径的重登引导（ref=日期，仅用于去重）。
+                    # 队列行由人工/控制台按需插入（worker 不会自动产生这个 kind）。
+                    ok = notify.notify_relogin2(t.get("email"), "", who)
                 else:
                     print(f"   [{who}] 未知类型 {kind}，跳过")
                     ok = False
