@@ -9300,6 +9300,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
    infoBtn（卡片上的详情按钮）只在 <=860px 显示；筛选面板/工具抽屉/遮罩/工具按钮是手机专属容器；
    #infoBody 的 kv 样式放基础层，保证任何环境打开详情弹窗都可读。 */
 .infoBtn{display:none}
+.agAt{display:none}  /* 2026-11-15：采集时间跟在客服后面，仅手机端显示（今日650格下方不再重复） */
 .mdrawer,.mmask,.mpanel,.mOnly{display:none}
 #infoBody .dsec{background:#f6f8fb;border-radius:10px;padding:9px 12px;margin-bottom:8px}
 #infoBody .dsec i{font-style:normal;color:#9aa5b1;font-size:11px;display:block;margin-bottom:3px}
@@ -9406,9 +9407,13 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap td:nth-child(13){grid-column:4/5;grid-row:2;border-right:1px solid #e4e9f0}
   .twrap td:nth-child(14){grid-column:5/7;grid-row:2;border-radius:0 9px 9px 0}
   .twrap td:nth-child(10)::before,.twrap td:nth-child(11)::before,.twrap td:nth-child(12)::before,.twrap td:nth-child(13)::before,.twrap td:nth-child(14)::before{font-size:8.5px;font-weight:400;margin-right:0;white-space:nowrap}
-  .twrap td:nth-child(11) .snap-at{font-size:8.5px}
-  .twrap .pbar6{display:block;height:3px;width:100%;background:#e2e7ee;border-radius:2px;margin-top:3px;overflow:hidden;flex:0 0 auto}
-  .twrap .pbar6 i{display:block;height:100%;background:#3b6d11;border-radius:2px}
+  /* 19:05 简化：近30日播放→近30日；笔记任务→笔记，值只留 4/4（misName 文字用 font-size:0 藏掉） */
+  .twrap td:nth-child(13)::before{content:'近30日 '}
+  .twrap td:nth-child(14)::before{content:'笔记 '}
+  .twrap td:nth-child(14) .mtag{font-size:0}
+  .twrap td:nth-child(14) .mtag i{font-size:11.5px;font-style:normal;font-weight:700;color:#33506e}
+  /* 19:05 简化：今日650 下不再显示进度条，纯数字 */
+  .twrap .pbar6{display:none}
   /* meta 两行小字：客服|歌曲 一行，入池|套餐 一行（标签灰前缀、值右对齐防挤压） */
   .twrap td:nth-child(4){grid-column:1/3;grid-row:3;padding:6px 0 0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .twrap td:nth-child(7){grid-column:3/7;grid-row:3;padding:6px 0 0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
@@ -9421,7 +9426,12 @@ body:has(.modal:not([hidden])){overflow:hidden}
     padding-top:7px;margin-top:8px;border-top:1px solid #f2f4f6}
   .twrap td:nth-child(20) button{flex:0 0 auto;min-width:64px;padding:7px 0;font-size:11.5px;text-align:center;
     border-radius:8px;background:#fff;border:1px solid #dde3ea;color:#33506e;font-weight:600}
-  .twrap td:nth-child(20) .infoBtn{flex:0 0 36%;background:#255ea6;color:#fff;border-color:#255ea6}
+  .twrap td:nth-child(20) .infoBtn{display:inline-block;flex:0 0 36%;background:#255ea6;color:#fff;border-color:#255ea6}
+  /* 19:05 用户简化需求：底部 删号记录/对照表/数据口径 三块手机端整体隐藏（要查详情走卡片「详情」弹窗） */
+  #deadBox,#legendBox,#kjWrap{display:none}
+  /* 采集时间改跟在客服名字后面（今日650格下不再显示） */
+  .twrap .agAt{display:inline;font-size:10px;color:#9aa5b1;margin-left:4px;font-weight:400}
+  .twrap td:nth-child(11) .snap-at{display:none}
   /* 「数据口径」在手机端被 JS 包进折叠 details（kjWrap），给个跟 deadbox 一致的观感 */
   .kjbox{font-size:11.5px;color:#666;line-height:1.7}
   /* 「删号记录」6 列表 / 「标记对照表」3 列表，在 360px 下每列只剩几十 px，会被挤成一字一行。
@@ -10351,7 +10361,7 @@ function render(){
     h+='<tr><td class="num">'+(i+1)+'</td>'
       +'<td><span class="badge '+(r.pool==='hz'?'b-hz">主群':'b-dz">定制')+'</span></td>'
       +'<td>'+esc(String(e.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</td>'
-      +'<td'+(e.agent?'':' class="nv"')+'>'+agCell+'</td>'
+      +'<td'+(e.agent?'':' class="nv"')+'>'+agCell+(a&&a.at?'<span class="agAt">采于 '+bjTime(a.at)+'</span>':'')+'</td>'
       +'<td class="num" data-l="UID">'+esc(e.uid)+'</td>'
       // 2026-11-02：新增邮箱列（数据来自 /api/console/data 的 entries[].email，dz 池走对穿同样带）
       +'<td class="mail" data-l="邮箱"'+(e.email?'':' class="nv"')+'>'+(e.email?'<span class="eml" title="'+esc(e.email)+'（点选可整段复制）">'+esc(e.email)+'</span>':'<span style="color:#bbb">—</span>')+'</td>'
