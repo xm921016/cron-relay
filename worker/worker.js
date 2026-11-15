@@ -9218,6 +9218,9 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
 .up{color:#c0392b;font-weight:600}.down{color:#1e8449;font-weight:600}.flat{color:#999}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:9}
 .modal[hidden]{display:none}
+/* 2026-11-15：弹窗打开时锁住底层页面滚动（安卓 WebView 弹窗滑动穿透到号池列表，用户实测）。
+   :has() 需 Chromium 105+，老 WebView 优雅降级。所有 .modal 统一生效。 */
+body:has(.modal:not([hidden])){overflow:hidden}
 .mbox{background:#fff;border-radius:14px;padding:22px;width:420px;max-width:94vw;max-height:88vh;overflow:auto}
 .mbox h3{margin:0 0 4px;font-size:16px}.mbox label{display:block;font-size:12px;color:#555;margin:10px 0 3px}
 .mbox input,.mbox select{width:100%}
@@ -9354,7 +9357,7 @@ a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
   <div class="twrap"><table><thead><tr>
     <th>#</th><th>池</th><th>账号</th><th title="这条登记是谁录的（客服标签，登记前必须在 APK/EXE 里选）">客服</th><th>UID</th><th title="通知邮箱：账号失效 / 需要验证时发到这里。空的（—）= 没登记，通知不到人" class="thin">邮箱</th><th class="thin">绑定歌曲</th><th title="该号自己的音乐人昵称（acc_meta 元数据回填；没同步到显示 —）。限宽约 5 个字，超长截断成 …，鼠标悬停看全名。2026-11-11 起不再显示歌的歌手列表与 ✓/✗（共创人太多把行撑太高），绑错歌判定走标记列" class="thin">音乐人</th><th>时长</th><th id="thA" title="起始日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">昨日<br>650进度</th><th id="thB" title="结束日快照里的 650 任务完成度（近30日有效播放，100%=已达标）">今日<br>650进度</th><th id="thD" title="结束日650进度 - 起始日650进度；红色=涨，绿色=跌，0=这段时间没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）">较昨日</th><th title="网易工作台 recentPlayCount30：近30日播放次数（不是有效播放，也不等于650进度）">近30日<br>播放量</th><th title="笔记任务（发布图文笔记，按 已发x/4 显示：30天内发布图文笔记天数≥4，4/4=已完成）；跟播放/650 无关，不看也不影响">笔记<br>任务</th><th>入池</th><th>有效期</th><th title="登记时买的套餐（1月/半年/1年/2年/永久）。顶部「套餐汇总」按这一列统计，不按剩余天数算">套餐</th><th title="内部备注（号主看不到）。补号会在这里标一个「补」：客户掉线后免费补的新号，不计营收、不计客服提成">备注</th><th>标记</th><th>操作</th>
   </tr></thead><tbody id="tb"></tbody></table></div>
-  <details class="deadbox" id="deadBox" hidden><summary>删号记录 / 待复核账号（最近 12 条，来自 D1 dead_log 与 accounts.suspect_at）</summary>
+  <details class="deadbox" id="deadBox" hidden><summary>删号记录 / 待复核账号（删号=近 3 天全部，待复核最多 12 条；来自 D1 dead_log 与 accounts.suspect_at）</summary>
   <div class="muted" style="margin:6px 0 8px">原因：<b>手动删除</b>＝你在控制台/号池工具点的删除；<b>Cookie失效</b>＝播放前验活自动判死；<b>到期清理</b>＝账号有效期到了自动移除。已回池（迁移到另一群或当天重登）的号不算删号。<br>通知：<b>已通知</b>＝确认发出；<b>已回池·不发</b>＝号还在跑；<b>无邮箱·不发</b>＝没登记邮箱；<b>待判·12h</b>＝删后满 12 小时才判定该不该发；<b>自动判死·run.py 发信</b>＝早期记录，发信由播放任务临时触发，发没发事后查不到。</div><div id="deadList"></div></details>
   <details class="deadbox" id="legendBox"><summary><b>标记看不懂 / 数字怎么读？点开这份对照表</b></summary><div class="lgd">
     <b>一、先认清三个数（别再混）：</b>「650进度」= 音乐人后台的 650 任务完成度，100% 才算做完，是唯一有意义的成绩；「近30日播放量」= 工作台统计的播放次数，刷再多也不直接等于进度；「笔记任务」= 网易塞在同一组里的另一个小任务（发布图文笔记），跟播放和 650 一点关系都没有，一列显示「—」也是正常的。
