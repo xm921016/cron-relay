@@ -9354,7 +9354,9 @@ body:has(.modal:not([hidden])){overflow:hidden}
   /* 2026-11-15：空值格子（只含淡色「—/公益」占位）被 order 排到卡片末行时，
      白底淡字看起来像一大块空白（用户截图反馈）。手机卡片流直接隐藏这些格子；
      桌面表格的列占位不受影响（规则在媒体查询内）。备注/邮箱/歌曲/歌手空值命中。 */
-  .twrap td[data-l]:has(>span[style*="color:#bbb"]){display:none}
+  /* v2.20 改 class 方案：:has() 需 Chromium 105+，旧 WebView 内核不支持会整体降级失效
+     （用户实测空白仍在）。渲染时空值格子直接带 class=nv，任何内核都支持。 */
+  .twrap td.nv{display:none}
   .twrap td[data-l="UID"]{color:#475569;font-weight:600}
   /* 2026-10-27：列名不再用 nth-child 硬编码，改成读 td 的 data-l 属性。
      原来每加一列都要手工重排 15 条 nth-child，10-26 就因为对不上出过一次排版事故；
@@ -10272,9 +10274,9 @@ function render(){
       +'<td>'+agCell+'</td>'
       +'<td class="num" data-l="UID">'+esc(e.uid)+'</td>'
       // 2026-11-02：新增邮箱列（数据来自 /api/console/data 的 entries[].email，dz 池走对穿同样带）
-      +'<td class="mail" data-l="邮箱">'+(e.email?'<span class="eml" title="'+esc(e.email)+'（点选可整段复制）">'+esc(e.email)+'</span>':'<span style="color:#bbb">—</span>')+'</td>'
-      +'<td class="num" data-l="歌曲">'+song+'</td>'
-      +'<td data-l="歌手">'+artCell+'</td>'
+      +'<td class="mail" data-l="邮箱"'+(e.email?'':' class="nv"')+'>'+(e.email?'<span class="eml" title="'+esc(e.email)+'（点选可整段复制）">'+esc(e.email)+'</span>':'<span style="color:#bbb">—</span>')+'</td>'
+      +'<td class="num" data-l="歌曲"'+(e.song?'':' class="nv"')+'>'+song+'</td>'
+      +'<td data-l="歌手"'+(ai.mus?'':' class="nv"')+'>'+artCell+'</td>'
       +'<td data-l="时长">'+durCell+'</td>'
       +'<td class="num" data-l="'+LB_A+'">'+ratePrev+'</td>'
       +'<td class="num" data-l="'+LB_B+'" style="font-weight:600">'+rateNow+(a&&a.at?'<div class="snap-at">采于 '+bjTime(a.at)+'</div>':'')+'</td>'
@@ -10284,7 +10286,7 @@ function render(){
       +'<td class="num" data-l="入池">'+fmtAdded(e.added)+'</td>'
       +'<td class="num" data-l="有效期">'+esc(e.exp||'永久')+'</td>'
       +'<td data-l="套餐">'+plCell+'</td>'
-      +'<td data-l="备注">'+noteCell+'</td>'
+      +'<td data-l="备注"'+((e.rb||e.note)?'':' class="nv"')+'>'+noteCell+'</td>'
       +'<td>'+(marks||'<span style="color:#bbb">正常</span>')+'</td>'
       +'<td>'+opCell+'</td></tr>';
   });
