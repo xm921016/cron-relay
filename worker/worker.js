@@ -9245,10 +9245,11 @@ button.gray{background:#888}button.warn{background:#a32d2d}button:disabled{opaci
 .dr.on .dn,.dr.on .dx{display:inline}
 .tab{padding:8px 14px;border-radius:8px;background:#eee;color:#555;cursor:pointer;font-size:13px}
 .tab.on{background:#3b6d11;color:#fff}
-.twrap{overflow:auto;max-height:calc(100vh - 170px);border:1px solid #eee;border-radius:10px}
+.twrap,.rgwrap{overflow:auto;max-height:calc(100vh - 170px);border:1px solid #eee;border-radius:10px}
+/* .rgwrap = 2026-11-15 「最近生成」链接小表专用容器：不能复用 .twrap 的手机卡片列序（那是按号池大表 20 列写死的，会把编码/买家列藏掉只剩作废按钮） */
 table{border-collapse:collapse;width:auto;min-width:100%;max-width:none;font-size:12.5px;white-space:nowrap}
 th{background:#f5f6f8;text-align:left;padding:8px 9px;color:#444;border-bottom:1px solid #eee}
-.twrap th{position:sticky;top:0;z-index:3;box-shadow:inset 0 -1px 0 #eee,0 1px 4px rgba(0,0,0,.05)}
+.twrap th,.rgwrap th{position:sticky;top:0;z-index:3;box-shadow:inset 0 -1px 0 #eee,0 1px 4px rgba(0,0,0,.05)}
 td{padding:7px 9px;border-bottom:1px solid #f2f2f2}
 tr:hover td{background:#fafdf5}
 .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:8px;margin-right:3px}
@@ -9341,6 +9342,18 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap{border:0;border-radius:0;background:transparent;overflow-y:auto}
   .twrap table,.twrap tbody{display:block}
   .twrap thead{display:none}
+  /* 2026-11-15：链接列表（最近生成）单独一套手机卡片流 —— 每条一张白卡，全部字段
+     （类型/客服/套餐/状态/编码/买家/生成/登记/备注/操作）都可见，编码加大可点复制。 */
+  .rgwrap{border:0;border-radius:0;background:transparent;overflow-y:auto}
+  .rgwrap thead{display:none}
+  .rgwrap table,.rgwrap tbody{display:block}
+  .rgwrap tr{display:block;background:#fff;border:1px solid #e4e9f0;border-radius:10px;margin:8px 0;padding:8px 11px}
+  .rgwrap td{display:block;padding:2px 0;border:0;font-size:12px;line-height:1.6;color:#33506e;white-space:normal}
+  .rgwrap td[data-l]::before{content:attr(data-l) ' ';color:#9aa5b1;font-size:10px;margin-right:3px}
+  .rgwrap td[data-l="编码"]{padding:2px 0 6px}
+  .rgwrap td[data-l="编码"]::before{display:none}
+  .rgwrap td[data-l="编码"] span{font-size:15px;font-weight:700;letter-spacing:.5px}
+  .rgwrap td[data-l="备注"]:empty{display:none}
   /* ===== 2026-11-15 方案④「单页 + 详情弹窗」（用户在④预览拍板）—— 18:28 二次返工 =====
      第一版只做了收纳重排、观感仍像桌面压缩版，用户打回；本次照预览稿 .card4/.chips/.seg
      的视觉语言整个重写手机端样式（纯 CSS，桌面端 >860px 依旧零影响）：
@@ -11033,8 +11046,9 @@ function rcRescue(){
       bts[k].onclick=function(){
         var v=this.getAttribute('data-rc-copy')||'',self=this;
         var done=function(){self.textContent='已复制';setTimeout(function(){self.textContent='复制';},1200);};
-        if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(v).then(done,function(){window.prompt('手动复制：',v);});}
-        else{window.prompt('手动复制：',v);}
+        var fail=function(){self.textContent='复制失败';setTimeout(function(){self.textContent='复制';},1500);};
+        var ret=rgCp(v);
+        if(ret&&ret.then){ ret.then(function(ok){ if(ok)done(); else fail(); }); } else { done(); }
       };
     }
   }).catch(function(){$('rcRescue').disabled=false;$('rcm').textContent='网络错误';$('rcm').className='msg err';});
@@ -11271,21 +11285,40 @@ $('rgGo').onclick=function(){
     var cpb=$('rgCpBt');
     if(cpb) cpb.onclick=function(){
       var done=function(){ cpb.textContent='已复制'; setTimeout(function(){ cpb.textContent='复制链接'; },1200); };
+      var fail=function(){ cpb.textContent='复制失败，长按上面链接手动复制'; setTimeout(function(){ cpb.textContent='复制链接'; },2600); };
       var ret=rgCp(SHORT_LINK);
-      if(ret&&ret.then){ ret.then(function(ok){ if(ok) done(); }); } else { done(); }
+      if(ret&&ret.then){ ret.then(function(ok){ if(ok) done(); else fail(); }); } else { done(); }
     };
     rgLoad();
   }).catch(function(){ $('rgGo').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
 };
+/* 2026-11-15：APK WebView 里 navigator.clipboard.writeText 会被拒（无权限），
+   原 prompt 兜底在 WebView 里只弹系统黑窗、剪贴板里啥也没有（买家截图实测）。
+   改成 textarea+execCommand('copy') 兜底：必须在用户点击手势内调用（现有调用都是点击触发，满足），
+   兜底也失败才返回 false，由按钮文案提示长按手动复制，不再弹任何系统对话框。 */
+function rgCopyExec(v){
+  return new Promise(function(res){
+    var ok=false,ta=null;
+    try{
+      ta=document.createElement('textarea');
+      ta.value=v;ta.setAttribute('readonly','');
+      ta.style.position='fixed';ta.style.top='-9999px';ta.style.opacity='0';
+      document.body.appendChild(ta);
+      ta.focus();ta.select();ta.setSelectionRange(0,v.length);
+      ok=document.execCommand('copy');
+    }catch(e){ok=false;}
+    if(ta&&ta.parentNode){ta.parentNode.removeChild(ta);}
+    res(!!ok);
+  });
+}
 function rgCp(url){
-  /* 点编码复制整条链接；剪贴板 API 只在 https 下有，失败就弹框让用户手动复制。
-     2026-11-13：改成返回 promise（true=真的写进剪贴板），供「复制链接」按钮提示状态。 */
+  /* 点编码复制整条链接。2026-11-15：剪贴板 API 失败时先试 execCommand 兜底（APK WebView 可用），
+     返回 promise（true=真的写进剪贴板），供「复制链接」按钮提示状态。 */
   if(navigator.clipboard&&navigator.clipboard.writeText){
     return navigator.clipboard.writeText(url).then(function(){ return true; })
-      .catch(function(){ window.prompt('完整链接（手动复制）：', url); return false; });
+      .catch(function(){ return rgCopyExec(url); });
   }
-  window.prompt('完整链接（手动复制）：', url);
-  return Promise.resolve(false);
+  return rgCopyExec(url);
 }
 function rgLoad(){
   var t=rgTok();
@@ -11300,7 +11333,7 @@ function rgLoad(){
     if(!(r.ok&&r.d&&r.d.ok)){ $('rgList').innerHTML='<div style="color:#b06a00;font-size:12px">读取失败：'+esc((r.d&&r.d.message)||'')+'</div>'; return; }
     var rows=r.d.rows||[];
     if(!rows.length){ $('rgList').innerHTML='<div style="color:#999;font-size:12px">'+(qv?'没查到。换客户手机号、或把整条链接粘进来再试（只填 8 位编码也行）。':(stv?'这个状态下没有链接。':'还没有生成过链接。'))+'</div>'; return; }
-    var h='<div class="twrap" style="max-height:250px;overflow:auto"><table style="font-size:12px"><thead><tr><th>类型</th><th>客服</th><th>套餐</th><th>状态</th><th title="点一下复制完整链接">编码</th><th>买家</th><th>生成时间</th><th>登记时间</th><th>备注</th><th>操作</th></tr></thead><tbody>';
+    var h='<div class="rgwrap" style="max-height:250px;overflow:auto"><table style="font-size:12px"><thead><tr><th>类型</th><th>客服</th><th>套餐</th><th>状态</th><th title="点一下复制完整链接">编码</th><th>买家</th><th>生成时间</th><th>登记时间</th><th>备注</th><th>操作</th></tr></thead><tbody>';
     rows.forEach(function(x){
       var st=String(x.state||'unused');
       var stn=st==='unused'?'未使用':(st==='used'?'已使用':(st==='void'?'已作废':(st==='expired'?'已过期':'—')));
@@ -11310,14 +11343,14 @@ function rgLoad(){
       var pl=(kn!=='new'&&x.fix_exp)?('原单到 '+esc(x.fix_exp)):esc(x.plan||'—');
       var code=esc(x.token||'');
       var link=location.origin+'/r/'+code;
-      h+='<tr><td>'+rgKindName(kn)+'</td><td>'+esc(x.agent||'')+'</td><td>'+pl+'</td>'
-        +'<td>'+(st==='unused'?'<b>'+stn+'</b>':('expired'===st?'<span style="color:#b06a00">'+stn+'</span>':stn))+'</td>'
-        +'<td><span data-cp="'+link+'" title="点击复制完整链接" style="cursor:pointer;font-family:ui-monospace,Consolas,monospace;color:#3b6d11;text-decoration:underline dotted">'+code+'</span></td>'
-        +'<td>'+esc(x.phone||x.uname||'—')+'</td>'
-        +'<td>'+esc(bjTime(x.ctime))+'</td>'
-        +'<td>'+(x.used_at?esc(bjTime(x.used_at)):'—')+'</td>'
-        +'<td>'+esc(x.note||'')+'</td>'
-        +'<td>'+((st==='unused'||st==='expired')?('<button class="mini gray" data-void="'+esc(x.token||'')+'">作废</button>'):'—')+'</td></tr>';
+      h+='<tr><td data-l="类型">'+rgKindName(kn)+'</td><td data-l="客服">'+esc(x.agent||'')+'</td><td data-l="套餐">'+pl+'</td>'
+        +'<td data-l="状态">'+(st==='unused'?'<b>'+stn+'</b>':('expired'===st?'<span style="color:#b06a00">'+stn+'</span>':stn))+'</td>'
+        +'<td data-l="编码"><span data-cp="'+link+'" title="点击复制完整链接" style="cursor:pointer;font-family:ui-monospace,Consolas,monospace;color:#3b6d11;text-decoration:underline dotted">'+code+'</span></td>'
+        +'<td data-l="买家">'+esc(x.phone||x.uname||'—')+'</td>'
+        +'<td data-l="生成时间">'+esc(bjTime(x.ctime))+'</td>'
+        +'<td data-l="登记时间">'+(x.used_at?esc(bjTime(x.used_at)):'—')+'</td>'
+        +'<td data-l="备注">'+esc(x.note||'')+'</td>'
+        +'<td data-l="操作">'+((st==='unused'||st==='expired')?('<button class="mini gray" data-void="'+esc(x.token||'')+'">作废</button>'):'—')+'</td></tr>';
     });
     h+='</tbody></table></div>';
     if(qv){ h='<div style="font-size:11.5px;color:#666;margin:0 0 5px">查询「'+esc(qv)+'」：'+rows.length+' 条（点「显示全部」回最近列表）</div>'+h; }
