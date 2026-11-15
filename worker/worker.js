@@ -9326,31 +9326,40 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap{border:0;border-radius:0;background:transparent;overflow-y:auto}
   .twrap table,.twrap tbody{display:block}
   .twrap thead{display:none}
-  .twrap tr{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;background:#fff;
-    border:1px solid #e8eaee;border-radius:12px;padding:9px 11px;margin:0 0 9px}
-  .twrap td{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 5px;border:0;padding:2px 0;
-    white-space:normal;flex:1 1 45%;min-width:0;font-size:12.5px;line-height:1.5}
-  .twrap td::before{color:#9aa5b1;font-size:11px;flex:0 0 auto}
-  .twrap td .snap-at{flex:0 0 100%}
-  .twrap td:nth-child(1){order:0;flex:0 0 auto;font-size:11px;color:#b3bcc6;padding-bottom:0}
-  .twrap td:nth-child(2){order:1;flex:0 0 auto}
-  .twrap td:nth-child(3){order:2;flex:1 1 auto;font-size:14px;font-weight:600;color:#222;padding-bottom:3px}
-  .twrap td:nth-child(4){order:3;flex:0 0 auto}
-  .twrap td:nth-child(10){order:4;flex:1 1 45%;font-size:14px}
-  .twrap td:nth-child(11){order:5;flex:1 1 45%}
-  .twrap td:nth-child(17){order:6;flex:0 0 100%;padding:4px 0 2px}
-  .twrap td:nth-child(9){order:7;flex:1 1 45%}
-  .twrap td:nth-child(12){order:8;flex:1 1 45%}
-  .twrap td:nth-child(8){order:9;flex:1 1 45%}
-  .twrap td:nth-child(14){order:10;flex:1 1 45%}
-  .twrap td:nth-child(15){order:11;flex:1 1 45%}
-  .twrap td:nth-child(16){order:12;flex:1 1 45%}
-  .twrap td:nth-child(13){order:13;flex:0 0 100%}
-  .twrap td:nth-child(5){order:14;flex:1 1 45%}
-  .twrap td:nth-child(7){order:15;flex:0 0 100%}
-  .twrap td:nth-child(6){order:16;flex:1 1 45%;word-break:break-all}
-  .twrap td:nth-child(18){order:20;flex:0 0 100%;padding-top:6px;margin-top:4px;border-top:1px solid #f2f4f6}
-  .twrap td:nth-child(18) button{width:100%}
+  /* 2026-11-15 手机卡片 v3 整体重排（用户反馈：旧 flex 流式 18 格互相挤压、字号小，
+     一个账号的信息看不全、整体显得乱）。改两列 grid：标签在上、值在下；
+     头部=池子+账号名；UID 独占一行；播放/商务信息两列对齐；邮箱/备注/标记/按钮跨两列；
+     空值格(nv)与时长空值隐藏；序号隐藏。桌面表格不受影响（规则在媒体查询内）。 */
+  .twrap tr{display:grid;grid-template-columns:1fr 1fr;gap:2px 14px;background:#fff;
+    border:1px solid #e8eaee;border-radius:12px;padding:11px 13px;margin:0 0 10px}
+  .twrap td{display:flex;flex-direction:column;align-items:flex-start;gap:1px;border:0;padding:3px 0;
+    white-space:normal;min-width:0;font-size:13.5px;line-height:1.45;color:#1f2d3d}
+  .twrap td::before{content:attr(data-l);color:#9aa5b1;font-size:10.5px;flex:0 0 auto}
+  .twrap td:not([data-l])::before{content:none}
+  .twrap td .snap-at{flex:0 0 auto;font-size:10.5px;color:#9aa5b1}
+  .twrap td.nv{display:none}
+  .twrap td:nth-child(1){display:none}
+  .twrap td:nth-child(2){order:0;padding:5px 0}
+  .twrap td:nth-child(3){order:1;font-size:15px;font-weight:700;color:#17324f;word-break:break-all;padding:5px 0}
+  .twrap td:nth-child(5){order:2;grid-column:1/-1;color:#33506e;font-weight:600}
+  .twrap td:nth-child(4){order:3}
+  .twrap td:nth-child(17){order:4}
+  .twrap td:nth-child(16){order:5}
+  .twrap td:nth-child(10){order:6}
+  .twrap td:nth-child(11){order:7}
+  .twrap td:nth-child(12){order:8}
+  .twrap td:nth-child(13){order:9}
+  .twrap td:nth-child(15){order:10}
+  .twrap td:nth-child(14){order:11}
+  .twrap td:nth-child(7){order:12}
+  .twrap td:nth-child(8){order:13}
+  .twrap td:nth-child(9){order:14}
+  .twrap td:nth-child(6){order:15;grid-column:1/-1;word-break:break-all}
+  .twrap td:nth-child(18){order:16;grid-column:1/-1}
+  .twrap td:nth-child(19){order:17;grid-column:1/-1;flex-direction:row;flex-wrap:wrap;gap:4px;align-items:center}
+  /* 标记列是 badge 流，按钮列独占底部横条 —— 都改横向排，column 会竖着一颗颗排 */
+  .twrap td:nth-child(20){order:18;grid-column:1/-1;flex-direction:row;padding-top:8px;margin-top:5px;border-top:1px solid #f2f4f6}
+  .twrap td:nth-child(20) button{width:100%;text-align:center}
   /* 2026-11-15：空值格子（只含淡色「—/公益」占位）被 order 排到卡片末行时，
      白底淡字看起来像一大块空白（用户截图反馈）。手机卡片流直接隐藏这些格子；
      桌面表格的列占位不受影响（规则在媒体查询内）。备注/邮箱/歌曲/歌手空值命中。 */
@@ -10271,13 +10280,13 @@ function render(){
     h+='<tr><td class="num">'+(i+1)+'</td>'
       +'<td><span class="badge '+(r.pool==='hz'?'b-hz">主群':'b-dz">定制')+'</span></td>'
       +'<td>'+esc(String(e.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</td>'
-      +'<td>'+agCell+'</td>'
+      +'<td'+(e.agent?'':' class="nv"')+'>'+agCell+'</td>'
       +'<td class="num" data-l="UID">'+esc(e.uid)+'</td>'
       // 2026-11-02：新增邮箱列（数据来自 /api/console/data 的 entries[].email，dz 池走对穿同样带）
       +'<td class="mail" data-l="邮箱"'+(e.email?'':' class="nv"')+'>'+(e.email?'<span class="eml" title="'+esc(e.email)+'（点选可整段复制）">'+esc(e.email)+'</span>':'<span style="color:#bbb">—</span>')+'</td>'
       +'<td class="num" data-l="歌曲"'+(e.song?'':' class="nv"')+'>'+song+'</td>'
       +'<td data-l="歌手"'+(ai.mus?'':' class="nv"')+'>'+artCell+'</td>'
-      +'<td data-l="时长">'+durCell+'</td>'
+      +'<td data-l="时长"'+(dur>0?'':' class="nv"')+'>'+durCell+'</td>'
       +'<td class="num" data-l="'+LB_A+'">'+ratePrev+'</td>'
       +'<td class="num" data-l="'+LB_B+'" style="font-weight:600">'+rateNow+(a&&a.at?'<div class="snap-at">采于 '+bjTime(a.at)+'</div>':'')+'</td>'
       +'<td data-l="'+LB_D+'">'+dCell+'</td>'
