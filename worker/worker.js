@@ -6974,7 +6974,10 @@ async function handle(request) {
         const key = String(p.pool || '') + '|' + String(p.uid != null ? p.uid : '');
         const a = accMap.get(key);
         let why = '';
-        if (!a) why = '账号已不在池里（被删/迁移）';
+        // 2026-11-15：relogin2（网易官方波动口径重登引导）面向已删号买家——账号被二次判死
+        // 删除后 mail_queue 里仍要给他发信，故豁免「必须在池」校验，email/name/agent/exp
+        // 回退用队列行自带值；其余 kind 维持原护栏不动。
+        if (!a && String(p.kind || '') !== 'relogin2') why = '账号已不在池里（被删/迁移）';
         else if (!String(a.email || '').trim()) why = '未登记邮箱';
         else if (String(p.kind || '').indexOf('exp') === 0) {
           if (Number(a.pub) === 1) why = '已降级公益号（永久有效，不提醒）';
@@ -6987,11 +6990,11 @@ async function handle(request) {
           continue;
         }
         // 群号发送时现查：客服改群号立即生效，不用重发
-        const agent = normAgent(a.agent || p.agent);
+        const agent = normAgent((a ? a.agent : p.agent) || p.agent);
         const grp = agentGroupOf(rc, agent);
         const item = { pool: String(p.pool || ''), uid: String(p.uid != null ? p.uid : ''), kind: String(p.kind || ''),
-          ref: String(p.ref || ''), email: String(a.email || '').trim(), name: String(a.name || ''), agent: agent,
-          group: grp, exp: String(a.exp || '').slice(0, 10), created_at: String(p.created_at || '') };
+          ref: String(p.ref || ''), email: String((a ? a.email : p.email) || '').trim(), name: String((a ? a.name : p.name) || ''), agent: agent,
+          group: grp, exp: String((a ? a.exp : p.exp) || '').slice(0, 10), created_at: String(p.created_at || '') };
         if (String(p.kind || '') === 'songchange') {
           // 2026-11-13：songchange 附带新旧歌名（查不到 song_meta 的用「歌+id」兜底）
           const scParts = String(p.ref || '').split(':');
