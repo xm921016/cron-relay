@@ -9265,6 +9265,8 @@ th.thin,td.mail,td[data-l="歌曲"],td[data-l="歌手"]{padding-left:5px;padding
 /* 2026-10-25 售后标签新增两色：绿=已完成不用管，蓝=刚入池正常等待 */
 .b-green{background:#e3f4e3;color:#1e7a1e}.b-blue{background:#e3effa;color:#255ea6}
 .snap-at{font-size:10px;color:#aaa;font-weight:400;margin-top:1px;line-height:1.2}
+/* 2026-11-15 v4：今日650格微型进度条，只在手机卡片流里显示（桌面隐藏） */
+.pbar6{display:none}
 .num{font-family:ui-monospace,Consolas,monospace;color:#555}
 a.song{color:#3b6d11;text-decoration:none;border-bottom:1px dotted #3b6d11}
 .up{color:#c0392b;font-weight:600}.down{color:#1e8449;font-weight:600}.flat{color:#999}
@@ -9326,52 +9328,56 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap{border:0;border-radius:0;background:transparent;overflow-y:auto}
   .twrap table,.twrap tbody{display:block}
   .twrap thead{display:none}
-  /* 2026-11-15 手机卡片 v3 整体重排（用户反馈：旧 flex 流式 18 格互相挤压、字号小，
-     一个账号的信息看不全、整体显得乱）。改两列 grid：标签在上、值在下；
-     头部=池子+账号名；UID 独占一行；播放/商务信息两列对齐；邮箱/备注/标记/按钮跨两列；
-     空值格(nv)与时长空值隐藏；序号隐藏。桌面表格不受影响（规则在媒体查询内）。 */
-  .twrap tr{display:grid;grid-template-columns:1fr 1fr;gap:2px 14px;background:#fff;
-    border:1px solid #e8eaee;border-radius:12px;padding:11px 13px;margin:0 0 10px}
-  .twrap td{display:flex;flex-direction:column;align-items:flex-start;gap:1px;border:0;padding:3px 0;
-    white-space:normal;min-width:0;font-size:13.5px;line-height:1.45;color:#1f2d3d}
-  .twrap td::before{content:attr(data-l);color:#9aa5b1;font-size:10.5px;flex:0 0 auto}
+  /* 2026-11-15 手机卡片 v4 = 预览方案 A-1「紧凑流线」（用户在 A/A-1/A-2/A-3 预览里选定）：
+     ① 头部一行 = 池badge + 账号名(粗、超长省略) + 有效期(右侧灰pill带标签)；
+     ② 播放 KPI 一排 5 格（昨日650/今日650/较昨日/近30日播放/笔记任务）灰底圆角居中，
+        今日650格内附微型进度条（.pbar6，桌面 display:none）；
+     ③ 其余字段（客服/UID/歌曲/音乐人/时长/邮箱/套餐/入池/备注）按「标签：值」小字两列流，
+        歌曲独占整行；nv 空值格隐藏，hidden 后剩余格由 grid dense 回填；
+     ④ 底部一行 = 标记(badge流) 左 + 编辑按钮 右，同一行省高度；
+     序号隐藏；桌面表格不受影响（全部规则在媒体查询内）。 */
+  .twrap tr{display:grid;grid-template-columns:repeat(6,1fr);grid-auto-flow:dense;gap:4px 8px;
+    background:#fff;border:1px solid #e8eaee;border-radius:13px;padding:10px 12px 9px;margin:0 0 9px}
+  .twrap td{display:block;min-width:0;border:0;padding:1px 0;font-size:11.5px;line-height:1.5;color:#33506e;white-space:normal}
+  .twrap td::before{content:attr(data-l) '：';color:#9aa5b1;font-size:10px;margin-right:2px}
   .twrap td:not([data-l])::before{content:none}
-  .twrap td .snap-at{flex:0 0 auto;font-size:10.5px;color:#9aa5b1}
+  .twrap td .snap-at{font-size:10px;color:#9aa5b1}
   .twrap td.nv{display:none}
   .twrap td:nth-child(1){display:none}
-  .twrap td:nth-child(2){order:0;padding:5px 0}
-  .twrap td:nth-child(3){order:1;font-size:15px;font-weight:700;color:#17324f;word-break:break-all;padding:5px 0}
-  .twrap td:nth-child(5){order:2;grid-column:1/-1;color:#33506e;font-weight:600}
-  .twrap td:nth-child(4){order:3}
-  .twrap td:nth-child(17){order:4}
-  .twrap td:nth-child(16){order:5}
-  .twrap td:nth-child(10){order:6}
-  .twrap td:nth-child(11){order:7}
-  .twrap td:nth-child(12){order:8}
-  .twrap td:nth-child(13){order:9}
-  .twrap td:nth-child(15){order:10}
-  .twrap td:nth-child(14){order:11}
-  .twrap td:nth-child(7){order:12}
-  .twrap td:nth-child(8){order:13}
-  .twrap td:nth-child(9){order:14}
-  .twrap td:nth-child(6){order:15;grid-column:1/-1;word-break:break-all}
-  .twrap td:nth-child(18){order:16;grid-column:1/-1}
-  .twrap td:nth-child(19){order:17;grid-column:1/-1;flex-direction:row;flex-wrap:wrap;gap:4px;align-items:center}
-  /* 标记列是 badge 流，按钮列独占底部横条 —— 都改横向排，column 会竖着一颗颗排 */
-  .twrap td:nth-child(20){order:18;grid-column:1/-1;flex-direction:row;padding-top:8px;margin-top:5px;border-top:1px solid #f2f4f6}
-  .twrap td:nth-child(20) button{width:100%;text-align:center}
-  /* 2026-11-15：空值格子（只含淡色「—/公益」占位）被 order 排到卡片末行时，
-     白底淡字看起来像一大块空白（用户截图反馈）。手机卡片流直接隐藏这些格子；
-     桌面表格的列占位不受影响（规则在媒体查询内）。备注/邮箱/歌曲/歌手空值命中。 */
-  /* v2.20 改 class 方案：:has() 需 Chromium 105+，旧 WebView 内核不支持会整体降级失效
-     （用户实测空白仍在）。渲染时空值格子直接带 class=nv，任何内核都支持。 */
-  .twrap td.nv{display:none}
-  .twrap td[data-l="UID"]{color:#475569;font-weight:600}
-  /* 2026-10-27：列名不再用 nth-child 硬编码，改成读 td 的 data-l 属性。
-     原来每加一列都要手工重排 15 条 nth-child，10-26 就因为对不上出过一次排版事故；
-     改用 data-l 后只有「显示顺序」还需要 nth-child，标签永远跟着格子走。 */
-  .twrap td::before{content:attr(data-l);color:#9aa5b1;font-size:11px;flex:0 0 auto}
-  .twrap td:not([data-l])::before{content:none}
+  /* 头部行 */
+  .twrap td:nth-child(2){grid-column:1/2;grid-row:1;align-self:center}
+  .twrap td:nth-child(3){grid-column:2/6;grid-row:1;font-size:15px;font-weight:700;color:#17324f;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;align-self:center;padding:2px 0}
+  .twrap td:nth-child(16){grid-column:6/7;grid-row:1;justify-self:end;align-self:center;display:flex;align-items:center;
+    background:#f0f2f5;border-radius:20px;padding:3px 8px;font-size:10.5px;font-weight:700;color:#33506e;white-space:nowrap;max-width:100%}
+  .twrap td:nth-child(16)::before{font-size:9px;font-weight:400;margin-right:3px}
+  /* KPI 行：5 格灰底 */
+  .twrap td:nth-child(10),.twrap td:nth-child(11),.twrap td:nth-child(12),.twrap td:nth-child(13),.twrap td:nth-child(14){
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+    background:#f6f8fb;border-radius:8px;padding:5px 2px 4px;text-align:center;font-weight:700;color:#17324f}
+  .twrap td:nth-child(10){grid-column:1/2;grid-row:2}
+  .twrap td:nth-child(11){grid-column:2/3;grid-row:2;font-size:13.5px}
+  .twrap td:nth-child(12){grid-column:3/4;grid-row:2}
+  .twrap td:nth-child(13){grid-column:4/5;grid-row:2}
+  .twrap td:nth-child(14){grid-column:5/6;grid-row:2}
+  .twrap td:nth-child(10)::before,.twrap td:nth-child(11)::before,.twrap td:nth-child(12)::before,.twrap td:nth-child(13)::before,.twrap td:nth-child(14)::before{font-size:8.5px;font-weight:400;margin-right:0;white-space:nowrap}
+  .twrap td:nth-child(11) .snap-at{font-size:8.5px}
+  .twrap .pbar6{display:block;height:3px;width:100%;background:#e2e7ee;border-radius:2px;margin-top:3px;overflow:hidden;flex:0 0 auto}
+  .twrap .pbar6 i{display:block;height:100%;background:#3b6d11;border-radius:2px}
+  /* 信息流：两列小字（nv 隐藏后 dense 回填，同排另一半留空属正常） */
+  .twrap td:nth-child(5){grid-column:1/4}
+  .twrap td:nth-child(4){grid-column:4/7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .twrap td:nth-child(7){grid-column:1/7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .twrap td:nth-child(8){grid-column:1/4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .twrap td:nth-child(9){grid-column:4/7}
+  .twrap td:nth-child(6){grid-column:1/4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .twrap td:nth-child(17){grid-column:4/7}
+  .twrap td:nth-child(15){grid-column:1/4}
+  .twrap td:nth-child(18){grid-column:4/7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* 底部：标记 左 + 操作 右 同一行 */
+  .twrap td:nth-child(19){grid-column:1/4;display:flex;flex-wrap:wrap;gap:3px;align-items:center;padding-top:6px}
+  .twrap td:nth-child(20){grid-column:4/7;display:flex;gap:5px;align-items:center;padding-top:6px}
+  .twrap td:nth-child(20) button{flex:1;padding:6px 0;font-size:11.5px;text-align:center;border-radius:8px}
   /* 「删号记录」6 列表 / 「标记对照表」3 列表，在 360px 下每列只剩几十 px，会被挤成一字一行。
      手机端改成一条一条的块：删号记录 → 首行 池+UID+账号，下面 原因/通知/时间 各占一行带标签；
      对照表 → 标记一行、意思一行、要怎么处理一行（前缀「意思｜」「处理｜」代替表头）。桌面端不受影响。 */
@@ -10288,7 +10294,7 @@ function render(){
       +'<td data-l="歌手"'+(ai.mus?'':' class="nv"')+'>'+artCell+'</td>'
       +'<td data-l="时长"'+(dur>0?'':' class="nv"')+'>'+durCell+'</td>'
       +'<td class="num" data-l="'+LB_A+'">'+ratePrev+'</td>'
-      +'<td class="num" data-l="'+LB_B+'" style="font-weight:600">'+rateNow+(a&&a.at?'<div class="snap-at">采于 '+bjTime(a.at)+'</div>':'')+'</td>'
+      +'<td class="num" data-l="'+LB_B+'" style="font-weight:600">'+rateNow+(a&&a.rate!=null?'<div class="pbar6"><i style="width:'+(a.rate>100?100:a.rate)+'%"></i></div>':'')+(a&&a.at?'<div class="snap-at">采于 '+bjTime(a.at)+'</div>':'')+'</td>'
       +'<td data-l="'+LB_D+'">'+dCell+'</td>'
       +'<td class="num" data-l="近30日播放">'+(a&&a.rpc30!=null?a.rpc30:'—')+'</td>'
       +'<td data-l="笔记任务">'+misCell+'</td>'
