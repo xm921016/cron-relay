@@ -478,6 +478,35 @@ def notify_nomus(email, nickname, name, group=""):
     return send_user_email(email, subject, body)
 
 
+def notify_songok(email, nickname, name, group=""):
+    """误报澄清（2026-11-16 新增，kind=songok）：
+
+    背景：11-16 08:05 的冻结歌波次因数据异常把大量正常在涨的号误判成「歌被冻结」
+    （并误换了 16 个号的歌）。修复后向受影响号主统一澄清：之前的冻结通知作废、
+    歌没问题、被自动换过的已换回。一封邮件同时覆盖两类收件人（误报收件人 +
+    被误换歌收件人），文案里两种情况都说到，号主对号入座即可。
+    走 mail_queue 队列（kind=songok，ref=澄清日期，同号同日只发一封）。
+    人工入队（队列行直接 INSERT），worker 不会自动产生这个 kind。
+    """
+    if not (email or "").strip():
+        return False
+    subject = "【网易音乐人650任务】更正：今早那封「歌曲冻结」通知是系统误报，你的歌没问题"
+    body = (
+        f"你好，{_who(nickname, name)}：\n\n"
+        "先说结论：今早（11月16日）你收到的那封「歌曲被冻结、建议换歌」的通知是系统误报，\n"
+        "请以这封邮件为准，之前的判断作废，你不需要换歌，也无需做任何操作。\n\n"
+        "经人工逐一复核：你账号登记的歌曲数据一切正常，播放一直被平台正常计入，\n"
+        "任务进度也在正常增长，不存在邮件里说的冻结情况。\n\n"
+        "这次误报是系统升级过程中一次数据异常导致的误判，我们已经在当天修复。\n"
+        "如果你今早还收到了一封「登记歌曲已更换」的邮件（系统自动换了歌），不用担心：\n"
+        "我们已把你的歌曲换回原来那一首，进度不受影响，你同样不需要任何操作。\n\n"
+        "给你带来的困扰我们深表歉意。如有任何疑问，请到售后群联系客服。\n\n"
+        + _group_line(group) + "\n\n"
+        "——" + SIGN
+    )
+    return send_user_email(email, subject, body)
+
+
 def notify_songchange(email, nickname, name, group="", song_old="", song_new="", notmine=False):
     """主动换歌通知（2026-11-13 新增，kind=songchange）：
 
