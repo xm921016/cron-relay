@@ -436,6 +436,10 @@ jobs:
       NB_POOL_40: ${{ secrets.NB_POOL_40 }}
       EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
       EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+      # 2026-11-16：50 秒口径 A/B 实验（文档/50秒口径A-B实验看板-20261116.md）。
+      # Secret AB_EXP_SONGS=实验歌曲 id 逗号清单；不存在/为空时 run.py 行为与现网逐字节一致。
+      # 实验结束清空 Secret 即回退。补跑（backfill/dispatch）共用本 env，实验歌口径自动延续。
+      AB_EXP_SONGS: ${{ secrets.AB_EXP_SONGS }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

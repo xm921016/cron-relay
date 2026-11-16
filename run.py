@@ -57,6 +57,18 @@ MIN_PLAY_SECONDS = 35
 # 播放进度占比区间：过半即可，留少量随机（0.55~0.70）避免恒定比例成为机器特征
 PLAY_RATIO_MIN, PLAY_RATIO_MAX = 0.55, 0.70
 
+# ---- 2026-11-16：50 秒口径 A/B 实验（仅 hz，dz 未接入本开关）----
+# 背景：2026-10-20 实测「不过半不计有效」后一直按 55%~70% 播；但竞品日志（同日实证打卡成功）
+# 显示 50s 即可计有效。两者可能是不同指标（每日打卡任务 vs 创作者有效播放），用 A/B 实验定夺。
+# 机制：Secret AB_EXP_SONGS = 实验歌曲 id 逗号清单（15 首实验组号主的歌）。
+#   命中实验歌的播放按 55~60s 上报（>50s 打卡阈值留余量、<半首歌），其余歌照旧（对照组语义=
+#   全池未在名单里的歌）。实验组/对照组各 15 号主的歌，名单与判定见
+#   文档/50秒口径A-B实验看板-20261116.md（每日自动化 10:30 核验）。
+# 安全性：Secret 不存在/为空 → AB_EXP_SONGS 为空集 → 行为与现网逐字节一致（默认关）。
+# 实验结束后清空 Secret 即完全回退，无需回滚代码。
+AB_EXP_SONGS = {s.strip() for s in os.environ.get("AB_EXP_SONGS", "").replace("，", ",").split(",") if s.strip()}
+AB_EXP_SECONDS = (55, 60)   # 实验口径：随机 55~60 秒
+
 # 跨群（2026-10-20）：只向对端群拉「歌曲 id 列表」，双方的 KV 账号池、人数、上限完全独立。
 # 鉴权复用本群已有的群口令 NB_PASS：对端 worker 的 PEER_PASS 键里存的就是本群口令（管理员写成对穿的），
 # 所以不需要新建任何 GitHub Secret。PEER_PASS 环境变量留作以后手工覆盖用。
@@ -883,20 +895,30 @@ def main():
         random.shuffle(tasks)
 
         cnt, secs = 0, []
+        exp_cnt = 0   # 2026-11-16 A/B：本号命中实验歌的次数（55~60s 口径）
         for sid, dur, pid in tasks:
             if random.random() < skip_prob:
                 continue  # 模拟切歌（切歌即不计有效播放，和真实用户行为一致）
             # 播放进度取整首的 55%~70%：必须越过「听过半才计有效计数」的门槛，
             # 否则 playCount 会涨、创作者后台的有效计数一直是 0。短歌不能报超过自身时长。
             base = dur if dur and dur > 30 else 240
-            t = int(base * random.uniform(PLAY_RATIO_MIN, PLAY_RATIO_MAX))
-            t = min(t, base - 3)                              # 绝不报超过歌曲自身时长
-            t = max(t, min(MIN_PLAY_SECONDS, base - 3))       # 保底 35s，短歌以歌长为界
+            if str(sid) in AB_EXP_SONGS:
+                # 2026-11-16 A/B 实验分支：实验歌按 55~60s 播（默认关=名单空永远走不到这里）
+                t = random.randint(*AB_EXP_SECONDS)
+                t = min(t, base - 3)
+                t = max(t, min(MIN_PLAY_SECONDS, base - 3))
+            else:
+                t = int(base * random.uniform(PLAY_RATIO_MIN, PLAY_RATIO_MAX))
+                t = min(t, base - 3)                              # 绝不报超过歌曲自身时长
+                t = max(t, min(MIN_PLAY_SECONDS, base - 3))       # 保底 35s，短歌以歌长为界
             if client.scrobble(sid, t, pid=pid, page="playlist"):
                 cnt += 1
                 secs.append(t)
+                if str(sid) in AB_EXP_SONGS:
+                    exp_cnt += 1
             time.sleep(random.uniform(1, 3))
-        print(f"  [{name}] 完成 {cnt} 次播放" + (f"，平均 {sum(secs)//len(secs)}s/首" if secs else ""))
+        _ab_tag = f"（[AB] 实验口径 {exp_cnt} 次）" if exp_cnt else ""
+        print(f"  [{name}] 完成 {cnt} 次播放{_ab_tag}" + (f"，平均 {sum(secs)//len(secs)}s/首" if secs else ""))
         if cnt:
             _uid_done = str(acc.get("uid") or name)
             ran_uids.append(_uid_done)
