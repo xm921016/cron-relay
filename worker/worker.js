@@ -3381,6 +3381,11 @@ function d1RowToEntry(r) {
   if (r.no_listen) e.noListen = 1;
   // 2026-11-01：公益号（只帮别人听、自己的歌不进互听环、不签到）。列缺失/老库读不到时按 0 处理。
   if (r.pub) e.pub = 1;
+  // 2026-11-16：已通知重登标记（relogin_at 非空）——控制台「已通知重登」徽章的数据源。
+  //   此前只给 D1_COLS 补了列、这里漏了映射，D1 读到的 relogin_at 在这一步被丢弃，
+  //   控制台 master 条目永远没有 relogin → 徽章永远 false（11-16 实锤，与 planRow 的
+  //   relogin 映射是两条独立链路，别混淆）。
+  if (r.relogin_at) e.relogin = 1;
   return e;
 }
 
