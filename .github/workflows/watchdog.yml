@@ -1,0 +1,91 @@
+name: relay-watchdog
+
+# 2026-11-17 新增：relay 每晚 schedule 触发看门狗。
+# 背景：GitHub schedule 偶发整班丢失（11-16 实例：UTC 08:30 那班整晚都没创建 run，
+#   连注释记录的最大延迟 +8h24 都远远超过），coverage.yml 只查「跑得够不够」，
+#   不查「根本没开跑」→ 漏班整晚空转，只能人工发现（11-17 01:45 手动 dispatch 才补开）。
+# 设计：
+#   · 每天 UTC 16:40 / 18:10（北京 0:40 / 2:10）各查一次，互为备份（watchdog 自己的
+#     schedule 也可能延迟/漏班，一次漏了还有第二次）；
+#   · 判据：run.yml 是否存在「创建时间 ≥ 昨天 14:00（北京）」的 run（任何状态任何事件）——
+#     正常晚：16:30 的 cron run（哪怕延迟到 0:54 才创建）都在窗口内 → 跳过不动；
+#     白天的手动/补跑 run（如 11-16 08:13 的 backfill）在窗口外，不会误判「今晚已开班」；
+#   · 窗口内没有任何 run → 判定漏班，dispatch run.yml 补开（dispatch 不受 0 点闸门限制，
+#     立刻开跑，day 锚点取执行当天北京日期，正落在 0 点后的播放窗口内，只是比 0:30 晚些）；
+#   · 极端情况：cron 延迟超过 0:40 才创建 run，watchdog 会先 dispatch —— 迟到的 cron run
+#     被 concurrency 队列排队，其闸门等次日 0 点 → 自然变成下一晚的轮次，不会双播；
+#   · 补开成功后经 alert-relay 代发邮件（[hz] 前缀），漏班不再无声。
+# 鉴权：全程同仓，GITHUB_TOKEN 即可（workflow_dispatch 事件不受递归限制）。
+
+on:
+  schedule:
+    - cron: '40 16 * * *'      # UTC 16:40 ≈ 北京 0:40
+    - cron: '10 18 * * *'      # UTC 18:10 ≈ 北京 2:10
+  workflow_dispatch: {}
+
+concurrency:
+  group: relay-watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检查今晚 relay 是否已触发，漏则补开
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, urllib.request
+          from datetime import datetime, timedelta, timezone
+
+          TOK = os.environ["GH_TOKEN"]
+          REPO = os.environ["GITHUB_REPOSITORY"]
+          H = {"Authorization": "Bearer " + TOK,
+               "Accept": "application/vnd.github+json",
+               "User-Agent": "relay-watchdog"}
+
+          BJ = timezone(timedelta(hours=8))
+          now = datetime.now(BJ)
+          # 判据窗口：昨天 14:00（北京）之后创建的 run 都算「今晚的班」。
+          cutoff = (now - timedelta(days=1)).replace(hour=14, minute=0, second=0, microsecond=0)
+          print(f"now(北京)={now.isoformat()} cutoff(北京)={cutoff.isoformat()}")
+
+          def api(path, payload=None):
+              req = urllib.request.Request(
+                  "https://api.github.com" + path,
+                  data=json.dumps(payload).encode() if payload is not None else None,
+                  method="POST" if payload is not None else "GET",
+                  headers=H)
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  body = r.read().decode()
+                  return r.status, (json.loads(body) if body else None)
+
+          st, d = api("/repos/%s/actions/workflows/run.yml/runs?per_page=30" % REPO)
+          runs = [r for r in d.get("workflow_runs", [])
+                  if datetime.fromisoformat(r["created_at"].replace("Z", "+00:00")).astimezone(BJ) >= cutoff]
+          print("窗口内 run 数:", len(runs))
+          for r in runs[:5]:
+              print("  #%s %s %s %s created=%s" % (r["run_number"], r["event"], r["status"], r.get("conclusion"), r["created_at"]))
+
+          if runs:
+              print("今晚 relay 已有班（排队/闸门等待/运行中/已完成）→ 不补开")
+              raise SystemExit(0)
+
+          print("窗口内没有任何 relay run → 判定 schedule 漏班，dispatch 补开")
+          st, _ = api("/repos/%s/actions/workflows/run.yml/dispatches" % REPO, {"ref": "main"})
+          print("dispatch HTTP", st)
+
+          # 告警：经 alert-relay 代发（同仓，GITHUB_TOKEN 可派发）。失败只告警不影响补开。
+          try:
+              subject = "[hz] relay 漏触发，watchdog 已自动补开"
+              body = (f"时间：{now.isoformat()}\n"
+                      f"run.yml 在窗口（{cutoff.isoformat()} 之后）没有任何 run，判定 schedule 漏班。\n"
+                      f"watchdog 已自动 dispatch run.yml 补开今晚轮次，开跑时间晚于 0:30 属正常。\n"
+                      f"若 2:10 的二次检查再次补开，说明首轮补开也异常，请人工介入。")
+              st2, _ = api("/repos/%s/actions/workflows/alert-relay.yml/dispatches" % REPO,
+                           {"ref": "main", "inputs": {"subject": subject, "body": body}})
+              print("alert-relay dispatch HTTP", st2)
+          except Exception as e:
+              print("::warning::告警派发失败（不影响补开）:", e)
+          EOF
