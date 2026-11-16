@@ -2974,6 +2974,9 @@ async function artistSwapCandidate(aid, excludeSong, usedSet, excludeList) {
       if (String((ar[0] && ar[0].id) || '') !== String(aid)) continue;
       const dur = Math.round(Number(sg.dt || sg.duration || 0) / 1000);
       if (!dur) continue;
+      // 2026-11-16：fee=1 是真 VIP 锁（免费听众播不完）——登记口/update 已拦，自动换歌
+      // 同样不能把这种歌换进池里（闭环）。fee=8 低音质免费可入账，保留为次选候选。
+      if (Number(sg.fee || 0) === 1) continue;
       const score = Number(sg.fee || 0) === 0 ? 0 : 1;
       if (!best || score < best.score) {
         best = { id: id, name: String(sg.name || ''), dur: dur, fee: Number(sg.fee || 0),
@@ -5808,9 +5811,38 @@ async function handle(request) {
         }
         if (!hist2) {
           return json({ message: (_mk2 === 'fix' ? '补登' : '续费') + '要先有原单，台账里查不到这个手机号/网易号的记录。'
-            + '确实没有原单的，把「这一单是」改回「自动判定」再登记。' }, 404);
+            + '确实没有原单的，把「这一单是」改回「新登记」再登记。' }, 404);
         }
         ent.__force = { kind: _mk2, exp: String(hist2.exp || '').slice(0, 10) };
+      }
+      if (_mk2 === 'ckswap') {
+        /* 2026-11-17：主窗口换绑（EXE「这一单是」选「换绑登录」）。新 CK 在上面已经验过
+           （song 都取到了），v.uid 就是新 CK 的账号 —— 与 /api/ckswap_direct 完全同一落库口径：
+           只换 ck，有效期/歌曲/邮箱/入池日全保留，不写台账，清 relogin。 */
+        const sTgtM = _m2.find(e => e && e.uid != null && String(e.uid) === _u2) || null;
+        if (!sTgtM) {
+          return json({ ok: false, message: '这个网易云账号不在号池里（可能已掉线被清理）。'
+            + '换绑只给还在池里的号用，掉线的号请发「补登」链接免费补回。' }, 404);
+        }
+        sTgtM.ck = ent.ck;
+        if (sTgtM.relogin) sTgtM.relogin = 0;
+        let kvOkM = true;
+        try { await POOL.put(entryKeyOf(sTgtM), JSON.stringify(sTgtM)); }
+        catch (e) { kvOkM = false; console.error('软件内换绑 KV 写失败（继续走 D1）:', e && e.message); }
+        let d1OkM = false;
+        try { d1OkM = await d1Upsert(sTgtM, { keepEmpty: false }); }
+        catch (e) { console.error('软件内换绑 D1 镜像失败:', e && e.message); }
+        if (!kvOkM && !d1OkM) {
+          return json({ ok: false, message: '数据库暂时繁忙，换绑没有完成，请稍后再试一次' }, 503);
+        }
+        try { await pushPool(_m2.map(e => (e === sTgtM ? sTgtM : e))); } catch (e) {}
+        try { await refreshPoolSnap(true); } catch (e) {}
+        try { await ccBust(); } catch (e) {}
+        console.log('软件内换绑CK：' + String(sTgtM.name || _u2) + '（uid ' + _u2
+          + '，D1 ' + (d1OkM ? 'ok' : 'FAIL') + '，客服软件内操作）');
+        return json({ ok: true, uid: _u2, name: String(sTgtM.name || ''), kind: 'ckswap',
+          message: '换绑成功：这个号的登录凭证已经换成全新的了（有效期、歌曲、邮箱都没动，听歌不受影响）。'
+            + '明天开始自动发动态就会用新凭证。' });
       }
       const r = await addEntry(ent);
       if (!r.ok) return json({ ok: false, message: r.msg }, 400);
@@ -7295,6 +7327,36 @@ async function handle(request) {
           sfCnt.found++;
           sfHandled.add(uid);
           await trySongfixMail(uid, 'nomus', a, song);
+        }
+        // —— 绑错歌结构直判（2026-11-16 新增，用户口径：绑错歌必发）——
+        // 冻结环要求「连续两个结算日 rate 相等」才处置；绑错歌是结构性零入账（歌的署名作者
+        // 列表不含本人音乐人 id），不必等两天证据。口径（2026-11-16 用户确认）：
+        // ① 绑错歌必发；② 共创>2 与 feenote 只对「播放没增长」的号发（前者冻结环已覆盖，
+        //    后者由一次性脚本按 rate 判定入队），正常涨播放的不打扰。
+        // 本段只发 songfix3 邮件，不做自动换歌（换歌是冻结环的活）。rate 条件：昨天已结算
+        // 快照存在且 <95（=没涨到正常水位）。artists 空（元数据未回填）/无昨日快照 → 跳过等下一班。
+        // 与冻结环/查无此歌/nomus 经 sfHandled + trySongfixMail 互斥，绝不重发。
+        {
+          const sfLastDay = sfDays[sfDays.length - 1];
+          const sfYest = {};
+          if (sfLastDay) for (const s of sfByDay[sfLastDay]) sfYest[String(s.uid)] = Number(s.rate);
+          for (const a of sfAccs) {
+            const uid = String(a.uid);
+            if (sfHandled.has(uid)) continue;
+            const mine = sfArtMap[uid];
+            if (!mine) continue;   // 非音乐人归 nomus 段管、acc_meta 未同步的等下一班
+            const song = String(a.song || '');
+            const sm = song ? sfMetaMap[song] : null;
+            if (!sm || Number(sm.gone) === 1) continue;   // song_meta 缺等回填；gone=1 由查无此歌段处置
+            let arIds = [];
+            try { arIds = (JSON.parse(sm.artists || '[]') || []).map(x => String(Array.isArray(x) ? x[0] : x)); } catch (e) {}
+            if (!arIds.length || arIds.indexOf(mine) >= 0) continue;   // 作者列表空=等回填；含本人=没问题
+            const rate = sfYest[uid];
+            if (rate === undefined || rate >= 95) continue;   // 昨天无快照/在正常涨 → 不发，先观察
+            sfCnt.found++;
+            sfHandled.add(uid);
+            await trySongfixMail(uid, 'songfix3', a, song);
+          }
         }
       }
       // 2026-11-13：闸门已前置（读全成功后立即落），走到这里说明本轮读写都完成。

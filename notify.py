@@ -508,11 +508,13 @@ def notify_songok(email, nickname, name, group=""):
 
 
 def notify_feenote(email, nickname, name, group="", song=""):
-    """VIP 试听歌零入账的换歌引导（2026-11-16 新增，kind=feenote）。
+    """VIP 锁歌（fee=1）零入账的换歌引导（2026-11-16 新增，kind=feenote）。
 
-    背景：341434709《满风尘》登记 3 天零入账，根因=歌是 fee=8 VIP 试听类，
-    免费听众播不完、播放不计入任务数据。号主 CK 正常（不能发 relogin）、
-    歌在架没冻结（songchange 两套文案都不符），故新开本文案。
+    背景：触发口径 2026-11-16 23:35 收窄——只有 fee=1（真 VIP 锁，免费听众播不完）才发；
+    fee=8 是低音质免费（可完整播放、正常入账，实测现网 548 首正常在跑），
+    勿再按 fee>0 一刀切判定（旧归因《满风尘》fee=8 已被 11-16 实证推翻）。
+    发放另加「播放没增长」条件（2026-11-16 用户口径）：rate 在涨的 fee=1 号暂缓观察。
+    号主 CK 正常（不能发 relogin）、歌在架没冻结（songchange 两套文案都不符），故单列本文案。
     ref=歌曲 id（唯一键去重，一单一发）；歌名由 worker mail_pending 附带。
     """
     if not (email or "").strip():
