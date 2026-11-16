@@ -11884,8 +11884,19 @@ function rgSync(){
   /* 2026-11-16：直接续费按钮 —— 只在「续费 + 原单已选中 + 号还在池」时出现。
      换绑不需要它（换绑要扫新码，控制台做不了），补登是免费补回也不适用。 */
   RD_ARM=null;   /* 切类型/重开弹窗/换原单都会走到这里 —— 旧的确认快照一律作废 */
+  rgDirectReset();   /* 2026-11-16：确认态一并复位 —— 按钮回到绿色常态文案 */
   var rd=$('rgDirect');
   if(rd)rd.style.display=(k==='renew'&&RG_REF&&RG_REF.alive)?'':'none';
+}
+/* 2026-11-16：直接续费两段确认的按钮态 —— 第一段确认后按钮变橙色「再点一次确认执行」，
+   用户不看下方文字也能一眼看出状态变了（EXE/APK 是弹窗确认，只有控制台是按钮两段式）。 */
+function rgDirectReset(){
+  var b=$('rgDirect');
+  if(!b)return;
+  b.textContent='直接续费（不发链接）';
+  b.style.background='';
+  b.style.borderColor='';
+  b.style.color='';
 }
 $('rgGoAltBtn').onclick=function(e){
   e.preventDefault();
@@ -11995,11 +12006,17 @@ $('rgDirect').onclick=function(){
   var cur={ref:String(RG_REF.ref||''),plan:String(plan),agent:String(agent)};
   if(!RD_ARM||RD_ARM.ref!==cur.ref||RD_ARM.plan!==cur.plan||RD_ARM.agent!==cur.agent){
     RD_ARM=cur;
-    $('rgm').textContent='确认直接续费：'+(RG_REF.name||RG_REF.ref)+'（原到期日 '+RG_REF.exp+'）· 套餐 '+plan+' · 客服 '+(agent||'（继承原单）')+'。确认无误再点一次「直接续费」执行 —— 不发链接，客户不用做任何操作。';
+    var b=$('rgDirect');
+    b.textContent='⚠️ 再点一次确认执行 · '+(RG_REF.name||RG_REF.ref)+' · '+plan+' · '+RG_REF.exp+' 起延长';
+    b.style.background='#c05621';
+    b.style.borderColor='#c05621';
+    b.style.color='#fff';
+    $('rgm').textContent='确认直接续费：'+(RG_REF.name||RG_REF.ref)+'（原到期日 '+RG_REF.exp+'）· 套餐 '+plan+' · 客服 '+(agent||'（继承原单）')+'。按钮已变橙色 —— 再点一次就真正执行；期间换客户/套餐/客服会自动复位。';
     $('rgm').className='msg';
     return;
   }
   RD_ARM=null;
+  rgDirectReset();
   $('rgDirect').disabled=true;
   $('rgm').textContent='续费中…'; $('rgm').className='msg';
   api('/api/renew_direct',{user:t.user,pass:t.pass,ref:RG_REF.ref,plan:plan,agent:agent}).then(function(r){
