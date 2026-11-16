@@ -10503,7 +10503,12 @@ function computeMarks(r, susSet){
   // 2026-10-26：入池 ≤2 天的号本来就不该有快照（次日才开始被听、且新号往往还没开通任务），
   // 不能算「没采到」。原来判据是 days<=0，导致昨天登记、今天首次入池的号被误标「今日无快照」。
   // 另外「今日无快照」这个名字容易被读成「今天新入池的号」，改叫「采集缺失」，只表达数据没采到。
-  if(!a&&e.song&&!(r.days!=null&&r.days<=2))add('b-gray','采集缺失','今天这一轮没采到该号快照（接口超时或号没跑），偶尔一次不用管；连续几天要查');
+  // 2026-11-16：已通知重登的号（relogin=1）天天采不到快照是必然的，不再打「采集缺失」，
+  // 换成中性的「已通知重登」，客服一眼知道这是等号主补登、不是播放故障。
+  if(!a&&e.song&&!(r.days!=null&&r.days<=2)){
+    if(e.relogin)add('b-gray','已通知重登','CK 已失效、已给号主发过重登邮件，号主还没补登：不参与播放、采不到快照属正常，不算故障；号主补登后自动恢复，连续 7 天不补登会自动删号');
+    else add('b-gray','采集缺失','今天这一轮没采到该号快照（接口超时或号没跑），偶尔一次不用管；连续几天要查');
+  }
   return { html: html, text: txt.join(' ') };
 }
 // 2026-10-27 二次改：两列进度跟着日期范围换名字。跨度正好 1 天（就是原来「昨天→今天」）保持
@@ -10844,8 +10849,15 @@ function renderRunbar(){
     var c=C[p];
     if(!c){covH+='<span class="muted">'+(p==='hz'?'主群':'定制群')+':无计划</span> ';return;}
     var mn=(c.missing_n==null?c.missing.length:c.missing_n);
+    // 2026-11-16（用户口径）：已通知重登的号不算「缺」，单独显示「未补登N」；
+    // 分母也去掉它们 —— 正常号跑满就显示 ran/eff = 满额，不再常年挂着「缺36」。
+    var rn=(c.relogin_n==null)?((c.relogin&&c.relogin.length)||0):(c.relogin_n||0);
+    var eff=(c.expected!=null)?Math.max(0,c.expected-rn):null;
     var cls=mn?'bad':'good';
-    covH+='<span class="'+cls+'">'+(p==='hz'?'主群':'定制群')+' '+c.ran+'/'+c.expected+(mn?' 缺'+mn:'')+'</span> ';
+    covH+='<span class="'+cls+'" title="分母已去掉「未补登」的号：CK 失效、已给号主发重登邮件、还没补登的号不参与播放，等号主处理（超 7 天不补登自动删号），不算缺口。缺=真没跑到的号。">'
+      +(p==='hz'?'主群':'定制群')+' '+c.ran+'/'+(eff!=null?eff:c.expected)
+      +(mn?' 缺'+mn:'')+'</span> '
+      +(rn?'<span class="muted">未补登'+rn+'</span> ':'');
   });
   h+='<div class="rb"><b>应跑/实跑</b><br>'+covH+'</div>';
   // 2026-11-09：今晚每号听几首（数据已在首屏响应里，0 额外请求）。
