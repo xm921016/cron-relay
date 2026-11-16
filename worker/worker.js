@@ -3571,7 +3571,8 @@ async function caPut(k, body, ttl) {
 //   Paid 月包含 250 亿行读，探针窗口改成计费周期（每月 16 日 UTC 重置）。
 // 只拦「读」：D1 写 Paid 月包含 5000 万行，业务量远够不着，写永远不跳。
 const D1_READ_LIMIT = 25000000000;
-const QGATE_KEY = 'qgt:d1';
+const QGATE_KEY = 'qgt:d1v2';    // 2026-11-16 换 v2：老键在各机房 Cache API 里残留旧日口径高水位
+                                 // （p≈102%，TTL 2h），换新键让所有机房立即回到「无水位→走 D1」。
 const QGATE_HOT = 95;            // ≥95% 视为「该让路」
 let _qgPct = -2, _qgAt = 0;      // -2 = 本次 invocation 还没读过
 async function d1QuotaPct() {
