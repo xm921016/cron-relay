@@ -1,0 +1,59 @@
+name: alert-relay
+
+# 2026-11-16 新增：dz 的报错邮件统一改道这里代发（用户要求：dz 不再直接发报错邮件）。
+# dz 的 workflow（coverage 告警 / d1-daily 备份告警，即 lanzou_push.py 的 send_alert）
+# 不再自己 smtplib，而是 dispatch 本工作流把 subject/body 带过来，由 hz 的邮箱统一发出。
+# 好处：
+#   · 用户收件箱只有一个发件人（hz 的 EMAIL_FROM），dz 的告警主题带 [dz] 前缀；
+#   · dz runner 连不上 smtp.qq.com 也不影响告警到达（dispatch 先落到 GitHub，hz 再发）。
+# 鉴权：调用方需要 hz 仓的 workflow 权限 PAT（dz 仓 Secrets HZ_ALERT_TOKEN，xm921016）。
+on:
+  workflow_dispatch:
+    inputs:
+      subject:
+        description: '邮件主题'
+        required: false
+        default: ''
+      body:
+        description: '邮件正文'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [alert]
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: send alert mail (代发)
+        env:
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+          SUBJECT: ${{ github.event.inputs.subject || github.event.client_payload.subject }}
+          BODY: ${{ github.event.inputs.body || github.event.client_payload.body }}
+        run: |
+          python3 - <<'EOF'
+          import os, smtplib
+          from email.mime.text import MIMEText
+
+          frm = (os.environ.get("EMAIL_FROM") or "").strip()
+          code = (os.environ.get("EMAIL_AUTH_CODE") or "").strip()
+          to = (os.environ.get("ALERT_TO") or frm).strip()
+          subject = (os.environ.get("SUBJECT") or "").strip()
+          body = os.environ.get("BODY") or ""
+          if not (frm and code and to):
+              print("::error::hz 未配置 EMAIL_FROM/EMAIL_AUTH_CODE/ALERT_TO，无法代发告警")
+              raise SystemExit(1)
+          if not subject:
+              print("::error::空主题，拒绝发送")
+              raise SystemExit(1)
+          msg = MIMEText(body, "plain", "utf-8")
+          msg["Subject"] = subject
+          msg["From"] = frm
+          msg["To"] = to
+          with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30) as s:
+              s.login(frm, code)
+              s.sendmail(frm, [x.strip() for x in to.split(",") if x.strip()], msg.as_string())
+          print("alert-relay 已代发:", subject)
+          EOF
