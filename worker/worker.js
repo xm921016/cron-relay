@@ -2357,9 +2357,11 @@ async function renewDirectCore(refRaw, planRaw, agentRaw) {
   const r = await addEntry(ent);
   if (!r.ok) return { ok: false, status: 400, message: r.msg };
   try { await ccBust(); } catch (e) {}
-  /* 与 join_manual 同口径发登记成功邮件（写失败只记日志）。 */
+  /* 与 join_manual / submit 同口径发登记成功邮件（写失败只记日志）。
+     ref 必须用 ent.added（原入池日）：mail_queue 唯一键 (pool,uid,kind,ref)，
+     ref 用别的值会绕过既有去重口径，同一单在三条登记路径里的邮件行为就不一致了。 */
   try {
-    await mailEnqueue(POOL_NAME, String(tgt.uid || ''), 'reg', beijingDate(),
+    await mailEnqueue(POOL_NAME, String(tgt.uid || ''), 'reg', String(ent.added || '').slice(0, 10),
       String(tgt.email || ''), String(tgt.name || ''), String(ent.agent || ''), String(r.exp || ''));
   } catch (me) { console.error('直接续费邮件入队失败:', me && me.message); }
   console.log('直接续费：' + String(tgt.name || tgt.uid) + '  → ' + String(r.exp || '')
@@ -5913,6 +5915,12 @@ async function handle(request) {
       if (dchkS.dev) { try { await regDevTouch(dchkS.dev, agentS); } catch (e) {} }
       const muS = String(bS.mu || '').trim();
       if (!muS) return json({ ok: false, message: '没有拿到登录凭证：请先扫码取新 CK，或把号主发来的 MUSIC_U 粘进来' }, 400);
+      /* 长度闸：MUSIC_U 正常 80~120 位。超长说明粘进来的是整段请求头/日志之类的垃圾，
+         不拦的话会白白打一次网易校验接口（还把日志撑爆）。与 EXE 粘贴框的正则口径一致。 */
+      if (muS.length > 200) {
+        return json({ ok: false, message: '凭证格式不对：MUSIC_U 太长（正常 80~120 位）。'
+          + '请只粘 MUSIC_U 的值或整段 Cookie，不要粘整页日志' }, 400);
+      }
       const vS = await validateCookie(muS);
       if (!vS.ok) return json({ ok: false, message: vS.msg || '登录凭证已失效，请重新取一次 CK' }, 400);
       if (vS.provisional) {
@@ -11826,7 +11834,9 @@ $('dvBody').addEventListener('click',function(ev){
    为什么要在发链接时就选类型：客户提交那一刻，「号不在池 + 原单没到期」既可能是
    免费补登，也可能是付了钱的续费。系统分不出来，猜错一边就是白送套餐或客户白付钱。 */
 var RG_REF = null;
-var RD_ARMED = false;   /* 2026-11-16：直接续费两段确认的「已确认」标记 */
+var RD_ARM = null;   /* 2026-11-16：直接续费两段确认的「已确认」参数快照 {ref,plan,agent}。
+                        不能用布尔 —— 布尔只记「按过一次」，客户/套餐/客服在两次点击之间改了，
+                        第二下就会拿新参数直接执行（确认的是 A、扣的是 B，收钱操作不能留这种缝）。 */
 function rgTok(){ return JSON.parse(TOKEN||'{}'); }
 function rgKind(){ return $('rgKind').value||'new'; }
 function rgKindName(k){ return k==='fix'?'补登':(k==='renew'?'续费':(k==='ckswap'?'换绑':'新登记')); }
@@ -11948,13 +11958,16 @@ $('rgDirect').onclick=function(){
   var plan=$('rgPlan').value||'';
   if(!plan){ $('rgm').textContent='请先选套餐——直接续费按套餐天数在原到期日上累加'; $('rgm').className='msg err'; return; }
   var agent=$('rgAgent').value||'';
-  if(!RD_ARMED){
-    RD_ARMED=true;
+  /* 两段确认：第一段把参数快照存进 RD_ARM；第二段先核对快照和当前参数是否一致，
+     期间换客户/换套餐/换客服都会让快照失配 → 重新走一遍确认，绝不拿旧确认执行新参数。 */
+  var cur={ref:String(RG_REF.ref||''),plan:String(plan),agent:String(agent)};
+  if(!RD_ARM||RD_ARM.ref!==cur.ref||RD_ARM.plan!==cur.plan||RD_ARM.agent!==cur.agent){
+    RD_ARM=cur;
     $('rgm').textContent='确认直接续费：'+(RG_REF.name||RG_REF.ref)+'（原到期日 '+RG_REF.exp+'）· 套餐 '+plan+' · 客服 '+(agent||'（继承原单）')+'。确认无误再点一次「直接续费」执行 —— 不发链接，客户不用做任何操作。';
     $('rgm').className='msg';
     return;
   }
-  RD_ARMED=false;
+  RD_ARM=null;
   $('rgDirect').disabled=true;
   $('rgm').textContent='续费中…'; $('rgm').className='msg';
   api('/api/renew_direct',{user:t.user,pass:t.pass,ref:RG_REF.ref,plan:plan,agent:agent}).then(function(r){

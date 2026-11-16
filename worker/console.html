@@ -2135,7 +2135,9 @@ $('dvBody').addEventListener('click',function(ev){
    为什么要在发链接时就选类型：客户提交那一刻，「号不在池 + 原单没到期」既可能是
    免费补登，也可能是付了钱的续费。系统分不出来，猜错一边就是白送套餐或客户白付钱。 */
 var RG_REF = null;
-var RD_ARMED = false;   /* 2026-11-16：直接续费两段确认的「已确认」标记 */
+var RD_ARM = null;   /* 2026-11-16：直接续费两段确认的「已确认」参数快照 {ref,plan,agent}。
+                        不能用布尔 —— 布尔只记「按过一次」，客户/套餐/客服在两次点击之间改了，
+                        第二下就会拿新参数直接执行（确认的是 A、扣的是 B，收钱操作不能留这种缝）。 */
 function rgTok(){ return JSON.parse(TOKEN||'{}'); }
 function rgKind(){ return $('rgKind').value||'new'; }
 function rgKindName(k){ return k==='fix'?'补登':(k==='renew'?'续费':(k==='ckswap'?'换绑':'新登记')); }
@@ -2257,13 +2259,16 @@ $('rgDirect').onclick=function(){
   var plan=$('rgPlan').value||'';
   if(!plan){ $('rgm').textContent='请先选套餐——直接续费按套餐天数在原到期日上累加'; $('rgm').className='msg err'; return; }
   var agent=$('rgAgent').value||'';
-  if(!RD_ARMED){
-    RD_ARMED=true;
+  /* 两段确认：第一段把参数快照存进 RD_ARM；第二段先核对快照和当前参数是否一致，
+     期间换客户/换套餐/换客服都会让快照失配 → 重新走一遍确认，绝不拿旧确认执行新参数。 */
+  var cur={ref:String(RG_REF.ref||''),plan:String(plan),agent:String(agent)};
+  if(!RD_ARM||RD_ARM.ref!==cur.ref||RD_ARM.plan!==cur.plan||RD_ARM.agent!==cur.agent){
+    RD_ARM=cur;
     $('rgm').textContent='确认直接续费：'+(RG_REF.name||RG_REF.ref)+'（原到期日 '+RG_REF.exp+'）· 套餐 '+plan+' · 客服 '+(agent||'（继承原单）')+'。确认无误再点一次「直接续费」执行 —— 不发链接，客户不用做任何操作。';
     $('rgm').className='msg';
     return;
   }
-  RD_ARMED=false;
+  RD_ARM=null;
   $('rgDirect').disabled=true;
   $('rgm').textContent='续费中…'; $('rgm').className='msg';
   api('/api/renew_direct',{user:t.user,pass:t.pass,ref:RG_REF.ref,plan:plan,agent:agent}).then(function(r){
