@@ -6782,8 +6782,17 @@ async function handle(request) {
       // 铁律 3c：任一读失败不落闸门，30 分钟后下一班整体重扫（到期部分幂等不重发）。
       // 2026-11-13 修：songfix 的 5 个读提前到闸门/写循环之前 —— 先把所有读做完，
       //   读全成功才落闸门、才开写；读失败整轮返回重试（下面 batch 后子请求已大幅下降）。
-      const sfSnap = await d1All('SELECT uid,day,rate FROM snapshots WHERE day>=? AND day<=? AND rate IS NOT NULL',
-        [new Date(Date.parse(today + 'T00:00:00Z') - 2 * 86400000).toISOString().slice(0, 10), today]);
+      // 2026-11-16 修：快照窗口只取「已结算」的日子（< today）。
+      // 事故：11-15 D1 额度打满 → 当天 00:05 的扫描读失败顺延，11-16 08:05（额度 08:00 重置后）
+      //   才扫成。此时 relay 凌晨（01:28 起）已经用「结算前」的旧值写入了 day=今天 的快照行
+      //   （rate=昨天的结算值， missions/rpc30 同理），扫到的是 今天(旧值) vs 昨天(结算值)
+      //   → rate 相等 → 全池 291 个号被误判冻结，265 封 songfix2 + 16 个自动换歌全部误发。
+      //   结算窗口在上午（实测 ~09:30~12:00 前后），snap650 采集后才刷新为当日真值 ——
+      //   即今天的行在扫描时点不可信。改成只比 昨天 vs 前天（两个都已结算的日子），
+      //   窗口放宽到 3 天防缺天。判冻语义不变：连续两个结算日 rate 相等且 <95。
+      const sfSnap = await d1All('SELECT uid,day,rate FROM snapshots WHERE day>=? AND day<? AND rate IS NOT NULL',
+        [new Date(Date.parse(today + 'T00:00:00Z') - 3 * 86400000).toISOString().slice(0, 10),
+         new Date(Date.parse(today + 'T00:00:00Z') - 1 * 86400000).toISOString().slice(0, 10)]);
       const sfAccs = await d1All("SELECT pool,uid,name,email,agent,exp,song,added FROM accounts WHERE pool=? AND pub=0 AND email<>'' AND song<>''", [POOL_NAME]);
       const sfMeta = await d1All('SELECT song,name,dur,n_artists,artists,first_artist,gone FROM song_meta', []);
       const sfQ = await d1All("SELECT uid,kind,ref,created_at FROM mail_queue WHERE kind IN ('songfix','songfix2','songfix3','songchange','nomus') AND pool=?", [POOL_NAME]);
