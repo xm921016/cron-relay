@@ -1406,6 +1406,7 @@ async function resolveSong(link) {
   if (!m) m = url.match(/[?&]id=(\d+)/);
   if (!m) return { ok: false, msg: '链接里没找到歌曲 id：识别到 ' + url.slice(0, 80) + '。请在网易云 APP 里点「分享→复制链接」，把 http 开头的完整链接粘过来' };
   // 双保险：调网易歌曲详情接口确认这个 id 确实是一首歌（防歌单/电台 id 伪装混入）
+  let sg0 = null, ar0 = [];
   try {
     const r = await fetch(`${BASE}/api/song/detail?id=${m[1]}&ids=%5B${m[1]}%5D`, { headers: { 'User-Agent': UA, Referer: BASE + '/' } });
     const j = await r.json();
@@ -1416,15 +1417,88 @@ async function resolveSong(link) {
     // 登记了也白跑（341434709《满风尘》fee=8 三天零入账实例）。登记入口直接拒收，
     // 自助 gate 页和客服 EXE join_manual 两条路都走 resolveSong，一处拦两头生效。
     // 接口偶发失败仍放行（保持原有兜底口径，fee 查不到不挡登记）。
-    const sg0 = j.songs[0] || {};
+    sg0 = j.songs[0] || {};
     const fee0 = Number(sg0.fee == null ? 0 : sg0.fee);
     if (fee0 > 0) {
       return { ok: false, msg: '这首《' + String(sg0.name || '') + '》是 VIP 试听类歌曲（非免费完整曲目），免费听众听不完，播放不计入 650 任务数据，登记了也不会有进度。请换一首你名下免费上架的歌曲：APP 里打开那首歌 → 分享 → 复制链接' };
     }
+    // 2026-11-16：共创拦截（用户口径：署名作者 >2 人拒收，等于 2 没关系）。
+    // 共创歌播放数据归属不清，登记了白跑（与 mail_scan songfix 同源问题），登记口直接拦、
+    // 不等事后换歌。作者列表（ar0）顺带回传给绑错歌校验用，零额外请求。
+    ar0 = Array.isArray(sg0.ar) ? sg0.ar : (Array.isArray(sg0.artists) ? sg0.artists : []);
+    if (ar0.length > 2) {
+      const nm0 = String(sg0.name || '');
+      return { ok: false, msg: '这首' + (nm0 ? '《' + nm0 + '》' : '') + '的署名作者有 ' + ar0.length + ' 人（超过 2 人的共创歌播放数据归属不清），不能登记。请换成你名下独唱、或署名不超过 2 人的歌曲' };
+    }
   } catch (e) {
     // 详情接口偶发异常时放行（歌单类 URL 已在上面被路径检查拦截）
   }
-  return { ok: true, song: Number(m[1]) };
+  return { ok: true, song: Number(m[1]), name: String(sg0 ? (sg0.name || '') : ''),
+    arts: ar0.map(x => String((x && x.id) == null ? '' : x.id)).filter(x => x) };
+}
+
+// 2026-11-16：登记音乐人身份 + 绑错歌校验（用户口径）：
+//   ① 账号必须已入驻网易音乐人（profile.artistId 非空）—— 普通号播放不计入 650 任务，登记即空转；
+//   ② 登记歌的署名作者列表必须包含本号 artistId —— 绑别人的歌零收益还占名额。
+// 数据源：/api/v1/user/detail/<uid> 公开接口（与 acc_meta 同步同源，无需 CK，桌面 Chrome UA）。
+// 口径预验证：本地镜像 1388 个已登记号实测，作者列表命中 1372 / 不命中 6，且 6 个全是真绑错
+// （含两号互绑对方歌），无结构性误伤 → 可以硬拦。
+// 兜底口径与 fee 校验一致：接口失败 / 响应异常一律放行，登记主流程永远优先可用。
+async function regMusicianGuard(uid, songName, arts) {
+  const MUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  let j = null;
+  try {
+    const r = await fetch(BASE + '/api/v1/user/detail/' + encodeURIComponent(String(uid)), {
+      headers: { 'User-Agent': MUA, Referer: BASE + '/' },
+      signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(10000) : undefined,
+    });
+    j = await r.json();
+  } catch (e) { return { ok: true, note: 'userdetail 异常放行' }; }
+  const p = (j && j.profile) || null;
+  if (!p) return { ok: true, note: 'userdetail 无 profile 放行' };
+  const aid = String(p.artistId == null ? '' : p.artistId);
+  if (!aid) {
+    return { ok: false, msg: '这个账号还没有入驻网易音乐人，普通账号的播放不计入任务数据，登记了也不会有进度。请先用这个账号在网易云 APP 免费入驻音乐人（音乐人中心 → 入驻），入驻成功后再回来登记' };
+  }
+  const list = Array.isArray(arts) ? arts.map(x => String(x || '')) : [];
+  if (list.length && list.indexOf(aid) < 0) {
+    return { ok: false, msg: '这首' + (songName ? '《' + songName + '》' : '') + '不是你名下的作品（署名作者里没有你的音乐人主页' + (p.artistName ? '「' + String(p.artistName) + '」' : '') + '）。绑错歌播放不计入你的任务数据。请换成你自己名下的歌：APP 里打开那首歌 → 分享 → 复制链接' };
+  }
+  return { ok: true, aid: aid };
+}
+
+// 2026-11-16：同一首歌已被池内其他号登记 → 只告警不拦（用户口径）。登记成功后调用，
+// 任何失败只留日志、绝不影响登记结果。同一首歌 24 小时内最多一封（KV 节流）。
+// 发送通道：dispatch hz 仓 alert-relay.yml（EMAIL_FROM/ALERT_TO 在 hz Secrets），dz 走
+// KV 键 HZ_ALERT_TOKEN（hz 仓 workflow 权限 PAT），主题自动带 [dz] 前缀。
+async function dupSongAlert(songId, uid, name) {
+  const TAG = 'dupsong';
+  try {
+    if (!d1ok()) return;
+    const dup = await d1All('SELECT uid,name FROM accounts WHERE song=? AND pool=? AND uid<>? LIMIT 5',
+      [String(songId), POOL_NAME, String(uid)]);
+    if (!dup || !dup.length) return;   // null=读失败不告警（铁律 3c：不把读失败当没重复）
+    const key = 'dupsong:last:' + String(songId);
+    const last = Number(await POOL.get(key).catch(() => 0)) || 0;
+    if (last && Date.now() - last < 24 * 3600000) return;
+    await POOL.put(key, String(Date.now()), { expirationTtl: 90000 });   // 25h 过期自动清
+    const c = await cfg();
+    let tok = c.ghToken || '';
+    if (POOL_NAME === 'dz') tok = cleanKV(await POOL.get('HZ_ALERT_TOKEN').catch(() => null)) || '';
+    if (!tok) { console.error(TAG + ' 告警缺 token（' + (POOL_NAME === 'dz' ? 'KV HZ_ALERT_TOKEN' : 'GH_TOKEN') + '），跳过'); return; }
+    const subj = (POOL_NAME === 'dz' ? '[dz] ' : '') + '同一首歌被多个账号登记：《' + String(name || uid) + '》 song=' + songId;
+    const body = '刚登记：' + String(name || uid) + '（uid ' + uid + '）绑定了歌曲 ' + songId + '，但池内已有其他号绑了这首歌：'
+      + dup.map(x => String(x.name || x.uid || '') + (x.uid ? '（uid ' + x.uid + '）' : '')).join('、') + '。'
+      + '登记口已拦截「作者列表不含本人音乐人 id」的绑错歌，能进来的重复多为同一艺人的多号同歌，请人工核对一下。';
+    const resp = await fetch('https://api.github.com/repos/xm921016/cron-relay/actions/workflows/alert-relay.yml/dispatches', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + tok, Accept: 'application/vnd.github+json',
+                 'User-Agent': 'cron-relay-worker', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref: 'main', inputs: { subject: subj, body: body } }),
+    });
+    if (resp.status !== 204) console.error(TAG + ' dispatch 失败 HTTP ' + resp.status + ' ' + (await resp.text()).slice(0, 100));
+    else console.log(TAG + ' 告警已发出: song=' + songId);
+  } catch (e) { console.error(TAG + ' 告警异常:', e && e.message); }
 }
 
 // ---- GitHub Secrets（sealed box） ----
@@ -5596,6 +5670,10 @@ async function handle(request) {
       }
       const song = await resolveSong(body.link);
       if (!song.ok) return json({ message: song.msg }, 400);
+      /* 2026-11-16：音乐人身份 + 绑错歌校验（用户口径，regMusicianGuard）。
+         与 fee/共创同一兜底口径：校验接口失败放行，不挡登记主流程。 */
+      const mg2 = await regMusicianGuard(v.uid, song.name, song.arts);
+      if (!mg2.ok) return json({ message: mg2.msg }, 400);
       let expQ = parseExpInput(body.exp);
       if (!expQ.ok) return json({ message: '有效期格式不对：填天数(如730)、日期(2028-10-18)或不填（默认2年）' }, 400);
       const phoneIn = String(body.phone || '').trim();
@@ -5704,6 +5782,8 @@ async function handle(request) {
       } catch (me) { console.error('登记邮件入队失败:', me && me.message); }
       // 2026-11-06：登记成功 → 立即作废控制台首屏缓存（号池马上要在控制台看到这个号）
       try { await ccBust(); } catch (e) {}
+      // 2026-11-16：同一首歌已被池内其他号登记 → 只告警不拦（用户口径）。失败不影响登记。
+      try { await dupSongAlert(song.song, v.uid, ent.name); } catch (e) {}
       /* 2026-11-10：按类型给不同回执。客服在 EXE 上登记完要能一眼看出「这次是续费，
          有效期延到哪天」/「这次是免费补号，原有效期不变」—— 否则只能去控制台翻。
          文案由服务端下发，老版 EXE 也能直接显示（它本来就显示 message 字段）。 */
@@ -5937,6 +6017,9 @@ async function handle(request) {
       }
       const song = await resolveSong(b0.link);
       if (!song.ok) return json({ ok: false, message: song.msg }, 400);
+      /* 2026-11-16：音乐人身份 + 绑错歌校验（与 join_manual / fee / 共创同一兜底口径） */
+      const mg1 = await regMusicianGuard(v.uid, song.name, song.arts);
+      if (!mg1.ok) return json({ ok: false, message: mg1.msg }, 400);
 
       /* 名额闸口：与 /api/join_manual 同口径。
          2026-11-10：加「已在池」豁免 —— 续费/补号不会让号池变大（原地更新），
@@ -6031,6 +6114,8 @@ async function handle(request) {
           email, name, agent1, ent.exp || '');
       } catch (me) { console.error('登记邮件入队失败:', me && me.message); }
       try { await ccBust(); } catch (e) {}
+      // 2026-11-16：同一首歌已被池内其他号登记 → 只告警不拦（用户口径）。失败不影响登记。
+      try { await dupSongAlert(song.song, v.uid, name); } catch (e) {}
 
       /* 2026-11-10：按类型给不同文案。续费必须让客户看见「有效期延到哪天」，
          补号要说明「免费、不额外收费」—— 否则客服每天都要回答同一句话。 */
