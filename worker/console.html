@@ -477,7 +477,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <div id="rgRefOut" style="margin-top:8px" data-page-node-id="8PD9epqD6d8rOAL0c0KGsM"></div>
   </div>
   <div data-page-node-id="1eFB57H3xbWYOPvCnkeB0t"><label data-page-node-id="nONOKEi87CupLpjhiKWnW7">备注（买家看不到，只记在这条链接上，方便你自己认）</label><input id="rgNote" maxlength="60" placeholder="如：11月 张先生 号掉线补登" data-page-node-id="IEx2nILuwwtVFvX92qCvso"></div>
-  <div class="row2" data-page-node-id="20GZIwDJOlpn6Kv6P1i4Fn"><button id="rgGo" data-page-node-id="loJVZO5yioHCjA1vpbAuK0">生成链接</button><button class="gray" id="rgClose" data-page-node-id="34YnYvzsBOkLTPo7G1ntBU">关闭</button></div>
+  <div class="row2" data-page-node-id="20GZIwDJOlpn6Kv6P1i4Fn"><button id="rgDirect" style="display:none" title="不发链接：服务端直接在原到期日上累加，客户不用扫码（仅「续费」且原单还在池里时可用）">直接续费（不发链接）</button><button id="rgGo" data-page-node-id="loJVZO5yioHCjA1vpbAuK0">生成链接</button><button class="gray" id="rgClose" data-page-node-id="34YnYvzsBOkLTPo7G1ntBU">关闭</button></div>
   <div class="msg" id="rgm" data-page-node-id="ymPRNwvhxkUMCMMNYZMJtS"></div>
   <div id="rgOut" data-page-node-id="9IXQh7To9v6qwlCFt7UIkw"></div>
   <div style="display:flex;gap:8px;align-items:center;margin:16px 0 6px;flex-wrap:wrap" data-page-node-id="KV8ivqBZBkZgI53vTJdgZg">
@@ -2135,6 +2135,7 @@ $('dvBody').addEventListener('click',function(ev){
    为什么要在发链接时就选类型：客户提交那一刻，「号不在池 + 原单没到期」既可能是
    免费补登，也可能是付了钱的续费。系统分不出来，猜错一边就是白送套餐或客户白付钱。 */
 var RG_REF = null;
+var RD_ARMED = false;   /* 2026-11-16：直接续费两段确认的「已确认」标记 */
 function rgTok(){ return JSON.parse(TOKEN||'{}'); }
 function rgKind(){ return $('rgKind').value||'new'; }
 function rgKindName(k){ return k==='fix'?'补登':(k==='renew'?'续费':(k==='ckswap'?'换绑':'新登记')); }
@@ -2152,6 +2153,11 @@ function rgSync(){
   var inh=(k==='fix'||k==='ckswap');
   $('rgPlan').disabled=inh;
   $('rgAgent').disabled=inh;
+  /* 2026-11-16：直接续费按钮 —— 只在「续费 + 原单已选中 + 号还在池」时出现。
+     换绑不需要它（换绑要扫新码，控制台做不了），补登是免费补回也不适用。 */
+  RD_ARMED=false;
+  var rd=$('rgDirect');
+  if(rd)rd.style.display=(k==='renew'&&RG_REF&&RG_REF.alive)?'':'none';
 }
 $('rgKind').onchange=function(){ RG_REF=null; $('rgRefOut').innerHTML=''; rgSync(); };
 /* 2026-11-10：按状态看链接（尤其「已过期」）。过期链接仍然是 unused，作废按钮照样给。 */
@@ -2195,6 +2201,7 @@ $('rgFind').onclick=function(){
         Array.prototype.forEach.call($('rgRefOut').querySelectorAll('.rghit'),function(e2){e2.style.background='';e2.style.borderColor='#e3e8f0';});
         el.style.background='#eef6ff'; el.style.borderColor='#9cc4f5';
         $('rgm').textContent='已选原单：'+((x.name||x.uid||'')+'，到期 '+x.exp+(x.alive?'（这个号还在池里没掉线）':'')); $('rgm').className='msg ok';
+        rgSync();   /* 2026-11-16：选中原单后刷新「直接续费」按钮显隐（续费 + 还在池 才出现） */
       };
     });
   }).catch(function(){ $('rgFind').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
@@ -2236,6 +2243,38 @@ $('rgGo').onclick=function(){
     };
     rgLoad();
   }).catch(function(){ $('rgGo').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
+};
+/* ===== 2026-11-16：直接续费（不发链接，客户不用扫码） =====
+   续费本质 = 收钱 + 延期；号还活着时客户本来无事可做，老流程让客户再扫一次码
+   纯属链接复用登记页面带来的多余动作（还多一次风控暴露）。查到原单、选好套餐，
+   服务端 /api/renew_direct 原地延期 —— 台账、提成、防重复提交全部复用登记的 renew 分支。
+   两段确认：第一次点只显示确认信息，再点一次才真正提交（不用系统 confirm ——
+   APK WebView 里原生弹窗不可用，与 rgCopyExec 同一个坑）。 */
+$('rgDirect').onclick=function(){
+  var t=rgTok();
+  if(rgKind()!=='renew'||!RG_REF){ $('rgm').textContent='先选「续费」并查到原单（点一行选中），再直接续费'; $('rgm').className='msg err'; return; }
+  if(!RG_REF.alive){ $('rgm').textContent='这个号已经掉线，直接续费会变成死号占位 —— 请改发「补登」链接免费补回'; $('rgm').className='msg err'; return; }
+  var plan=$('rgPlan').value||'';
+  if(!plan){ $('rgm').textContent='请先选套餐——直接续费按套餐天数在原到期日上累加'; $('rgm').className='msg err'; return; }
+  var agent=$('rgAgent').value||'';
+  if(!RD_ARMED){
+    RD_ARMED=true;
+    $('rgm').textContent='确认直接续费：'+(RG_REF.name||RG_REF.ref)+'（原到期日 '+RG_REF.exp+'）· 套餐 '+plan+' · 客服 '+(agent||'（继承原单）')+'。确认无误再点一次「直接续费」执行 —— 不发链接，客户不用做任何操作。';
+    $('rgm').className='msg';
+    return;
+  }
+  RD_ARMED=false;
+  $('rgDirect').disabled=true;
+  $('rgm').textContent='续费中…'; $('rgm').className='msg';
+  api('/api/renew_direct',{user:t.user,pass:t.pass,ref:RG_REF.ref,plan:plan,agent:agent}).then(function(r){
+    $('rgDirect').disabled=false;
+    if(r.ok&&r.d&&r.d.ok){
+      $('rgm').textContent='已直接续费，有效期延长到 '+(r.d.exp||'')+'。'+(r.d.message||''); $('rgm').className='msg ok';
+      loadData();
+    } else {
+      $('rgm').textContent=(r.d&&r.d.message)||'续费失败，请重试'; $('rgm').className='msg err';
+    }
+  }).catch(function(){ $('rgDirect').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
 };
 /* 2026-11-15：APK WebView 里 navigator.clipboard.writeText 会被拒（无权限），
    原 prompt 兜底在 WebView 里只弹系统黑窗、剪贴板里啥也没有（买家截图实测）。

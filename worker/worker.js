@@ -2313,6 +2313,62 @@ async function d1FindLastOrder(uidKey, name, exp) {
   return (rows && rows.length) ? rows[0] : null;
 }
 
+/* ===== 2026-11-16：直接续费核心（不发链接、客户不扫码） =====
+   背景：续费的本质是「收钱 + 延期」。号还活着（CK 有效）时客户本来就不需要做任何事，
+   老流程让客户打开续费链接再扫一次码，唯一原因是链接复用了新登记的整套页面。
+   而每次扫码都是一次风控暴露（11-15 批量清算排查：反复重登与批量死号相关）——
+   活号续费再扫码 = 反向收益。所以开「直接续费」：客服查到原单后服务端原地延期，
+   台账/提成/防重全部复用 addEntry 的 renew 分支，一行口径都不另写。
+   边界：
+     · 只对「还在池里运行」的号生效 —— 掉线的号没有可用凭证，直接续费会变成死号占位；
+       提示客服发「补登」链接免费补回（或走扫码登记，那条路会拿新 CK）。
+     · 永久套餐（pub=0 且 exp=forever）续费不增加时长，提前拦并说清楚。
+     · agent 传了就用传的（谁操作谁拿提成）；不传继承原单客服。
+   返回 {ok, status?, message, kind?, exp?, days?}，由 /api/renew_direct 包成 HTTP 响应。 */
+async function renewDirectCore(refRaw, planRaw, agentRaw) {
+  const ref = String(refRaw || '').replace(/[^0-9A-Za-z_-]/g, '').slice(0, 40);
+  if (!ref) return { ok: false, status: 400, message: '缺少目标账号：请填客户的手机号或网易 UID' };
+  const rc = await regCfg();
+  const pl = planOf(rc, planRaw);
+  if (!pl) {
+    return { ok: false, status: 400, message: '套餐「' + String(planRaw || '(空)') + '」不在服务器当前的套餐表里（可能已改名或下架）。'
+      + '请重新选一次套餐；下拉里如果还是旧名字，重启软件刷新套餐列表。' };
+  }
+  const master = await mergePool();
+  const tgt = master.find(e => e && e.uid != null && String(e.uid) === ref)
+    || master.find(e => e && String(e.name || '') === ref) || null;
+  if (!tgt) {
+    return { ok: false, status: 404, message: '号池里找不到还在运行的账号（' + ref + '）。'
+      + '直接续费只对还活着的号有效：号已掉线的请发「补登」链接免费补回（或走扫码登记），'
+      + '号还在但查不到的先核对手机号/UID。' };
+  }
+  if (String(tgt.exp || '') === 'forever' && Number(tgt.pub) !== 1) {
+    return { ok: false, status: 400, message: '这个号是永久套餐，续费不会增加时长，没有可续的内容。' };
+  }
+  /* 原地复制账号数据（ck/歌曲/邮箱/入池日全保留），只换套餐与到期日 —— 绝不带新 CK 进来 */
+  const ent = Object.assign({}, tgt);
+  delete ent.__kind; delete ent.__force;
+  ent.exp = pl.exp;
+  ent.plan = pl.label;
+  if (String(agentRaw || '').trim()) ent.agent = normAgent(agentRaw);
+  /* __force 只在「D1 查重没找到 live 行」的兜底分支里生效（按原到期日累加）；
+     正常情况 live 行存在，addEntry 自己会判成 renew，__force 被忽略。 */
+  ent.__force = { kind: 'renew', exp: String(tgt.exp || '').slice(0, 10) };
+  const r = await addEntry(ent);
+  if (!r.ok) return { ok: false, status: 400, message: r.msg };
+  try { await ccBust(); } catch (e) {}
+  /* 与 join_manual 同口径发登记成功邮件（写失败只记日志）。 */
+  try {
+    await mailEnqueue(POOL_NAME, String(tgt.uid || ''), 'reg', beijingDate(),
+      String(tgt.email || ''), String(tgt.name || ''), String(ent.agent || ''), String(r.exp || ''));
+  } catch (me) { console.error('直接续费邮件入队失败:', me && me.message); }
+  console.log('直接续费：' + String(tgt.name || tgt.uid) + '  → ' + String(r.exp || '')
+    + '（+' + (r.days || 0) + ' 天，套餐 ' + pl.label + '，客服 ' + String(ent.agent || '-') + '）');
+  return { ok: true, kind: 'renew', exp: String(r.exp || ''), days: r.days || 0,
+    message: '续费成功：有效期延长到 ' + String(r.exp || '') + '（在原到期日基础上累加，剩余天数没清零）。'
+      + '本次没有发链接，客户不用做任何操作。' };
+}
+
 async function addEntry(entry) {
   // 有效期默认 2 年（730 天），管理端可随时修改（exp=YYYY-MM-DD，forever=永久）
   if (!entry.exp) entry.exp = beijingDatePlus(730);
@@ -5798,6 +5854,101 @@ async function handle(request) {
       if (v.provisional) msg += '（注：网易校验接口暂时不可达[' + (v.diag || '') + ']，已跳过在线校验；明天任务会自动复验）';
       return json({ ok: true, uid: String(v.uid), name: phone || ('qr:' + v.uid), pool: POOL_NAME,
         d1: d1Confirmed === true, kind: _rkd, exp: _rexp, message: msg });
+    }
+    /* ===== 2026-11-16：直接续费（不发链接、客户不扫码） =====
+       场景：号还在池里、CK 有效，客户付了续费钱 —— 客服查到原单后服务端原地延期，
+       不再让客户打开链接再扫一次码（活号每次扫码都是一次风控暴露）。
+       鉴权与 /api/regtoken_new 同口径：REG_TOKEN_PASS 或控制台满权限；客服口令路径过设备闸门。
+       CORS 与 /api/regtoken_find 同口径：APK ck.html（file:// 页面）直接 fetch，不用改 Java。 */
+    if (url.pathname === '/api/renew_direct' && request.method === 'OPTIONS') {
+      return new Response(null, { headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type' } });
+    }
+    if (url.pathname === '/api/renew_direct' && request.method === 'POST') {
+      let bR;
+      try { bR = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const pwR = await regPass();
+      let passOkR = !!pwR && String(bR.pass || '') === pwR;
+      const fromConsoleR = !passOkR ? await consoleAuthFull(bR) : false;
+      if (!passOkR) passOkR = fromConsoleR;
+      if (!passOkR) {
+        if (!pwR) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
+        return json({ ok: false, message: '口令不正确' }, 403);
+      }
+      const agentR = normAgent(bR.agent);
+      const dchkR = fromConsoleR ? { ok: true, dev: '' } : await regDevCheck(bR.dev, agentR);
+      if (!dchkR.ok) return json({ ok: false, need_auth: true, dev: dchkR.dev || '', message: dchkR.msg }, 403);
+      if (dchkR.dev) { try { await regDevTouch(dchkR.dev, agentR); } catch (e) {} }
+      const rr = await renewDirectCore(bR.ref, bR.plan, bR.agent);
+      return json({ ok: rr.ok, message: rr.message || '', kind: rr.kind || '', exp: rr.exp || '', days: rr.days || 0 },
+        rr.ok ? 200 : (rr.status || 400));
+    }
+    /* ===== 2026-11-16：直接换绑（原 ckswap 链接的软件内版本） =====
+       号主把新 CK 交给客服（扫码/网页取CK），客服在本软件里直接原地换凭证；
+       与自助换绑链接同一套安全口径：新 CK 的 uid 必须能在号池里找到号，
+       客户端带了 ref（原单手机号/UID）时还要双重核对，扫错码换不了别人的号。
+       只换 ck 不写台账（换绑没有时长概念）；d1Upsert 在 ck 变化时自动清 relogin_at。 */
+    if (url.pathname === '/api/ckswap_direct' && request.method === 'OPTIONS') {
+      return new Response(null, { headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type' } });
+    }
+    if (url.pathname === '/api/ckswap_direct' && request.method === 'POST') {
+      let bS;
+      try { bS = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const pwS = await regPass();
+      let passOkS = !!pwS && String(bS.pass || '') === pwS;
+      const fromConsoleS = !passOkS ? await consoleAuthFull(bS) : false;
+      if (!passOkS) passOkS = fromConsoleS;
+      if (!passOkS) {
+        if (!pwS) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
+        return json({ ok: false, message: '口令不正确' }, 403);
+      }
+      const agentS = normAgent(bS.agent);
+      const dchkS = fromConsoleS ? { ok: true, dev: '' } : await regDevCheck(bS.dev, agentS);
+      if (!dchkS.ok) return json({ ok: false, need_auth: true, dev: dchkS.dev || '', message: dchkS.msg }, 403);
+      if (dchkS.dev) { try { await regDevTouch(dchkS.dev, agentS); } catch (e) {} }
+      const muS = String(bS.mu || '').trim();
+      if (!muS) return json({ ok: false, message: '没有拿到登录凭证：请先扫码取新 CK，或把号主发来的 MUSIC_U 粘进来' }, 400);
+      const vS = await validateCookie(muS);
+      if (!vS.ok) return json({ ok: false, message: vS.msg || '登录凭证已失效，请重新取一次 CK' }, 400);
+      if (vS.provisional) {
+        return json({ ok: false, message: '网易校验接口暂时不可达（' + (vS.diag || '网络异常')
+          + '），没法核对账号，请稍后重试' }, 503);
+      }
+      const sMaster = await mergePool();
+      const sTgt = sMaster.find(e => e && e.uid != null && String(e.uid) === String(vS.uid)) || null;
+      if (!sTgt) {
+        return json({ ok: false, message: '这个网易云账号不在号池里（可能已掉线被清理）。'
+          + '换绑只给还在池里的号用，掉线的号请发「补登」链接免费补回' }, 404);
+      }
+      const sRef = String(bS.ref || '').replace(/[^0-9A-Za-z_-]/g, '');
+      if (sRef && String(sTgt.uid || '') !== sRef && String(sTgt.name || '') !== sRef) {
+        return json({ ok: false, message: '扫的码和要换绑的账号对不上（uid 不一致）。'
+          + '请确认用原来登记的那个网易云账号取的凭证；确实换号了请联系管理员' }, 400);
+      }
+      sTgt.ck = 'MUSIC_U=' + muS;
+      if (sTgt.relogin) sTgt.relogin = 0;
+      let sKvOk = true;
+      try { await POOL.put(entryKeyOf(sTgt), JSON.stringify(sTgt)); }
+      catch (e) { sKvOk = false; console.error('直连换绑 KV 写失败（继续走 D1）:', e && e.message); }
+      let sD1Ok = false;
+      try { sD1Ok = await d1Upsert(sTgt, { keepEmpty: false }); }
+      catch (e) { console.error('直连换绑 D1 镜像失败:', e && e.message); }
+      if (!sKvOk && !sD1Ok) {
+        return json({ ok: false, message: '数据库暂时繁忙，换绑没有完成，请稍后再试一次' }, 503);
+      }
+      try { await pushPool(sMaster.map(e => (e === sTgt ? sTgt : e))); } catch (e) {}
+      try { await refreshPoolSnap(true); } catch (e) {}
+      try { await ccBust(); } catch (e) {}
+      console.log('直连换绑CK：' + String(sTgt.name || vS.uid) + '（uid ' + String(vS.uid)
+        + '，D1 ' + (sD1Ok ? 'ok' : 'FAIL') + '，客服软件内操作）');
+      return json({ ok: true, uid: String(vS.uid), name: String(sTgt.name || ''), kind: 'ckswap',
+        message: '换绑成功：这个号的登录凭证已经换成全新的了（有效期、歌曲、邮箱都没动，听歌不受影响）。'
+          + '明天开始自动发动态就会用新凭证。' });
     }
     /* ================= 方案C：网页自助扫码登记 ================= */
     /* 买家页面：/r/<8 位码>。不走 PAGE_ROUTES 口令（那是内部成员页，不能发给买家）。 */
@@ -10017,7 +10168,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <div id="rgRefOut" style="margin-top:8px" data-page-node-id="8PD9epqD6d8rOAL0c0KGsM"></div>
   </div>
   <div data-page-node-id="1eFB57H3xbWYOPvCnkeB0t"><label data-page-node-id="nONOKEi87CupLpjhiKWnW7">备注（买家看不到，只记在这条链接上，方便你自己认）</label><input id="rgNote" maxlength="60" placeholder="如：11月 张先生 号掉线补登" data-page-node-id="IEx2nILuwwtVFvX92qCvso"></div>
-  <div class="row2" data-page-node-id="20GZIwDJOlpn6Kv6P1i4Fn"><button id="rgGo" data-page-node-id="loJVZO5yioHCjA1vpbAuK0">生成链接</button><button class="gray" id="rgClose" data-page-node-id="34YnYvzsBOkLTPo7G1ntBU">关闭</button></div>
+  <div class="row2" data-page-node-id="20GZIwDJOlpn6Kv6P1i4Fn"><button id="rgDirect" style="display:none" title="不发链接：服务端直接在原到期日上累加，客户不用扫码（仅「续费」且原单还在池里时可用）">直接续费（不发链接）</button><button id="rgGo" data-page-node-id="loJVZO5yioHCjA1vpbAuK0">生成链接</button><button class="gray" id="rgClose" data-page-node-id="34YnYvzsBOkLTPo7G1ntBU">关闭</button></div>
   <div class="msg" id="rgm" data-page-node-id="ymPRNwvhxkUMCMMNYZMJtS"></div>
   <div id="rgOut" data-page-node-id="9IXQh7To9v6qwlCFt7UIkw"></div>
   <div style="display:flex;gap:8px;align-items:center;margin:16px 0 6px;flex-wrap:wrap" data-page-node-id="KV8ivqBZBkZgI53vTJdgZg">
@@ -11675,6 +11826,7 @@ $('dvBody').addEventListener('click',function(ev){
    为什么要在发链接时就选类型：客户提交那一刻，「号不在池 + 原单没到期」既可能是
    免费补登，也可能是付了钱的续费。系统分不出来，猜错一边就是白送套餐或客户白付钱。 */
 var RG_REF = null;
+var RD_ARMED = false;   /* 2026-11-16：直接续费两段确认的「已确认」标记 */
 function rgTok(){ return JSON.parse(TOKEN||'{}'); }
 function rgKind(){ return $('rgKind').value||'new'; }
 function rgKindName(k){ return k==='fix'?'补登':(k==='renew'?'续费':(k==='ckswap'?'换绑':'新登记')); }
@@ -11692,6 +11844,11 @@ function rgSync(){
   var inh=(k==='fix'||k==='ckswap');
   $('rgPlan').disabled=inh;
   $('rgAgent').disabled=inh;
+  /* 2026-11-16：直接续费按钮 —— 只在「续费 + 原单已选中 + 号还在池」时出现。
+     换绑不需要它（换绑要扫新码，控制台做不了），补登是免费补回也不适用。 */
+  RD_ARMED=false;
+  var rd=$('rgDirect');
+  if(rd)rd.style.display=(k==='renew'&&RG_REF&&RG_REF.alive)?'':'none';
 }
 $('rgKind').onchange=function(){ RG_REF=null; $('rgRefOut').innerHTML=''; rgSync(); };
 /* 2026-11-10：按状态看链接（尤其「已过期」）。过期链接仍然是 unused，作废按钮照样给。 */
@@ -11735,6 +11892,7 @@ $('rgFind').onclick=function(){
         Array.prototype.forEach.call($('rgRefOut').querySelectorAll('.rghit'),function(e2){e2.style.background='';e2.style.borderColor='#e3e8f0';});
         el.style.background='#eef6ff'; el.style.borderColor='#9cc4f5';
         $('rgm').textContent='已选原单：'+((x.name||x.uid||'')+'，到期 '+x.exp+(x.alive?'（这个号还在池里没掉线）':'')); $('rgm').className='msg ok';
+        rgSync();   /* 2026-11-16：选中原单后刷新「直接续费」按钮显隐（续费 + 还在池 才出现） */
       };
     });
   }).catch(function(){ $('rgFind').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
@@ -11776,6 +11934,38 @@ $('rgGo').onclick=function(){
     };
     rgLoad();
   }).catch(function(){ $('rgGo').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
+};
+/* ===== 2026-11-16：直接续费（不发链接，客户不用扫码） =====
+   续费本质 = 收钱 + 延期；号还活着时客户本来无事可做，老流程让客户再扫一次码
+   纯属链接复用登记页面带来的多余动作（还多一次风控暴露）。查到原单、选好套餐，
+   服务端 /api/renew_direct 原地延期 —— 台账、提成、防重复提交全部复用登记的 renew 分支。
+   两段确认：第一次点只显示确认信息，再点一次才真正提交（不用系统 confirm ——
+   APK WebView 里原生弹窗不可用，与 rgCopyExec 同一个坑）。 */
+$('rgDirect').onclick=function(){
+  var t=rgTok();
+  if(rgKind()!=='renew'||!RG_REF){ $('rgm').textContent='先选「续费」并查到原单（点一行选中），再直接续费'; $('rgm').className='msg err'; return; }
+  if(!RG_REF.alive){ $('rgm').textContent='这个号已经掉线，直接续费会变成死号占位 —— 请改发「补登」链接免费补回'; $('rgm').className='msg err'; return; }
+  var plan=$('rgPlan').value||'';
+  if(!plan){ $('rgm').textContent='请先选套餐——直接续费按套餐天数在原到期日上累加'; $('rgm').className='msg err'; return; }
+  var agent=$('rgAgent').value||'';
+  if(!RD_ARMED){
+    RD_ARMED=true;
+    $('rgm').textContent='确认直接续费：'+(RG_REF.name||RG_REF.ref)+'（原到期日 '+RG_REF.exp+'）· 套餐 '+plan+' · 客服 '+(agent||'（继承原单）')+'。确认无误再点一次「直接续费」执行 —— 不发链接，客户不用做任何操作。';
+    $('rgm').className='msg';
+    return;
+  }
+  RD_ARMED=false;
+  $('rgDirect').disabled=true;
+  $('rgm').textContent='续费中…'; $('rgm').className='msg';
+  api('/api/renew_direct',{user:t.user,pass:t.pass,ref:RG_REF.ref,plan:plan,agent:agent}).then(function(r){
+    $('rgDirect').disabled=false;
+    if(r.ok&&r.d&&r.d.ok){
+      $('rgm').textContent='已直接续费，有效期延长到 '+(r.d.exp||'')+'。'+(r.d.message||''); $('rgm').className='msg ok';
+      loadData();
+    } else {
+      $('rgm').textContent=(r.d&&r.d.message)||'续费失败，请重试'; $('rgm').className='msg err';
+    }
+  }).catch(function(){ $('rgDirect').disabled=false; $('rgm').textContent='网络错误，请重试'; $('rgm').className='msg err'; });
 };
 /* 2026-11-15：APK WebView 里 navigator.clipboard.writeText 会被拒（无权限），
    原 prompt 兜底在 WebView 里只弹系统黑窗、剪贴板里啥也没有（买家截图实测）。
