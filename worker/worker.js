@@ -3293,7 +3293,7 @@ async function ledgerMarkRebind(pool, uid, name, on, rbFrom, rbStart, remark, ne
 // ====================================================================
 // 2026-11-05：加 note（备注，复用库里已有的 note 列）/ rb（补号标记）/ rb_from（关联原单）/
 // rb_start（原单登记日）。缺这几个的话控制台改完备注一刷新就变回空。
-const D1_COLS = 'uid,name,song,ck,added,exp,no_listen,email,agent,plan,pub,note,rb,rb_from,rb_start';
+const D1_COLS = 'uid,name,song,ck,added,exp,no_listen,email,agent,plan,pub,note,rb,rb_from,rb_start,relogin_at';
 
 // ---- 2026-11-08 省额度：全池读的排序从 SQL 挪到 JS ----
 // D1 的 rows_read 把 `USE TEMP B-TREE FOR ORDER BY` 的代价也算进「读行数」：
