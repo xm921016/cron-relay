@@ -7786,8 +7786,9 @@ async function handle(request) {
        给满权限口令一张额度卡：D1 读/写、KV 读/写/删/列、Workers 请求，按计费周期
        （每月 16 日 00:00 UTC 起）聚合 CF GraphQL 分析数据。
        凭据与 d1QuotaProbe() 同源：Worker Secret CFQ_TOKEN/CFQ_ACCOUNT（KV 手动键备用）。
-       Workers CPU 时间该 token 查不到（unknown field "cpuTime"，实测 2026-11-16），
-       只展示请求数。结果 Cache API 缓存 10 分钟（GraphQL 本身有分钟级~小时级延迟，
+       CPU 时间字段是 cpuTimeUs（微秒），旧 token 就能查——11-16 下午实测，之前
+       "unknown field cpuTime" 是字段名写错不是权限问题（introspection 确认）。
+       结果 Cache API 缓存 10 分钟（GraphQL 本身有分钟级~小时级延迟，
        控制台每次刷新都现查既慢又没必要）。 */
     const CFQ_CACHE_KEY = 'qgt:cfqdetail';
     function cfqCycleStart(todayStr) {
@@ -7833,9 +7834,9 @@ async function handle(request) {
         + 'd1: d1AnalyticsAdaptiveGroups(limit:40,orderBy:[date_ASC],filter:{date_geq:"' + start + '",date_leq:"' + today + '"}){dimensions{date}sum{rowsRead rowsWritten}count}'
         + 'kv: kvOperationsAdaptiveGroups(limit:500,orderBy:[date_ASC],filter:{date_geq:"' + start + '",date_leq:"' + today + '"}){dimensions{date actionType}sum{requests}}'
         + '}}}';
-      // Q2：Workers 调用（per scriptName × 日，聚合到日；cpuTime 字段该 token 查不了，不查）
+      // Q2：Workers 调用（per scriptName × 日，聚合到日；cpuTimeUs=微秒，含冷启动 startupCpuTimeUs）
       const q2 = 'query{viewer{accounts(filter:' + AF + '){'
-        + 'wrk: workersInvocationsAdaptive(limit:500,filter:{date_geq:"' + start + '",date_leq:"' + today + '"}){dimensions{date scriptName}sum{requests subrequests errors}}'
+        + 'wrk: workersInvocationsAdaptive(limit:500,filter:{date_geq:"' + start + '",date_leq:"' + today + '"}){dimensions{date scriptName}sum{requests subrequests errors cpuTimeUs startupCpuTimeUs}}'
         + '}}}';
       try {
         const j = await cfqGql(tok, acc, q1);
@@ -7857,23 +7858,24 @@ async function handle(request) {
         const cD1R = sum(d1Days, 'read'), cD1W = sum(d1Days, 'written');
         const kvAgg = { read: 0, write: 0, delete: 0, list: 0 };
         kvDays.forEach(x => { kvAgg.read += x.read; kvAgg.write += x.write; kvAgg.delete += x.delete; kvAgg.list += x.list; });
-        // Workers 请求（失败不拦整体，前端显示「查不了」）
+        // Workers 请求 + CPU 时间（失败不拦整体，前端显示「查不了」）
         let wrk = null, wrkErr = '';
         try {
           const j2 = await cfqGql(tok, acc, q2);
           const a2 = j2 && j2.data && j2.data.viewer && j2.data.viewer.accounts && j2.data.viewer.accounts[0];
           if (a2) {
-            const wmap = {};
+            const wmap = {}, cmap = {};
             (a2.wrk || []).forEach(x => {
               const dt = x.dimensions.date;
               wmap[dt] = (wmap[dt] || 0) + (Number(x.sum.requests) || 0);
+              cmap[dt] = (cmap[dt] || 0) + (Number(x.sum.cpuTimeUs) || 0);
             });
-            const wDays = Object.keys(wmap).sort().map(dt => ({ date: dt, requests: wmap[dt] }));
-            wrk = { days: wDays, cReq: sum(wDays, 'requests') };
+            const wDays = Object.keys(wmap).sort().map(dt => ({ date: dt, requests: wmap[dt], cpuMs: Math.round((cmap[dt] || 0) / 1000) }));
+            wrk = { days: wDays, cReq: sum(wDays, 'requests'), cCpuMs: Math.round(wDays.reduce((s, x) => s + x.cpuMs, 0)) };
           } else wrkErr = (j2 && j2.errors) ? String(JSON.stringify(j2.errors)).slice(0, 160) : '空响应';
         } catch (e) { wrkErr = String((e && e.message) || e).slice(0, 160); }
-        // 月包含额度（Workers Paid，2026-11 官方定价页）
-        const L = { d1Read: 25000000000, d1Write: 50000000, kvRead: 10000000, kvWrite: 1000000, kvDel: 1000000, kvList: 1000000, wReq: 10000000 };
+        // 月包含额度（Workers Paid，2026-11 官方定价页；wCpuMs=3000万 CPU 毫秒/月）
+        const L = { d1Read: 25000000000, d1Write: 50000000, kvRead: 10000000, kvWrite: 1000000, kvDel: 1000000, kvList: 1000000, wReq: 10000000, wCpuMs: 30000000 };
         const worstOf = (label, used, inc) => ({ label: label, used: used, inc: inc, pct: Math.round(used * 10000 / inc) / 100 });
         let worst = worstOf('D1 行读', cD1R, L.d1Read);
         [[ 'D1 行写', cD1W, L.d1Write], ['KV 读', kvAgg.read, L.kvRead], ['KV 写', kvAgg.write, L.kvWrite],
@@ -7883,6 +7885,10 @@ async function handle(request) {
         });
         if (wrk && wrk.cReq) {
           const w = worstOf('Workers 请求', wrk.cReq, L.wReq);
+          if (w.pct > worst.pct) worst = w;
+        }
+        if (wrk && wrk.cCpuMs) {
+          const w = worstOf('Workers CPU', wrk.cCpuMs, L.wCpuMs);
           if (w.pct > worst.pct) worst = w;
         }
         const out = {
@@ -10171,7 +10177,7 @@ function cfqChipSync(){
   if(p==null){val=CFQ_ERR?'!':'…';col='#888';}
   else{val=(p>=100?p:String(p))+'%';col=(p>=80)?'#a32d2d':((p>=60)?'#b06a00':'#3b6d11');}
   d.innerHTML='CF额度<b style="color:'+col+'">'+val+'</b>';
-  d.setAttribute('title','Cloudflare Workers Paid 本计费周期（每月 16 日重置）额度占用最高的一项'+((CFQ&&CFQ.worst)?('：'+CFQ.worst.label+' '+CFQ.worst.pct+'%'):'')+'。点开看 D1 读写 / KV 读写删列 / Workers 请求明细'+(CFQ_ERR?('（上次查询：'+CFQ_ERR+'）'):''));
+  d.setAttribute('title','Cloudflare Workers Paid 本计费周期（每月 16 日重置）额度占用最高的一项'+((CFQ&&CFQ.worst)?('：'+CFQ.worst.label+' '+CFQ.worst.pct+'%'):'')+'。点开看 D1 读写 / KV 读写删列 / Workers 请求与 CPU 明细'+(CFQ_ERR?('（上次查询：'+CFQ_ERR+'）'):''));
   d.onclick=cfqOpen;
   box.appendChild(d);
 }
@@ -10202,7 +10208,8 @@ function cfqRender(){
     ['KV 写',CFQ.kv.cWrite,L.kvWrite],
     ['KV 删',CFQ.kv.cDel,L.kvDel],
     ['KV 列',CFQ.kv.cList,L.kvList],
-    ['Workers 请求',CFQ.wrk?CFQ.wrk.cReq:null,L.wReq]
+    ['Workers 请求',CFQ.wrk?CFQ.wrk.cReq:null,L.wReq],
+    ['Workers CPU 时间(ms)',CFQ.wrk?CFQ.wrk.cCpuMs:null,L.wCpuMs]
   ];
   h+='<table style="border-collapse:collapse;min-width:92%;white-space:nowrap"><tr>'+h2+'</tr>';
   rows.forEach(function(r){
@@ -10220,16 +10227,16 @@ function cfqRender(){
   var dmap={};
   (CFQ.d1.days||[]).forEach(function(x){if(!dmap[x.date])dmap[x.date]={};dmap[x.date].d1r=x.read;dmap[x.date].d1w=x.written;});
   (CFQ.kv.days||[]).forEach(function(x){if(!dmap[x.date])dmap[x.date]={};dmap[x.date].kvr=x.read;dmap[x.date].kvw=x.write;});
-  if(CFQ.wrk)(CFQ.wrk.days||[]).forEach(function(x){if(!dmap[x.date])dmap[x.date]={};dmap[x.date].wr=x.requests;});
+  if(CFQ.wrk)(CFQ.wrk.days||[]).forEach(function(x){if(!dmap[x.date])dmap[x.date]={};dmap[x.date].wr=x.requests;dmap[x.date].cpu=x.cpuMs;});
   var dts=Object.keys(dmap).sort().slice(-7);
   h+='<p style="margin:12px 0 4px;color:#666"><b>近 7 日明细（UTC 日；北京早上 8 点前的消耗记在 UTC 前一天）</b></p>';
-  h+='<table style="border-collapse:collapse;min-width:92%;white-space:nowrap"><tr><th style="'+TH+'">日期</th><th style="'+TH+';text-align:right">D1读</th><th style="'+TH+';text-align:right">D1写</th><th style="'+TH+';text-align:right">KV读</th><th style="'+TH+';text-align:right">KV写</th><th style="'+TH+';text-align:right">Workers请求</th></tr>';
+  h+='<table style="border-collapse:collapse;min-width:92%;white-space:nowrap"><tr><th style="'+TH+'">日期</th><th style="'+TH+';text-align:right">D1读</th><th style="'+TH+';text-align:right">D1写</th><th style="'+TH+';text-align:right">KV读</th><th style="'+TH+';text-align:right">KV写</th><th style="'+TH+';text-align:right">Workers请求</th><th style="'+TH+';text-align:right">CPU(ms)</th></tr>';
   dts.forEach(function(dt){
     var r=dmap[dt];
-    h+='<tr><td style="'+TD+'">'+esc(dt)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.d1r)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.d1w)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.kvr)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.kvw)+'</td><td style="'+TD+';text-align:right">'+(r.wr==null?'—':cfqFmt(r.wr))+'</td></tr>';
+    h+='<tr><td style="'+TD+'">'+esc(dt)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.d1r)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.d1w)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.kvr)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.kvw)+'</td><td style="'+TD+';text-align:right">'+(r.wr==null?'—':cfqFmt(r.wr))+'</td><td style="'+TD+';text-align:right">'+(r.cpu==null?'—':cfqFmt(r.cpu))+'</td></tr>';
   });
   h+='</table>';
-  h+='<p style="margin:10px 0 0;color:#888;font-size:11.5px">Paid 后超额才计费（D1 读 $0.001/百万行、Workers 请求 $0.30/百万、KV 写 $5/百万）；按当前用量离月包含额度还非常远，这张卡主要防意外。Workers CPU 时间该数据 token 查不到，未列出'+(CFQ.wrkErr?('（'+esc(CFQ.wrkErr)+'）'):'')+'。</p>';
+  h+='<p style="margin:10px 0 0;color:#888;font-size:11.5px">Paid 后超额才计费（D1 读 $0.001/百万行、Workers 请求 $0.30/百万、KV 写 $5/百万）；按当前用量离月包含额度还非常远，这张卡主要防意外。CPU 时间=Workers 实际消耗的 CPU 毫秒（含冷启动），月包含 3,000 万 ms'+(CFQ.wrkErr?('（Workers 明细查询失败：'+esc(CFQ.wrkErr)+'）'):'')+'。</p>';
   b.innerHTML=h;
 }
 // 2026-10-24：网易工作台只回 missionCode + progressRate 两个原始字段，不翻译就是一串天书；
