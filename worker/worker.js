@@ -7652,9 +7652,20 @@ async function handle(request) {
       let body;
       try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
       // 2026-10-27：写接口只认满权限口令（只读口令进来这里一律 403）
+      // 2026-11-16：只读口令放宽 —— 仅允许「只改通知邮箱 / 歌曲链接」的 update。
+      //   判据：action=update 且除 email/link 外不携带任何其它可写字段（ck/exp/agent/plan/note/
+      //   rbStart/rbFrom 非空即算携带；noListen/pub/rb 只要出现就算携带，防止 noListen:"" 之类的
+      //   空值写入 —— applyEntryEdit 对 noListen/pub/rb 是「出现即生效」）。删除与其它字段仍 403。
       if (!(await consoleAuthFull(body))) {
         const who = await consoleRole(body);
-        return json({ message: who === 'ro' ? '当前是只读口令，不能修改账号' : '账号或密码错误' }, 403, CORS);
+        const roHas = (v) => v != null && String(v).trim() !== '';
+        const roLimited = who === 'ro' && body.action === 'update' &&
+          !roHas(body.ck) && !roHas(body.exp) && !roHas(body.agent) && !roHas(body.plan) &&
+          !roHas(body.note) && !roHas(body.rbStart) && !roHas(body.rbFrom) &&
+          body.noListen === undefined && body.pub === undefined && body.rb === undefined;
+        if (!roLimited) {
+          return json({ message: who === 'ro' ? '当前是只读口令，只能修改「通知邮箱」和「歌曲链接」' : '账号或密码错误' }, 403, CORS);
+        }
       }
       if (body.pool === 'dz') {
         try {
@@ -10376,7 +10387,8 @@ function render(){
       : '<span style="color:#bbb">—</span>';
     var opCell=(ROLE==='full')
       ? '<button class="mini" style="padding:4px 10px;font-size:12px" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'">编辑</button>'
-      : '<span style="color:#c9ced6;font-size:12px">只读</span>';
+      // 2026-11-16：只读口令放宽 —— 给「改邮箱/歌」按钮，openEdit 里只放开邮箱和歌曲链接两栏
+      : '<button class="mini" style="padding:4px 10px;font-size:12px;background:#eef4fb;color:#255ea6;border-color:#c9d8ee" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'" title="只读口令只能改通知邮箱和歌曲链接">改邮箱/歌</button>';
     // 2026-11-15 方案④：卡片加「详情」按钮（手机端显示；桌面 .infoBtn display:none，渲染零变化）。
     // 只读弹窗展示本行全部字段，data-info=行号直接索引 window.ROWS；编辑仍走原 openEdit。
     opCell='<button class="mini infoBtn" data-info="'+i+'" title="查看该号全部字段">详情</button>'+opCell;
@@ -10575,7 +10587,18 @@ function renderRunbar(){
 }
 window.openEdit=function(pool,uid,name){
   $('eLink').value='';$('eEmail').value='';$('eExp').value='';$('eNo').value='';$('eCk').value='';$('em').textContent='';$('ePub').value='';
-  // 2026-10-27：客服/套餐下拉每次打开都按当前配置重建（名单可能在别的标签页刚改过）
+  // 2026-11-16：只读口令放宽 —— 弹窗里只保留「歌曲链接」「通知邮箱」两栏，其余字段与删号按钮全部隐藏。
+  // 标签元素没有 id，用各输入框的 previousElementSibling 定位（label 紧贴在输入框前面）；备注/补号是同一个外层 div，直接藏父节点。
+  var roEdit=(ROLE!=='full');
+  function roHide(el){if(el)el.style.display=roEdit?'none':'';}
+  roHide($('eCk'));roHide($('eCk').previousElementSibling);
+  roHide($('eExp'));roHide($('eExp').previousElementSibling);
+  roHide($('eNo'));roHide($('eNo').previousElementSibling);
+  roHide($('ePub'));roHide($('ePub').previousElementSibling);
+  roHide($('eAgent'));roHide($('eAgent').previousElementSibling);
+  roHide($('ePlan'));roHide($('ePlan').previousElementSibling);
+  roHide($('eNote').parentNode);roHide($('eDel'));
+  // 2026-11-05：客服/套餐下拉每次打开都按当前配置重建（名单可能在别的标签页刚改过）
   applyCfg(DATA&&DATA.cfg);
   if($('eAgent'))$('eAgent').value='';
   if($('ePlan'))$('ePlan').value='';
@@ -10583,7 +10606,8 @@ window.openEdit=function(pool,uid,name){
   var ent=null,arr=(pool==='dz'?(DATA&&DATA.dz):(DATA&&DATA.hz))||[];
   for(var i=0;i<arr.length;i++){var x=arr[i];
     if((uid&&String(x.uid)===String(uid))||(name&&String(x.name)===String(name))){ent=x;break;}}
-  NOTE_OK=!!ent;
+  // 只读口令不提交备注（服务端对只读携带 note 会 403）
+  NOTE_OK=!!ent&&!roEdit;
   $('eNote').value=ent?(ent.note||''):'';
   $('eRb').value='';$('rbStart').value='';$('rbFrom').value='';$('rbQ').value='';$('rbList').innerHTML='';
   $('rbBox').hidden=true;
@@ -10591,7 +10615,7 @@ window.openEdit=function(pool,uid,name){
   $('rbNow').innerHTML=(ent&&ent.rb)
     ? ('当前：<span class="badge b-blue">补</span> 已标记为补号'+(ent.rbStart?'（原单登记日 '+esc(ent.rbStart)+'）':'')+' —— 这单不算营收、不算客服提成')
     : '当前：正常单（计入营收、算客服提成）';
-  $('mTitle').textContent='编辑账号 · '+(pool==='hz'?'主群':'定制群');
+  $('mTitle').textContent=(roEdit?'改邮箱 / 歌曲 · ':'编辑账号 · ')+(pool==='hz'?'主群':'定制群');
   $('mSub').textContent=name+(uid?' / uid '+uid:'');
   $('modal').hidden=false;
   $('eSave').onclick=function(){doEdit(pool,{uid:uid,name:name},'update');};
