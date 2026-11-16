@@ -2719,7 +2719,8 @@ function d1ok() {
 let _d1LastErr = '';
 function d1ErrHint() {
   const m = String(_d1LastErr || '');
-  if (/exceeded D1'?s? free tier/i.test(m)) return 'D1 今日免费额度已用尽（每天 500 万行读），北京时间次日 08:00 恢复';
+  // 2026-11-16：Workers Paid 后无每日重置，文案改月度口径（闸门 QGATE 正常情况下会先让路，这里只是极端兜底）。
+  if (/exceeded D1'?s? free tier/i.test(m)) return 'D1 本计费周期额度已用尽（Workers Paid · 每月 16 日重置），请检查控制台「CF额度」卡';
   if (/readonly|read-only/i.test(m)) return 'D1 处于只读状态';
   if (m) return String(m).slice(0, 160);
   return '原因未知（D1 未返回错误信息）';
