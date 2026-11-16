@@ -5739,7 +5739,10 @@ async function handle(request) {
       const mu = (body.musicU || '').trim();
       if (!mu) return json({ message: '请填写 MUSIC_U' }, 400);
       const email = (body.email || '').trim();
-      const ebMail = emailBad(email);
+      /* 2026-11-17：换绑登录（kind=ckswap）只换凭证 —— 邮箱/歌链/绑歌校验全部跳过，
+         这些字段一律沿用原单，不读这次传的值。 */
+      const _mkPre = String(body.kind || '').trim();
+      const ebMail = _mkPre === 'ckswap' ? '' : emailBad(email);
       if (ebMail) return json({ message: ebMail }, 400);
       const v = await validateCookie(mu);
       if (!v.ok) return json({ message: v.msg }, 400);
@@ -5752,11 +5755,13 @@ async function handle(request) {
           return json({ message: '网易校验接口暂时不可达（' + (v.diag || '网络异常') + '），为避免登记出错号，请稍后重试。' }, 503);
         }
       }
-      const song = await resolveSong(body.link);
+      const song = _mkPre === 'ckswap'
+        ? { ok: true, name: '', arts: [], song: '' }   // 换绑不读歌链，占位放行（后面走 ckswap 分支）
+        : await resolveSong(body.link);
       if (!song.ok) return json({ message: song.msg }, 400);
       /* 2026-11-16：音乐人身份 + 绑错歌校验（用户口径，regMusicianGuard）。
          与 fee/共创同一兜底口径：校验接口失败放行，不挡登记主流程。 */
-      const mg2 = await regMusicianGuard(v.uid, song.name, song.arts);
+      const mg2 = _mkPre === 'ckswap' ? { ok: true } : await regMusicianGuard(v.uid, song.name, song.arts);
       if (!mg2.ok) return json({ message: mg2.msg }, 400);
       let expQ = parseExpInput(body.exp);
       if (!expQ.ok) return json({ message: '有效期格式不对：填天数(如730)、日期(2028-10-18)或不填（默认2年）' }, 400);
@@ -10271,7 +10276,6 @@ body:has(.modal:not([hidden])){overflow:hidden}
   </div>
   <div data-page-node-id="1eFB57H3xbWYOPvCnkeB0t"><label data-page-node-id="nONOKEi87CupLpjhiKWnW7">备注（买家看不到，只记在这条链接上，方便你自己认）</label><input id="rgNote" maxlength="60" placeholder="如：11月 张先生 号掉线补登" data-page-node-id="IEx2nILuwwtVFvX92qCvso"></div>
   <div class="row2" data-page-node-id="20GZIwDJOlpn6Kv6P1i4Fn"><button id="rgDirect" style="display:none" title="不发链接：服务端直接在原到期日上累加，客户不用扫码（仅「续费」且原单还在池里时可用）">直接续费（不发链接）</button><button id="rgGo" data-page-node-id="loJVZO5yioHCjA1vpbAuK0">生成链接</button><button class="gray" id="rgClose" data-page-node-id="34YnYvzsBOkLTPo7G1ntBU">关闭</button></div>
-  <div id="rgGoAlt" style="display:none;margin-top:8px;font-size:13px">客户坚持要自己扫码？<a href="#" id="rgGoAltBtn" style="color:#2b6cb8">改发续费链接 →</a>（其余类型照旧用上面的「生成链接」）</div>
   <div class="msg" id="rgm" data-page-node-id="ymPRNwvhxkUMCMMNYZMJtS"></div>
   <div id="rgOut" data-page-node-id="9IXQh7To9v6qwlCFt7UIkw"></div>
   <div style="display:flex;gap:8px;align-items:center;margin:16px 0 6px;flex-wrap:wrap" data-page-node-id="KV8ivqBZBkZgI53vTJdgZg">
@@ -11949,11 +11953,9 @@ function rgSync(){
   var inh=(k==='fix'||k==='ckswap');
   $('rgPlan').disabled=inh;
   $('rgAgent').disabled=inh;
-  /* 2026-11-16 晚：续费时主动作只剩「直接续费」，大「生成链接」按钮整个隐藏，
-     降级成下方一行小字「改发续费链接 →」（点击直接生成，与 EXE 同样式）。
-     其余类型照旧显示大按钮。掉线号续费也走小字链接（服务端按原口径收钱累加）。 */
+  /* 2026-11-17：续费时主动作只剩「直接续费」，大「生成链接」整行隐藏（用户拍板：
+     「客户坚持要自己扫码」这类次选项全部去掉 —— 续费=直接续费，掉线号走补登）。 */
   $('rgGo').style.display=(k==='renew')?'none':'';
-  $('rgGoAlt').style.display=(k==='renew')?'':'none';
   /* 2026-11-16：直接续费按钮 —— 只在「续费 + 原单已选中 + 号还在池」时出现。
      换绑不需要它（换绑要扫新码，控制台做不了），补登是免费补回也不适用。 */
   RD_ARM=null;   /* 切类型/重开弹窗/换原单都会走到这里 —— 旧的确认快照一律作废 */
@@ -11971,11 +11973,6 @@ function rgDirectReset(){
   b.style.borderColor='';
   b.style.color='';
 }
-$('rgGoAltBtn').onclick=function(e){
-  e.preventDefault();
-  /* 复用 rgGo 的生成流程：参数校验/防重/输出全走同一条路，只换入口不换逻辑 */
-  if($('rgGo').onclick)$('rgGo').onclick();
-};
 $('rgKind').onchange=function(){ RG_REF=null; $('rgRefOut').innerHTML=''; rgSync(); };
 /* 2026-11-10：按状态看链接（尤其「已过期」）。过期链接仍然是 unused，作废按钮照样给。 */
 $('rgState').onchange=function(){ rgLoad(); };
