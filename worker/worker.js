@@ -7748,6 +7748,123 @@ async function handle(request) {
         message: '已保存：客服 ' + saved.cfg.agents.length + ' 人（' + withGrp + ' 人配了售后群）、套餐 ' + saved.cfg.plans.length + ' 档'
           + (saved.ok ? '' : '（⚠️ D1 写入失败，已写 KV 兜底，请稍后重试）') + hint }, 200, CORS);
     }
+    /* ===== 2026-11-16：控制台「CF 额度」卡（满权限专属，/api/console/cfquota）=====
+       背景：11-16 账号升级 Workers Paid（$5/月，按开通日每月 16 日扣费）。
+       Free 时代的「每日硬闸门」变成「月包含额度、超额才计费」。控制台套餐汇总条末尾
+       给满权限口令一张额度卡：D1 读/写、KV 读/写/删/列、Workers 请求，按计费周期
+       （每月 16 日 00:00 UTC 起）聚合 CF GraphQL 分析数据。
+       凭据与 d1QuotaProbe() 同源：Worker Secret CFQ_TOKEN/CFQ_ACCOUNT（KV 手动键备用）。
+       Workers CPU 时间该 token 查不到（unknown field "cpuTime"，实测 2026-11-16），
+       只展示请求数。结果 Cache API 缓存 10 分钟（GraphQL 本身有分钟级~小时级延迟，
+       控制台每次刷新都现查既慢又没必要）。 */
+    const CFQ_CACHE_KEY = 'qgt:cfqdetail';
+    function cfqCycleStart(todayStr) {
+      // 计费周期锚定每月 16 日（UTC）：今天 ≥16 号 → 本月 16 号起；<16 号 → 上月 16 号起。
+      let y = Number(todayStr.slice(0, 4)), m = Number(todayStr.slice(5, 7)), d = Number(todayStr.slice(8, 10));
+      if (d < 16) { m--; if (m < 1) { m = 12; y--; } }
+      return y + '-' + String(m).padStart(2, '0') + '-16';
+    }
+    async function cfqGql(tok, acc, q) {
+      const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q }),
+      });
+      return await r.json();
+    }
+    if (url.pathname === '/api/console/cfquota' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) {
+        const who = await consoleRole(body);
+        return json({ message: who === 'ro' ? '当前是只读口令，看不到 CF 额度' : '账号或密码错误' }, 403, CORS);
+      }
+      const force = body.force === 1 || body.force === true;
+      if (!force) {
+        try {
+          const cached = await caGet(CFQ_CACHE_KEY);
+          if (cached) return json(JSON.parse(cached), 200, CORS);
+        } catch (e) {}
+      }
+      let tok = '', acc = '';
+      try {
+        tok = cleanKV((typeof globalThis.CFQ_TOKEN === 'string' && globalThis.CFQ_TOKEN) || await POOL.get('CFQ_TOKEN'));
+        acc = cleanKV((typeof globalThis.CFQ_ACCOUNT === 'string' && globalThis.CFQ_ACCOUNT) || await POOL.get('CFQ_ACCOUNT'));
+      } catch (e) {}
+      if (!tok || !acc) return json({ ok: false, message: '未配置 CFQ_TOKEN/CFQ_ACCOUNT（Worker Secret 与 KV 备用键都没有）' }, 200, CORS);
+      const today = new Date().toISOString().slice(0, 10);
+      const start = cfqCycleStart(today);
+      const AF = '{accountTag:"' + acc + '"}';
+      // Q1：D1 + KV（整个计费周期，按 UTC 日分桶；周期最长 31 天，limit 余量充足）
+      const q1 = 'query{viewer{accounts(filter:' + AF + '){'
+        + 'd1: d1AnalyticsAdaptiveGroups(limit:40,orderBy:[date_ASC],filter:{date_geq:"' + start + '",date_leq:"' + today + '"}){dimensions{date}sum{rowsRead rowsWritten}count}'
+        + 'kv: kvOperationsAdaptiveGroups(limit:500,orderBy:[date_ASC],filter:{date_geq:"' + start + '",date_leq:"' + today + '"}){dimensions{date actionType}sum{requests}}'
+        + '}}}';
+      // Q2：Workers 调用（per scriptName × 日，聚合到日；cpuTime 字段该 token 查不了，不查）
+      const q2 = 'query{viewer{accounts(filter:' + AF + '){'
+        + 'wrk: workersInvocationsAdaptive(limit:500,filter:{date_geq:"' + start + '",date_leq:"' + today + '"}){dimensions{date scriptName}sum{requests subrequests errors}}'
+        + '}}}';
+      try {
+        const j = await cfqGql(tok, acc, q1);
+        const acc0 = j && j.data && j.data.viewer && j.data.viewer.accounts && j.data.viewer.accounts[0];
+        if (!acc0) {
+          return json({ ok: false, message: 'CF GraphQL 查询失败：' + ((j && j.errors) ? String(JSON.stringify(j.errors)).slice(0, 200) : '空响应') }, 200, CORS);
+        }
+        const d1Days = (acc0.d1 || []).map(x => ({
+          date: x.dimensions.date, read: Number(x.sum.rowsRead || 0),
+          written: Number(x.sum.rowsWritten || 0), queries: Number(x.count || 0) }));
+        const kvMap = {};
+        (acc0.kv || []).forEach(x => {
+          const dt = x.dimensions.date, op = x.dimensions.actionType;
+          if (!kvMap[dt]) kvMap[dt] = { read: 0, write: 0, delete: 0, list: 0 };
+          if (Object.prototype.hasOwnProperty.call(kvMap[dt], op)) kvMap[dt][op] = Number(x.sum.requests || 0);
+        });
+        const kvDays = Object.keys(kvMap).sort().map(dt => Object.assign({ date: dt }, kvMap[dt]));
+        const sum = (arr, k) => arr.reduce((s, x) => s + (Number(x[k]) || 0), 0);
+        const cD1R = sum(d1Days, 'read'), cD1W = sum(d1Days, 'written');
+        const kvAgg = { read: 0, write: 0, delete: 0, list: 0 };
+        kvDays.forEach(x => { kvAgg.read += x.read; kvAgg.write += x.write; kvAgg.delete += x.delete; kvAgg.list += x.list; });
+        // Workers 请求（失败不拦整体，前端显示「查不了」）
+        let wrk = null, wrkErr = '';
+        try {
+          const j2 = await cfqGql(tok, acc, q2);
+          const a2 = j2 && j2.data && j2.data.viewer && j2.data.viewer.accounts && j2.data.viewer.accounts[0];
+          if (a2) {
+            const wmap = {};
+            (a2.wrk || []).forEach(x => {
+              const dt = x.dimensions.date;
+              wmap[dt] = (wmap[dt] || 0) + (Number(x.sum.requests) || 0);
+            });
+            const wDays = Object.keys(wmap).sort().map(dt => ({ date: dt, requests: wmap[dt] }));
+            wrk = { days: wDays, cReq: sum(wDays, 'requests') };
+          } else wrkErr = (j2 && j2.errors) ? String(JSON.stringify(j2.errors)).slice(0, 160) : '空响应';
+        } catch (e) { wrkErr = String((e && e.message) || e).slice(0, 160); }
+        // 月包含额度（Workers Paid，2026-11 官方定价页）
+        const L = { d1Read: 25000000000, d1Write: 50000000, kvRead: 10000000, kvWrite: 1000000, kvDel: 1000000, kvList: 1000000, wReq: 10000000 };
+        const worstOf = (label, used, inc) => ({ label: label, used: used, inc: inc, pct: Math.round(used * 10000 / inc) / 100 });
+        let worst = worstOf('D1 行读', cD1R, L.d1Read);
+        [[ 'D1 行写', cD1W, L.d1Write], ['KV 读', kvAgg.read, L.kvRead], ['KV 写', kvAgg.write, L.kvWrite],
+         ['KV 删', kvAgg.delete, L.kvDel], ['KV 列', kvAgg.list, L.kvList]].forEach(it => {
+          const w = worstOf(it[0], it[1], it[2]);
+          if (w.pct > worst.pct) worst = w;
+        });
+        if (wrk && wrk.cReq) {
+          const w = worstOf('Workers 请求', wrk.cReq, L.wReq);
+          if (w.pct > worst.pct) worst = w;
+        }
+        const out = {
+          ok: true, cycle: { start: start, today: today }, gen_at: new Date().toISOString(),
+          d1: { days: d1Days, cRead: cD1R, cWrite: cD1W },
+          kv: { days: kvDays, cRead: kvAgg.read, cWrite: kvAgg.write, cDel: kvAgg.delete, cList: kvAgg.list },
+          wrk: wrk, wrkErr: wrkErr, limits: L, worst: worst,
+        };
+        await caPut(CFQ_CACHE_KEY, JSON.stringify(out), 600);
+        return json(out, 200, CORS);
+      } catch (e) {
+        return json({ ok: false, message: 'CF GraphQL 请求失败：' + String((e && e.message) || e).slice(0, 160) }, 200, CORS);
+      }
+    }
     /* ===== 2026-11-10：客服机器授权（控制台「设备授权」）=====
        D1 reg_devices 是权威，KV dev:<机器码> 是兜底镜像（D1 读额度打满时用）。
        只认满权限口令，只读口令进不来。 */
@@ -9767,6 +9884,12 @@ body:has(.modal:not([hidden])){overflow:hidden}
   <div id="infoBody" style="margin-top:10px" data-page-node-id="c2UTGHw2z3Xpn4HLjaoNZ0"></div>
   <div class="row2" data-page-node-id="BrKnCT8gOifJOapeZ8KY4h"><button class="gray" id="infoClose" data-page-node-id="ZTYnwS3fZTdz4XpHXQ1dGJ">关闭</button></div>
 </div></div>
+<!-- 2026-11-16：CF 额度明细弹窗（满权限专属，入口在套餐汇总条末尾的「CF额度」卡） -->
+<div class="modal" id="cfqModal" hidden><div class="mbox" style="width:820px;max-height:92vh;overflow:auto">
+  <h3>Cloudflare 额度（Workers Paid · 每月 16 日重置）</h3>
+  <div id="cfqBody" style="margin-top:8px;font-size:12.5px;color:#444"></div>
+  <div class="row2"><button class="gray" id="cfqRefresh">刷新数据</button><button class="gray" id="cfqClose">关 闭</button></div>
+</div></div>
 <script>
 var TOKEN=null, DATA=null, POOLF='all';
 // 2026-10-27：ROLE='full' 满权限 / 'ro' 只读（只能看，编辑、删号、客服名单全部关掉）。
@@ -9978,11 +10101,104 @@ function loadData(force){
     applyCfg(DATA.cfg);           // 客服/套餐下拉 + 汇总口径
     applyRole(DATA.role);         // 满权限 / 只读（服务端 data 里带，刷新一次就恢复正确权限）
     render();fitTable();
+    if(ROLE==='full')cfqFetch(false);   // 2026-11-16：满权限登录后拉 CF 额度（服务端缓存 10 分钟，不贵）
   }).catch(function(){
     // 2026-11-09：原来这里静默吞错，请求超时/5xx 时页面毫无反应，用户以为刷完了。
     b.disabled=false;b.textContent='刷新失败';
     setTimeout(function(){b.textContent=bt;},2500);
   });
+}
+// ===== 2026-11-16：CF 额度卡（满权限专属）=====
+// 11-16 账号升级 Workers Paid（$5/月，按开通日每月 16 日扣费）：D1/KV/Workers 从
+// 「每日硬限额」变成「月包含额度、超额才计费」。套餐汇总条末尾给满权限口令一张额度卡，
+// 点开看明细。套餐以后加档位时，套餐卡照常排在前面，这张卡永远顺延在最后。
+// 数据源：/api/console/cfquota（服务端用 CFQ_TOKEN Secret 查 CF GraphQL，缓存 10 分钟；
+// GraphQL 分析数据本身有分钟~小时级延迟，数字略低于实时）。只读口令看不到（服务端也拦）。
+var CFQ=null, CFQ_ERR='';
+function cfqFetch(force){
+  if(ROLE!=='full')return;
+  var t=JSON.parse(TOKEN||'{}');
+  api('/api/console/cfquota',{user:t.user,pass:t.pass,force:(force===true?1:0)}).then(function(o){
+    if(o.ok&&o.d&&o.d.ok){CFQ=o.d;CFQ_ERR='';}
+    else{CFQ_ERR=(o.d&&o.d.message)||'查询失败';}
+    cfqChipSync();
+    var m=$('cfqModal');if(m&&!m.hidden)cfqRender();
+  }).catch(function(){CFQ_ERR='网络错误';cfqChipSync();});
+}
+// 渲染/挪动套餐条末尾的额度卡。render() 每次都整条 innerHTML 重画套餐卡，
+// 所以这里在 render 末尾被调用一次：删掉旧卡再追加，保证永远排在最后（顺延位）。
+function cfqChipSync(){
+  var old=document.getElementById('cfqChip');
+  if(old&&old.parentNode)old.parentNode.removeChild(old);
+  if(ROLE!=='full')return;
+  var box=$('plans');if(!box)return;
+  var d=document.createElement('div');
+  d.id='cfqChip';d.className='pl';d.style.cursor='pointer';
+  var p=(CFQ&&CFQ.worst)?Number(CFQ.worst.pct):null;
+  var val,col;
+  if(p==null){val=CFQ_ERR?'!':'…';col='#888';}
+  else{val=(p>=100?p:String(p))+'%';col=(p>=80)?'#a32d2d':((p>=60)?'#b06a00':'#3b6d11');}
+  d.innerHTML='CF额度<b style="color:'+col+'">'+val+'</b>';
+  d.setAttribute('title','Cloudflare Workers Paid 本计费周期（每月 16 日重置）额度占用最高的一项'+((CFQ&&CFQ.worst)?('：'+CFQ.worst.label+' '+CFQ.worst.pct+'%'):'')+'。点开看 D1 读写 / KV 读写删列 / Workers 请求明细'+(CFQ_ERR?('（上次查询：'+CFQ_ERR+'）'):''));
+  d.onclick=cfqOpen;
+  box.appendChild(d);
+}
+function cfqOpen(){var m=$('cfqModal');if(!m)return;m.hidden=false;cfqRender();if(!CFQ)cfqFetch(true);}
+function cfqClose(){$('cfqModal').hidden=true;}
+$('cfqClose').onclick=cfqClose;
+$('cfqRefresh').onclick=function(){cfqFetch(true);};
+function cfqFmt(n){n=Number(n)||0;return String(Math.round(n)).replace(/\\B(?=(\\d{3})+(?!\\d))/g,',');}
+function cfqPctStr(u,l){
+  var p=l>0?(u*100/l):0;
+  var s=(p>=10)?String(Math.round(p*10)/10):String(Math.round(p*100)/100);
+  if(p>=100)s='100+';
+  return s+'%';
+}
+function cfqRender(){
+  var b=$('cfqBody');if(!b)return;
+  if(!CFQ){b.innerHTML='<p>'+(CFQ_ERR?('查询失败：'+esc(CFQ_ERR)):'正在查询 Cloudflare 分析数据…')+'</p>';return;}
+  var L=CFQ.limits;
+  var gen=String(CFQ.gen_at||'').replace('T',' ').slice(0,16);
+  var h='<p style="margin:0 0 8px;color:#666">计费周期 '+esc(CFQ.cycle.start)+' 起（每月 16 日 UTC 重置，Workers Paid $5/月）· 数据截至 '+esc(gen)+' UTC（GraphQL 分析有分钟级延迟）</p>';
+  var TH='padding:5px 10px;border-bottom:1px solid #eee';
+  var TD='padding:5px 10px;border-bottom:1px solid #f2f2f2';
+  var h2='<th style="'+TH+'">项目</th><th style="'+TH+';text-align:right">本周期已用</th><th style="'+TH+';text-align:right">月包含</th><th style="'+TH+';text-align:right">占用</th><th style="'+TH+'">状态</th>';
+  var rows=[
+    ['D1 行读',CFQ.d1.cRead,L.d1Read],
+    ['D1 行写',CFQ.d1.cWrite,L.d1Write],
+    ['KV 读',CFQ.kv.cRead,L.kvRead],
+    ['KV 写',CFQ.kv.cWrite,L.kvWrite],
+    ['KV 删',CFQ.kv.cDel,L.kvDel],
+    ['KV 列',CFQ.kv.cList,L.kvList],
+    ['Workers 请求',CFQ.wrk?CFQ.wrk.cReq:null,L.wReq]
+  ];
+  h+='<table style="border-collapse:collapse;min-width:92%;white-space:nowrap"><tr>'+h2+'</tr>';
+  rows.forEach(function(r){
+    var u=r[1],ps,col,tag;
+    if(u==null){ps='—';col='#888';tag='<span style="color:#888">查不了（token 无该数据权限）</span>';}
+    else{
+      var p=u*100/r[2];
+      ps=cfqPctStr(u,r[2]);col=(p>=80)?'#a32d2d':((p>=60)?'#b06a00':'#1e7a1e');
+      tag='<span style="color:'+(p>=60?'#b06a00':'#1e7a1e')+'">'+(p>=60?'留意':'正常')+'</span>';
+    }
+    h+='<tr><td style="'+TD+'">'+r[0]+'</td><td style="'+TD+';text-align:right">'+(u==null?'—':cfqFmt(u))+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r[2])+'</td><td style="'+TD+';text-align:right;color:'+col+';font-weight:600">'+ps+'</td><td style="'+TD+'">'+tag+'</td></tr>';
+  });
+  h+='</table>';
+  // 近 7 日明细：把 D1/KV/Workers 三份按日数据拼到一张表
+  var dmap={};
+  (CFQ.d1.days||[]).forEach(function(x){if(!dmap[x.date])dmap[x.date]={};dmap[x.date].d1r=x.read;dmap[x.date].d1w=x.written;});
+  (CFQ.kv.days||[]).forEach(function(x){if(!dmap[x.date])dmap[x.date]={};dmap[x.date].kvr=x.read;dmap[x.date].kvw=x.write;});
+  if(CFQ.wrk)(CFQ.wrk.days||[]).forEach(function(x){if(!dmap[x.date])dmap[x.date]={};dmap[x.date].wr=x.requests;});
+  var dts=Object.keys(dmap).sort().slice(-7);
+  h+='<p style="margin:12px 0 4px;color:#666"><b>近 7 日明细（UTC 日；北京早上 8 点前的消耗记在 UTC 前一天）</b></p>';
+  h+='<table style="border-collapse:collapse;min-width:92%;white-space:nowrap"><tr><th style="'+TH+'">日期</th><th style="'+TH+';text-align:right">D1读</th><th style="'+TH+';text-align:right">D1写</th><th style="'+TH+';text-align:right">KV读</th><th style="'+TH+';text-align:right">KV写</th><th style="'+TH+';text-align:right">Workers请求</th></tr>';
+  dts.forEach(function(dt){
+    var r=dmap[dt];
+    h+='<tr><td style="'+TD+'">'+esc(dt)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.d1r)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.d1w)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.kvr)+'</td><td style="'+TD+';text-align:right">'+cfqFmt(r.kvw)+'</td><td style="'+TD+';text-align:right">'+(r.wr==null?'—':cfqFmt(r.wr))+'</td></tr>';
+  });
+  h+='</table>';
+  h+='<p style="margin:10px 0 0;color:#888;font-size:11.5px">Paid 后超额才计费（D1 读 $0.001/百万行、Workers 请求 $0.30/百万、KV 写 $5/百万）；按当前用量离月包含额度还非常远，这张卡主要防意外。Workers CPU 时间该数据 token 查不到，未列出'+(CFQ.wrkErr?('（'+esc(CFQ.wrkErr)+'）'):'')+'。</p>';
+  b.innerHTML=h;
 }
 // 2026-10-24：网易工作台只回 missionCode + progressRate 两个原始字段，不翻译就是一串天书；
 // 而且原来把「650 主任务」和「发布笔记」两个代码拼在一格还带 CSS 截断，看着像 650 只有 2%。
@@ -10357,6 +10573,9 @@ function render(){
     if(!el||el===this||!el.getAttribute)return;
     pickPlan(el.getAttribute('data-plan'));
   };
+  // 2026-11-16：套餐条末尾追加「CF额度」卡（满权限才渲染）。render() 每次重画套餐条，
+  // 额度卡必须跟着重挂一次，且永远排在最后 —— 以后套餐加新档位，这张卡自动往后顺延。
+  cfqChipSync();
   // 2026-10-27：套餐和有效期是**两个字段**——套餐（plan）只用于统计口径，真正卡播放/互听时长的是有效期（exp）。
   // 手动改有效期不会自动改套餐，所以两边可能对不上（比如选了「1年」又把有效期改到 730 天）。
   // 这里只在渲染时标一个「≠」提示，不改任何数据、不拦任何操作。
