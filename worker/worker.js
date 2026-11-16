@@ -6503,16 +6503,21 @@ async function handle(request) {
       }
       if (rows === null) return json({ ok: false, message: '数据库读不到，请稍后再试（不是没有原单）' }, 503, CORSF);
       const uids = [...new Set(rows.map(r => String(r.uid || '')).filter(Boolean))];
-      const alive = {};
+      const alive = {}, curE = {};
       if (uids.length) {
-        const a = await d1All('SELECT uid FROM accounts WHERE pool=? AND uid IN (' + uids.map(() => '?').join(',') + ')',
+        // 2026-11-16：顺带取号池当前到期日（curExp）—— 同号多单时前端把「当前生效」那单排前打标
+        const a = await d1All('SELECT uid,exp FROM accounts WHERE pool=? AND uid IN (' + uids.map(() => '?').join(',') + ')',
                               [POOL_NAME].concat(uids));
-        if (a) for (const x of a) alive[String(x.uid)] = 1;    // 读失败就当「不在池」，只影响显示
+        if (a) for (const x of a) {
+          alive[String(x.uid)] = 1;
+          curE[String(x.uid)] = String(x.exp || '');
+        }    // 读失败就当「不在池」，只影响显示
       }
       return json({ ok: true, rows: rows.map(r => ({
         uid: String(r.uid || ''), name: String(r.name || ''), plan: String(r.plan || ''),
         exp: String(r.exp || ''), day: String(r.day || ''), start: String(r.start || ''),
         rb: Number(r.rb) || 0, alive: !!alive[String(r.uid)],
+        curExp: curE[String(r.uid)] || '',
       })) }, 200, CORSF);
     }
     if (url.pathname === '/api/regtoken_list' && request.method === 'POST') {
@@ -8837,15 +8842,20 @@ async function handle(request) {
       // 界面显示「没找到原单」—— 假阴性会让补号时误判「这个号没有历史单」，直接算错时长。
       if (!rows) return json({ message: '账本查询失败：' + d1ErrHint() + '（不是没有原单，是这次没读出来）' }, 503, CORS);
       // 顺手标出「这个号现在还在不在池里」，避免把在用的号误当原单
+      // 2026-11-16：同时带出号池当前到期日（curExp）—— 台账一次登记/续费各记一单，
+      // 同号多单是正常历史；前端靠 curExp 把「当前生效」那单排前打标，客服不用猜。
       const uids = [...new Set((rows || []).map(r => String(r.uid || '')).filter(Boolean))];
-      const alive = {};
+      const alive = {}, curE = {};
       if (uids.length) {
         const ph = uids.map(() => '?').join(',');
-        const a = await d1All('SELECT pool,uid FROM accounts WHERE uid IN (' + ph + ')', uids);
+        const a = await d1All('SELECT pool,uid,exp FROM accounts WHERE uid IN (' + ph + ')', uids);
         // 2026-11-06：读失败时 a=null，若继续执行会把所有单都标成「号已删」，
         // 补号时据此判断就会误判（以为原号没了）。直接报错。
         if (!a) return json({ message: '查询号池失败：' + d1ErrHint() + '（不是号已删，是这次没读出来）' }, 503, CORS);
-        for (const x of a) alive[String(x.pool) + '|' + String(x.uid)] = 1;
+        for (const x of a) {
+          alive[String(x.pool) + '|' + String(x.uid)] = 1;
+          curE[String(x.pool) + '|' + String(x.uid)] = String(x.exp || '');
+        }
       }
       return json({ ok: true, rows: (rows || []).map(r => ({
         id: r.id, pool: r.pool, uid: String(r.uid || ''), name: String(r.name || ''),
@@ -8854,6 +8864,7 @@ async function handle(request) {
         day: String(r.day || ''), start: String(r.start || ''), exp: String(r.exp || ''),
         rb: Number(r.rb) || 0, rbFrom: Number(r.rb_from) || 0, remark: String(r.remark || ''),
         alive: !!alive[String(r.pool) + '|' + String(r.uid)],
+        curExp: curE[String(r.pool) + '|' + String(r.uid)] || '',
       })) }, 200, CORS);
     }
     return json({ message: 'not found' }, 404);
@@ -11923,17 +11934,22 @@ $('rgFind').onclick=function(){
     $('rgFind').disabled=false;
     if(!(r.ok&&r.d&&r.d.ok)){ $('rgm').textContent=(r.d&&r.d.message)||'搜索失败'; $('rgm').className='msg err'; return; }
     var rows=(r.d.rows||[]).filter(function(x){return !!x.exp;});
+    /* 2026-11-16：台账一次登记/续费各记一单，同号多单是正常历史 ——
+       按 curExp（号池当前到期日）把「当前生效」那单排最前打标；
+       续费金额服务端一律按号池当前到期日累加，选哪行都不影响金额。 */
+    rows.sort(function(a,b){var ca=(a.curExp&&a.exp===a.curExp)?1:0,cb=(b.curExp&&b.exp===b.curExp)?1:0;return cb-ca;});
     if(!rows.length){
       $('rgRefOut').innerHTML='<div style="color:#b06a00;font-size:12px">没找到有到期日的原单。真没买过的客户请按「新登记」发链接。</div>';
       return;
     }
-    var h='<div style="font-size:12px;color:#666;margin-bottom:5px">点一行选中它当原单：</div>';
+    var h='<div style="font-size:12px;color:#666;margin-bottom:5px">点一行选中它当原单（「当前生效」= 号池现在的到期日；续费按它累加，选历史单也不会少算）：</div>';
     rows.forEach(function(x,i){
-      h+='<div class="rghit" data-i="'+i+'" style="cursor:pointer;padding:7px 9px;border:1px solid #e3e8f0;border-radius:7px;margin-bottom:5px;font-size:12px;line-height:1.7">'
+      h+='<div class="rghit" data-i="'+i+'" style="cursor:pointer;padding:7px 9px;border:1px solid '+( (x.curExp&&x.exp===x.curExp)?'#b7d8b7':'#e3e8f0')+';border-radius:7px;margin-bottom:5px;font-size:12px;line-height:1.7">'
         +'<b>'+esc(x.name||'(无手机号)')+'</b> · uid '+esc(x.uid||'-')+' · '+esc(x.plan||'?')
         +' · 到期 <b>'+esc(x.exp||'')+'</b>'
         +' · 登记日 '+esc(String(x.start||x.day||'').slice(0,10))
         +(x.alive?' <span class="badge b-green">还在池</span>':' <span class="badge b-gray">号已删</span>')
+        +((x.curExp&&x.exp===x.curExp)?' <span class="badge b-green">当前生效</span>':' <span class="badge b-gray">历史单</span>')
         +(x.rb?' <span class="badge b-orange">补</span>':'')
         +'</div>';
     });
