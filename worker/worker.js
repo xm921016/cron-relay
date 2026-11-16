@@ -1412,6 +1412,15 @@ async function resolveSong(link) {
     if (!j || !Array.isArray(j.songs) || !j.songs.length) {
       return { ok: false, msg: '这个链接不是单曲（可能是歌单/电台/专辑 id）。请分享【单曲】：APP 里播放那首歌 → 分享 → 复制链接' };
     }
+    // 2026-11-16：fee>0 = VIP 试听类歌曲，免费听众播不完、播放不计入任务数据，
+    // 登记了也白跑（341434709《满风尘》fee=8 三天零入账实例）。登记入口直接拒收，
+    // 自助 gate 页和客服 EXE join_manual 两条路都走 resolveSong，一处拦两头生效。
+    // 接口偶发失败仍放行（保持原有兜底口径，fee 查不到不挡登记）。
+    const sg0 = j.songs[0] || {};
+    const fee0 = Number(sg0.fee == null ? 0 : sg0.fee);
+    if (fee0 > 0) {
+      return { ok: false, msg: '这首《' + String(sg0.name || '') + '》是 VIP 试听类歌曲（非免费完整曲目），免费听众听不完，播放不计入 650 任务数据，登记了也不会有进度。请换一首你名下免费上架的歌曲：APP 里打开那首歌 → 分享 → 复制链接' };
+    }
   } catch (e) {
     // 详情接口偶发异常时放行（歌单类 URL 已在上面被路径检查拦截）
   }
@@ -7036,7 +7045,9 @@ async function handle(request) {
       const scNames = {};
       const scIds = [];
       for (const p of pend) {
-        if (String(p.kind || '') !== 'songchange') continue;
+        // 2026-11-16：feenote（VIP 试听歌换歌引导）也要歌名，ref=歌曲 id，与 songchange 同走 song_meta
+        const k0 = String(p.kind || '');
+        if (k0 !== 'songchange' && k0 !== 'feenote') continue;
         for (const x of String(p.ref || '').split(':')) {
           if (/^\d+$/.test(x) && !scIds.includes(x)) scIds.push(x);
         }
@@ -7080,6 +7091,9 @@ async function handle(request) {
           item.song_new = scNames[scParts[1]] || ('歌' + (scParts[1] || '?'));
           // 2026-11-13 v3：ref 第三段 B = 旧歌不是本人作品（绑错歌/查无此歌），邮件走「不是你的歌」文案
           item.notmine = scParts[2] === 'B';
+        } else if (String(p.kind || '') === 'feenote') {
+          // 2026-11-16：feenote 附带登记歌名（ref=歌曲 id，查不到 song_meta 的用「歌+id」兜底）
+          item.song = scNames[String(p.ref || '')] || ('歌' + String(p.ref || '?'));
         }
         toSend.push(item);
         if (!dry) await d1Run("UPDATE mail_queue SET state='claimed',claimed_at=? WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='pending'",

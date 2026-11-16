@@ -507,6 +507,35 @@ def notify_songok(email, nickname, name, group=""):
     return send_user_email(email, subject, body)
 
 
+def notify_feenote(email, nickname, name, group="", song=""):
+    """VIP 试听歌零入账的换歌引导（2026-11-16 新增，kind=feenote）。
+
+    背景：341434709《满风尘》登记 3 天零入账，根因=歌是 fee=8 VIP 试听类，
+    免费听众播不完、播放不计入任务数据。号主 CK 正常（不能发 relogin）、
+    歌在架没冻结（songchange 两套文案都不符），故新开本文案。
+    ref=歌曲 id（唯一键去重，一单一发）；歌名由 worker mail_pending 附带。
+    """
+    if not (email or "").strip():
+        return False
+    old = (song or "").strip() or "当前登记的歌曲"
+    subject = "【网易音乐人650任务】你登记的歌曲需要换一首，说明一下原因"
+    body = (
+        f"你好，{_who(nickname, name)}：\n\n"
+        f"跟你说明一下：你登记的《{old}》在网易平台属于「VIP 试听」类歌曲"
+        "（不是免费完整曲目），免费听众没法把它听完整，平台不会把这类播放计入"
+        "音乐人任务数据——这就是这几天任务进度一直是 0 的原因。"
+        "你的账号本身没有任何问题，不用担心。\n\n"
+        "处理办法（两步）：\n"
+        "1. 在网易云音乐人后台上传（或上架）一首免费歌曲——要求：免费收听、"
+        "普通用户能完整播放、歌手只有你本人；\n"
+        "2. 上架后到售后群联系客服，把登记歌曲换成新的这首。\n\n"
+        "换好后，第二天任务进度就会正常增长，之前的时间不算浪费。\n\n"
+        + _group_line(group) + "\n\n"
+        "——" + SIGN
+    )
+    return send_user_email(email, subject, body)
+
+
 def notify_songchange(email, nickname, name, group="", song_old="", song_new="", notmine=False):
     """主动换歌通知（2026-11-13 新增，kind=songchange）：
 
