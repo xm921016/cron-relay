@@ -2295,14 +2295,15 @@ async function addEntry(entry) {
         hist = await d1FindLastOrder(uidKey, entry.name);
         if (hist && hist.exp && hist.exp !== 'forever' && !isExpiredExp(hist.exp)) {
           kind = 'fix';
-          keepRow = { exp: hist.exp, added: hist.start || hist.day || '', pub: 0 };
+          // 2026-11-16（用户口径）：keepRow 带 plan —— 补号要自动带回原单套餐，控制台不再显示「未标注」。
+          keepRow = { exp: hist.exp, added: hist.start || hist.day || '', plan: String(hist.plan || ''), pub: 0 };
         } else if (dead.length) {
           // 号在库里但已判失效、台账又查不到有效原单 → 仍按补登放行：
           // 到期日/入池日取号上的真实值 —— 保留剩余时长，也别把首周加速（added）重置掉。
           const dr = (uidKey && dead.find(d => d && String(d.uid) === uidKey)) || dead[0];
           kind = 'fix';
           keepRow = { exp: String(dr.exp || '').slice(0, 10) || beijingDate(),
-                      added: String(dr.added || ''), pub: 0 };
+                      added: String(dr.added || ''), plan: String(dr.plan || ''), pub: 0 };
         }
       }
 
@@ -2325,6 +2326,7 @@ async function addEntry(entry) {
         keepRow = { exp: fexp,
           added: String((keepRow && keepRow.added) || (dead[0] && dead[0].added)
                         || (hist && (hist.start || hist.day)) || '').slice(0, 19),
+          plan: String((keepRow && keepRow.plan) || (dead[0] && dead[0].plan) || (hist && hist.plan) || ''),
           pub: 0 };
       } else if (_force && _force.kind === 'renew' && !live.length) {
         // 号已掉线（或只剩 relogin 行），但这一单是付了钱的续费：以原单到期日为基准累加，不能判成免费补登
@@ -2386,10 +2388,15 @@ async function addEntry(entry) {
         // 补号：有效期继承原单，一分钱不收，不给提成
         entry.exp = String(keepRow.exp).slice(0, 10);
         if (keepRow.added) entry.added = String(keepRow.added).slice(0, 19);
+        // 2026-11-16（用户口径）：补号自动带回原单套餐 —— 原单（台账 hist.plan / 失效行 plan）
+        // 有套餐就继承；买家补登页不选套餐，这里就是套餐的唯一来源，控制台不再显示「未标注」。
+        if (keepRow.plan) entry.plan = String(keepRow.plan).slice(0, 16);
         entry.rb = 1;
-        entry.rb_start = String(keepRow.added || '').slice(0, 19);
+        // rb_start 只记到天（「原单登记日」展示/到期继承计算都用日期，不带时分秒）
+        entry.rb_start = String(keepRow.added || '').slice(0, 10);
         boughtDays = 0;                                           // 免费，本次买到 0 天
-        console.log('补号（免费、继承原单）：' + String(entry.name || uidKey) + '  到期 ' + entry.exp);
+        console.log('补号（免费、继承原单）：' + String(entry.name || uidKey) + '  到期 ' + entry.exp
+                    + (entry.plan ? ' 套餐 ' + entry.plan : '') + ' 入池 ' + entry.added);
       } else {
         boughtDays = planDaysOf(entry.exp);                       // 新登记：本次套餐天数
       }
@@ -2452,6 +2459,11 @@ async function addEntry(entry) {
           src: _kind,
           rb: _kind === 'fix' ? 1 : 0,
           day: _kind === 'new' ? '' : beijingDate(),
+          // 2026-11-16（用户口径）：start 改存「最初入池时间」（含时分秒）——
+          //   new=登记时刻；renew/fix 的 entry.added 已被保留成原入池时间，跟着写进 start。
+          //   之后补登从台账原单继承 added 时就能拿到完整时间，不再只有年月日。
+          //   老台账行的 start 仍是纯日期（历史数据找不回来，用户已确认接受）。
+          start: String(entry.added || '').slice(0, 19),
           price: _kind === 'fix' ? 0 : undefined,
           remark: _kind === 'renew' ? '续费' : (_kind === 'fix' ? '补号（免费）' : ''),
         });
@@ -2528,7 +2540,8 @@ async function addEntry(entry) {
     }
   } catch (e) { console.error('D1 镜像失败:', e && e.message); }
   // 2026-11-05：记账流水（与 D1 路径同口径）。D1 已经不可用时这里也会是 no-op。
-  try { await ledgerAdd(entry); } catch (e) { console.error('记账流水写入失败:', e && e.message); }
+  // 2026-11-16：start 同步改存完整入池时间（与 D1 路径一致，见上面 addEntry 注释）。
+  try { await ledgerAdd(entry, { start: String(entry.added || '').slice(0, 19) }); } catch (e) { console.error('记账流水写入失败:', e && e.message); }
   // 重新登记成功 → 清掉墓碑（dead_log 里移除本账号的 uid 键与 name 键两种形态）
   if (deadLog.size) {
     const cleared = [...deadLog].filter(k => k !== ekey
@@ -4713,6 +4726,8 @@ async function ncEgressMode(bag) {
     return { base: 'https://egress.xx1031.xyz', key: c.egressKey };
   } catch (e) { return null; }
 }
+/* EGRESS_HARD=1：egress 模式下出口失败/5xx 一律不回退 CF 数据中心直连（防 9h 清算模式）。返回 503 让前端走「稍后重试」。 */
+const EGRESS_HARD = true;
 async function ncFetch(path, opts, eg) {
   if (eg) {
     const headers = Object.assign({}, opts.headers || {}, { 'X-Egress-Key': eg.key });
@@ -4722,9 +4737,13 @@ async function ncFetch(path, opts, eg) {
         signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(8000) : undefined,
       }));
       if (r && r.status < 500) return r;
-      console.error('ncFetch egress 上游异常，回退直连', path, r && r.status);
+      console.error('ncFetch egress 上游异常', path, r && r.status);
     } catch (e) {
-      console.error('ncFetch egress 失败，回退直连', path, e && e.message);
+      console.error('ncFetch egress 失败', path, e && e.message);
+    }
+    if (EGRESS_HARD) {
+      console.error('ncFetch EGRESS_HARD 拒绝回退直连', path);
+      return new Response('egress busy, retry later', { status: 503 });
     }
   }
   return fetch(NC_BASE + path, Object.assign({}, opts, { headers: opts.headers || {} }));
@@ -4741,6 +4760,7 @@ async function ncNewKey(bag) {
     headers: Object.assign(ncHdr(bag), { 'Content-Type': 'application/x-www-form-urlencoded' }),
     body: 'type=' + NC_QTYPE,
   }, eg);
+  if (r.status >= 500) return { err: '出口拨号切换中，请点「换一张」稍后重试' };
   const txt = await r.text();
   ncAbsorb(bag, ncSetCookies(r));
   let j = null;
@@ -7315,10 +7335,22 @@ async function handle(request) {
       const expSet = new Set(expected);
       const missing = expected.filter(u => !ranSet.has(u));
       const extra = [...ranSet].filter(u => !expSet.has(u));
+      /* 2026-11-16（用户口径）：已通知重登（relogin_at 非空）的号不再算「缺」——
+         它们 CK 已失效、被摘出听众环不参与播放，等号主补登，7 天不补才自动删。
+         缺口（missing）只留真没跑的；这些号单独放 relogin 字段，pct 分母也去掉它们，
+         正常号跑满就是 100%，页面/邮件不再出现「缺36」的常年假告警。 */
+      const relRows = await d1All("SELECT uid FROM accounts WHERE pool=? AND relogin_at IS NOT NULL AND relogin_at<>''", [poolQ]);
+      if (!relRows) return json({ ok: false, message: 'D1 查询失败（accounts.relogin_at 读不到）' }, 503);
+      const relSet = new Set(relRows.map(r => String(r.uid)));
+      const rel = missing.filter(u => relSet.has(u));
+      const trueMissing = missing.filter(u => !relSet.has(u));
+      const effExp = expected.length - rel.length;
       return json({ ok: true, day: day, pool: poolQ, expected: expected.length, ran: ranSet.size,
-                    missing_n: missing.length, missing: missing.slice(0, 80), extra_n: extra.length,
-                    extra: extra.slice(0, 80), expected_src: expSrc, snap_at: snapAt,
-                    pct: expected.length ? Math.round(ranSet.size * 1000 / expected.length) / 10 : 0 });
+                    missing_n: trueMissing.length, missing: trueMissing.slice(0, 80),
+                    relogin_n: rel.length, relogin: rel.slice(0, 80),
+                    extra_n: extra.length, extra: extra.slice(0, 80),
+                    expected_src: expSrc, snap_at: snapAt,
+                    pct: effExp > 0 ? Math.round(ranSet.size * 1000 / effExp) / 10 : 100 });
     }
     // ---- 断点续跑（2026-11-02 新增）----
     // 起因：11-02 主群 brush(55) 被 GitHub 托管 runner 杀在半路（hosted runner lost communication），
@@ -7467,7 +7499,7 @@ async function handle(request) {
       // 原来每次首屏各全表扫一遍（815 + 795 = 1,610 行），而这两张表一天才变一两次。
       // 必须在 Promise.all 之前建好这个 promise，否则下面两个位置会各查一次 D1（缓存也救不了）。
       const _metaP = d1ok() ? metaDicts() : Promise.resolve(null);
-      const [master, c2, cur, prev, old, dr, peerUrlRaw, plan, ranRows, deadRows, suspectRows, freshRows, actions, streakRows, songRows, accRows, noticeRows, deadTodayRows, regCfgNow, planSnaps] = await Promise.all([
+      const [master, c2, cur, prev, old, dr, peerUrlRaw, plan, ranRows, deadRows, suspectRows, freshRows, actions, streakRows, songRows, accRows, noticeRows, deadTodayRows, regCfgNow, planSnaps, relRows] = await Promise.all([
         mergePool(),
         cfg(),
         readSnapDay(date),
@@ -7513,7 +7545,15 @@ async function handle(request) {
         regCfg().catch(() => REG_CFG_DEFAULT),
         // 2026-11-09：当轮 plan 名单快照（两池各一行），coverage 口径用，见 planSnapPut。
         planSnapAll(date).catch(() => null),
+        // 2026-11-16：已通知重登名单（两池一起查，行数=个位数）。coverage 把这些号从
+        // 「缺」里拆出来单独显示「未补登」，见下面 cov 组装处。
+        d1ok() ? d1All("SELECT pool,uid FROM accounts WHERE relogin_at IS NOT NULL AND relogin_at<>''").catch(() => null) : Promise.resolve(null),
       ]);
+      const relByPool = {};
+      for (const r of (relRows || [])) {
+        const p = r.pool === 'dz' ? 'dz' : 'hz';
+        (relByPool[p] = relByPool[p] || new Set()).add(String(r.uid));
+      }
       const disp = e => ({
         name: e.name || '', uid: e.uid != null ? String(e.uid) : '',
         song: e.song != null ? String(e.song) : '', added: e.added || '',
@@ -7525,6 +7565,9 @@ async function handle(request) {
         // 2026-11-05：备注（存在 D1 的 note 列）+ 补号标记。
         // 前端据此渲染「备注」列和「补」标签，也是编辑弹窗回填的初值。
         note: e.note || '', rb: !!e.rb, rbFrom: Number(e.rbFrom) || 0, rbStart: e.rbStart || '',
+        // 2026-11-16：已通知重登标记（mergePool 的 d1RowToEntry 已带 relogin 字段）。
+        // 前端据此把「采集缺失」徽章换成「已通知重登」，不再天天像故障。
+        relogin: !!e.relogin,
       });
       const hz = master.map(disp);
       // 定制群账号列表：实时向对端 worker 拉（对穿口令；拉失败不阻塞主群展示）
@@ -7585,11 +7628,20 @@ async function handle(request) {
           if (!exp || !exp.length) continue;
           const ranSet = ranByPool[p] || new Set();
           const missing = exp.filter(u => !ranSet.has(u));
+          /* 2026-11-16（用户口径）：与 /api/coverage 同口径 —— 已通知重登的号从「缺」里拆出来，
+             单独放 relogin 字段；pct 分母去掉它们，正常号跑满就显示 100%。
+             relByPool 查失败（null）时退回老口径：全部算缺，绝不伪装成「没有未补登」。 */
+          const relSetP = relByPool[p] || new Set();
+          const rel = missing.filter(u => relSetP.has(u));
+          const miss2 = missing.filter(u => !relSetP.has(u));
+          const effExp = exp.length - rel.length;
           cov[p] = { expected: exp.length, ran: exp.length - missing.length,
-                     missing_n: missing.length,
-                     missing: missing.slice(0, 80),
+                     missing_n: miss2.length,
+                     missing: miss2.slice(0, 80),
+                     relogin_n: rel.length,
+                     relogin: rel.slice(0, 80),
                      src: srcp, snap_at: sn ? sn.at : '',
-                     pct: exp.length ? Math.round((exp.length - missing.length) * 1000 / exp.length) / 10 : 0 };
+                     pct: effExp > 0 ? Math.round((exp.length - missing.length) * 1000 / effExp) / 10 : 100 };
         }
       }
       // 2026-10-26：通知状态索引（按「池|uid」取最近一条判定）。只覆盖手动删号；
