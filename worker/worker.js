@@ -11856,7 +11856,7 @@ function rgSync(){
   $('rgAgent').disabled=inh;
   /* 2026-11-16：直接续费按钮 —— 只在「续费 + 原单已选中 + 号还在池」时出现。
      换绑不需要它（换绑要扫新码，控制台做不了），补登是免费补回也不适用。 */
-  RD_ARMED=false;
+  RD_ARM=null;   /* 切类型/重开弹窗/换原单都会走到这里 —— 旧的确认快照一律作废 */
   var rd=$('rgDirect');
   if(rd)rd.style.display=(k==='renew'&&RG_REF&&RG_REF.alive)?'':'none';
 }
