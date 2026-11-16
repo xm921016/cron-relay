@@ -791,7 +791,7 @@ function cfqChipSync(){
   if(p==null){val=CFQ_ERR?'!':'…';col='#888';}
   else{val=(p>=100?p:String(p))+'%';col=(p>=80)?'#a32d2d':((p>=60)?'#b06a00':'#3b6d11');}
   d.innerHTML='CF额度<b style="color:'+col+'">'+val+'</b>';
-  d.setAttribute('title','Cloudflare Workers Paid 本计费周期（每月 16 日重置）额度占用最高的一项'+((CFQ&&CFQ.worst)?('：'+CFQ.worst.label+' '+CFQ.worst.pct+'%'):'')+'。点开看 D1 读写 / KV 读写删列 / Workers 请求与 CPU 明细'+(CFQ_ERR?('（上次查询：'+CFQ_ERR+'）'):''));
+  d.setAttribute('title','Cloudflare Workers Paid 本计费周期（每月 16 日重置）D1 额度占用（行读/行写取高）'+((CFQ&&CFQ.worst)?('：'+CFQ.worst.label+' '+CFQ.worst.pct+'%'):'')+'。点开看 D1 读写 / KV 读写删列 / Workers 请求与 CPU 明细'+(CFQ_ERR?('（上次查询：'+CFQ_ERR+'）'):''));
   d.onclick=cfqOpen;
   box.appendChild(d);
 }

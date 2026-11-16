@@ -7898,20 +7898,14 @@ async function handle(request) {
         // 月包含额度（Workers Paid，2026-11 官方定价页；wCpuMs=3000万 CPU 毫秒/月）
         const L = { d1Read: 25000000000, d1Write: 50000000, kvRead: 10000000, kvWrite: 1000000, kvDel: 1000000, kvList: 1000000, wReq: 10000000, wCpuMs: 30000000 };
         const worstOf = (label, used, inc) => ({ label: label, used: used, inc: inc, pct: Math.round(used * 10000 / inc) / 100 });
+        /* 2026-11-16（用户口径）：汇总条上的「CF额度」卡只显示 D1 的百分比（行读/行写取高者），
+           不再取 KV / Workers 的最高占用 —— KV 读写量大但月包含也大、Workers CPU token 又查不到，
+           混在一起取最高反而天天换脸；明细弹窗里各项百分比照旧保留。 */
         let worst = worstOf('D1 行读', cD1R, L.d1Read);
-        [[ 'D1 行写', cD1W, L.d1Write], ['KV 读', kvAgg.read, L.kvRead], ['KV 写', kvAgg.write, L.kvWrite],
-         ['KV 删', kvAgg.delete, L.kvDel], ['KV 列', kvAgg.list, L.kvList]].forEach(it => {
+        [['D1 行写', cD1W, L.d1Write]].forEach(it => {
           const w = worstOf(it[0], it[1], it[2]);
           if (w.pct > worst.pct) worst = w;
         });
-        if (wrk && wrk.cReq) {
-          const w = worstOf('Workers 请求', wrk.cReq, L.wReq);
-          if (w.pct > worst.pct) worst = w;
-        }
-        if (wrk && wrk.cCpuMs) {
-          const w = worstOf('Workers CPU', wrk.cCpuMs, L.wCpuMs);
-          if (w.pct > worst.pct) worst = w;
-        }
         const out = {
           ok: true, cycle: { start: start, today: today }, gen_at: new Date().toISOString(),
           d1: { days: d1Days, cRead: cD1R, cWrite: cD1W },
@@ -10198,7 +10192,7 @@ function cfqChipSync(){
   if(p==null){val=CFQ_ERR?'!':'…';col='#888';}
   else{val=(p>=100?p:String(p))+'%';col=(p>=80)?'#a32d2d':((p>=60)?'#b06a00':'#3b6d11');}
   d.innerHTML='CF额度<b style="color:'+col+'">'+val+'</b>';
-  d.setAttribute('title','Cloudflare Workers Paid 本计费周期（每月 16 日重置）额度占用最高的一项'+((CFQ&&CFQ.worst)?('：'+CFQ.worst.label+' '+CFQ.worst.pct+'%'):'')+'。点开看 D1 读写 / KV 读写删列 / Workers 请求与 CPU 明细'+(CFQ_ERR?('（上次查询：'+CFQ_ERR+'）'):''));
+  d.setAttribute('title','Cloudflare Workers Paid 本计费周期（每月 16 日重置）D1 额度占用（行读/行写取高）'+((CFQ&&CFQ.worst)?('：'+CFQ.worst.label+' '+CFQ.worst.pct+'%'):'')+'。点开看 D1 读写 / KV 读写删列 / Workers 请求与 CPU 明细'+(CFQ_ERR?('（上次查询：'+CFQ_ERR+'）'):''));
   d.onclick=cfqOpen;
   box.appendChild(d);
 }
