@@ -3247,12 +3247,22 @@ async function d1Pool() {
 
 // 快照写入：一次 batch 写完整片（原来是 POOL.put 一个 snap: 键）。
 // 好处：控制台回看可以直接 SELECT，不用先 list 再逐个 get；也不再占用 KV 的 list 配额。
-async function d1SnapWrite(day, pool, clean) {
+// force=true（2026-11-16）：/api/snap 带 force 时旁路「rpc30 大者胜」无条件覆盖。
+//   背景：窗口回吐日（30 天滚动滑出 > 今日入账）新采值天然比旧行小，正常补采被
+//   大者胜挡住、at 不刷新，控制台出现「今日零增长」假信号（12641619130/1630168837 实例）。
+//   只有手动补采（SNAP_FORCE）才走这条路；正常路径的大者胜保护语义（11-09 修复）不动。
+async function d1SnapWrite(day, pool, clean, force) {
   if (!d1ok()) return false;
   const uids = Object.keys(clean || {});
   if (!uids.length) return true;
   try {
     const now = new Date().toISOString();
+    const snapWhere = force ? '' :
+      // 2026-11-09：真正实现「rpc30 大者胜」。原来是无条件 DO UPDATE = 最后写入者胜，
+      // 而读侧的 prev 因主键 (day,pool,uid) 永远是单行、prev 恒为空，那段比较是死代码。
+      // 于是任何晚到的旧值（早班补采、被取消的片重试）都能把已结算好的数据静默改小。
+      // COALESCE 兜住没有 650 数据的号：NULL 比较结果为 NULL 会直接跳过写入，等于永远写不进去。
+      ' WHERE COALESCE(excluded.rpc30, -1) >= COALESCE(snapshots.rpc30, -1)';
     // 2026-10-24 修复：D1 单次 batch 最多 1000 条语句，而 snap650 是 jobs=1 写全池。
     // hz 登记上限 1440（2026-11-13 由 1200 上调），号池涨到千级后会整批写入失败（快照一条都进不去）。
     // 与 d1DursWrite/d1RunsWrite 统一按 100 条分批；小批量仍只跑一次循环，行为不变。
@@ -3264,12 +3274,7 @@ async function d1SnapWrite(day, pool, clean) {
         // 必须原样覆盖（那正是补采的目的：用结算后的值替换凌晨的旧值）。
         'ON CONFLICT(day,pool,uid) DO UPDATE SET rate=excluded.rate, rpc30=excluded.rpc30, ' +
         'cnt=COALESCE(excluded.cnt, snapshots.cnt), missions=excluded.missions, ' +
-        'dur=COALESCE(excluded.dur, snapshots.dur), at=excluded.at ' +
-        // 2026-11-09：真正实现「rpc30 大者胜」。原来是无条件 DO UPDATE = 最后写入者胜，
-        // 而读侧的 prev 因主键 (day,pool,uid) 永远是单行、prev 恒为空，那段比较是死代码。
-        // 于是任何晚到的旧值（早班补采、被取消的片重试）都能把已结算好的数据静默改小。
-        // COALESCE 兜住没有 650 数据的号：NULL 比较结果为 NULL 会直接跳过写入，等于永远写不进去。
-        'WHERE COALESCE(excluded.rpc30, -1) >= COALESCE(snapshots.rpc30, -1)'
+        'dur=COALESCE(excluded.dur, snapshots.dur), at=excluded.at' + snapWhere
       ).bind(day, pool, String(uid), clean[uid].rate, clean[uid].rpc30, clean[uid].cnt,
              JSON.stringify(clean[uid].mis || {}), clean[uid].dur, now));
       await DB.batch(stmts);
@@ -7251,7 +7256,9 @@ async function handle(request) {
       // 2026-10-22 第三批：D1 写成功就不再写 KV。以前每片每天都写一个 snap: 键，200 片就是
       // 200 次 KV 写/天（免费额度 1000 的 20%），而控制台读早已切到 D1 —— 这份纯粹白烧额度。
       // 现在只有 D1 写失败时才落 KV：真正需要它的时候它才存在。
-      const d1okSnap = await d1SnapWrite(date, pool, clean);
+      // 2026-11-16：手动补采带 force=1 时旁路「rpc30 大者胜」无条件覆盖（见 d1SnapWrite 注释）。
+      const snapForce = body.force === true || body.force === 1 || String(body.force) === '1';
+      const d1okSnap = await d1SnapWrite(date, pool, clean, snapForce);
       if (!d1okSnap) {
         try {
           await POOL.put(key, JSON.stringify({ ts: new Date().toISOString(), accs: clean }), { expirationTtl: 7776000 });

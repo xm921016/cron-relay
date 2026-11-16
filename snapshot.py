@@ -346,6 +346,10 @@ def post_batch(metrics, seq, nb):
             "slice": SLICE_TAG,
             "date": snap_day(),
             "accs": metrics,
+            # 2026-11-16：手动强制补采（SNAP_FORCE=1）时带 force，worker 侧旁路「rpc30 大者胜」
+            # 无条件覆盖。窗口回吐日新采值天然比旧行小，不带 force 会被旧行挡掉
+            # （12641619130/1630168837 实例：补采 41 job 全 success 但 at 停在凌晨）。
+            "force": 1 if SNAP_FORCE else 0,
         }, timeout=60, headers=UA)
         print(f"[650补采] 第 {seq}/{nb} 批（{len(metrics)} 个号）上报: "
               f"HTTP {r.status_code} {r.text[:160]}")
