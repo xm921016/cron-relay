@@ -2155,14 +2155,25 @@ function rgSync(){
   var inh=(k==='fix'||k==='ckswap');
   $('rgPlan').disabled=inh;
   $('rgAgent').disabled=inh;
-  /* 2026-11-16：续费时主动作是「直接续费」，生成链接是次要选项 —— 按钮名跟着类型走，
-     客服一眼知道两个按钮各干什么，不再出现两个大按钮并排不知道点哪个。 */
-  $('rgGo').textContent=(k==='renew')?'改发链接（客户自己扫码）':'生成链接';
+  /* 2026-11-17：续费时主动作只剩「直接续费」，大「生成链接」整行隐藏（用户拍板：
+     「客户坚持要自己扫码」这类次选项全部去掉 —— 续费=直接续费，掉线号走补登）。 */
+  $('rgGo').style.display=(k==='renew')?'none':'';
   /* 2026-11-16：直接续费按钮 —— 只在「续费 + 原单已选中 + 号还在池」时出现。
      换绑不需要它（换绑要扫新码，控制台做不了），补登是免费补回也不适用。 */
   RD_ARM=null;   /* 切类型/重开弹窗/换原单都会走到这里 —— 旧的确认快照一律作废 */
+  rgDirectReset();   /* 2026-11-16：确认态一并复位 —— 按钮回到绿色常态文案 */
   var rd=$('rgDirect');
   if(rd)rd.style.display=(k==='renew'&&RG_REF&&RG_REF.alive)?'':'none';
+}
+/* 2026-11-16：直接续费两段确认的按钮态 —— 第一段确认后按钮变橙色「再点一次确认执行」，
+   用户不看下方文字也能一眼看出状态变了（EXE/APK 是弹窗确认，只有控制台是按钮两段式）。 */
+function rgDirectReset(){
+  var b=$('rgDirect');
+  if(!b)return;
+  b.textContent='直接续费（不发链接）';
+  b.style.background='';
+  b.style.borderColor='';
+  b.style.color='';
 }
 $('rgKind').onchange=function(){ RG_REF=null; $('rgRefOut').innerHTML=''; rgSync(); };
 /* 2026-11-10：按状态看链接（尤其「已过期」）。过期链接仍然是 unused，作废按钮照样给。 */
@@ -2184,17 +2195,22 @@ $('rgFind').onclick=function(){
     $('rgFind').disabled=false;
     if(!(r.ok&&r.d&&r.d.ok)){ $('rgm').textContent=(r.d&&r.d.message)||'搜索失败'; $('rgm').className='msg err'; return; }
     var rows=(r.d.rows||[]).filter(function(x){return !!x.exp;});
+    /* 2026-11-16：台账一次登记/续费各记一单，同号多单是正常历史 ——
+       按 curExp（号池当前到期日）把「当前生效」那单排最前打标；
+       续费金额服务端一律按号池当前到期日累加，选哪行都不影响金额。 */
+    rows.sort(function(a,b){var ca=(a.curExp&&a.exp===a.curExp)?1:0,cb=(b.curExp&&b.exp===b.curExp)?1:0;return cb-ca;});
     if(!rows.length){
       $('rgRefOut').innerHTML='<div style="color:#b06a00;font-size:12px">没找到有到期日的原单。真没买过的客户请按「新登记」发链接。</div>';
       return;
     }
-    var h='<div style="font-size:12px;color:#666;margin-bottom:5px">点一行选中它当原单：</div>';
+    var h='<div style="font-size:12px;color:#666;margin-bottom:5px">点一行选中它当原单（「当前生效」= 号池现在的到期日；续费按它累加，选历史单也不会少算）：</div>';
     rows.forEach(function(x,i){
-      h+='<div class="rghit" data-i="'+i+'" style="cursor:pointer;padding:7px 9px;border:1px solid #e3e8f0;border-radius:7px;margin-bottom:5px;font-size:12px;line-height:1.7">'
+      h+='<div class="rghit" data-i="'+i+'" style="cursor:pointer;padding:7px 9px;border:1px solid '+( (x.curExp&&x.exp===x.curExp)?'#b7d8b7':'#e3e8f0')+';border-radius:7px;margin-bottom:5px;font-size:12px;line-height:1.7">'
         +'<b>'+esc(x.name||'(无手机号)')+'</b> · uid '+esc(x.uid||'-')+' · '+esc(x.plan||'?')
         +' · 到期 <b>'+esc(x.exp||'')+'</b>'
         +' · 登记日 '+esc(String(x.start||x.day||'').slice(0,10))
         +(x.alive?' <span class="badge b-green">还在池</span>':' <span class="badge b-gray">号已删</span>')
+        +((x.curExp&&x.exp===x.curExp)?' <span class="badge b-green">当前生效</span>':' <span class="badge b-gray">历史单</span>')
         +(x.rb?' <span class="badge b-orange">补</span>':'')
         +'</div>';
     });
@@ -2267,11 +2283,17 @@ $('rgDirect').onclick=function(){
   var cur={ref:String(RG_REF.ref||''),plan:String(plan),agent:String(agent)};
   if(!RD_ARM||RD_ARM.ref!==cur.ref||RD_ARM.plan!==cur.plan||RD_ARM.agent!==cur.agent){
     RD_ARM=cur;
-    $('rgm').textContent='确认直接续费：'+(RG_REF.name||RG_REF.ref)+'（原到期日 '+RG_REF.exp+'）· 套餐 '+plan+' · 客服 '+(agent||'（继承原单）')+'。确认无误再点一次「直接续费」执行 —— 不发链接，客户不用做任何操作。';
+    var b=$('rgDirect');
+    b.textContent='⚠️ 再点一次确认执行 · '+(RG_REF.name||RG_REF.ref)+' · '+plan+' · '+RG_REF.exp+' 起延长';
+    b.style.background='#c05621';
+    b.style.borderColor='#c05621';
+    b.style.color='#fff';
+    $('rgm').textContent='确认直接续费：'+(RG_REF.name||RG_REF.ref)+'（原到期日 '+RG_REF.exp+'）· 套餐 '+plan+' · 客服 '+(agent||'（继承原单）')+'。按钮已变橙色 —— 再点一次就真正执行；期间换客户/套餐/客服会自动复位。';
     $('rgm').className='msg';
     return;
   }
   RD_ARM=null;
+  rgDirectReset();
   $('rgDirect').disabled=true;
   $('rgm').textContent='续费中…'; $('rgm').className='msg';
   api('/api/renew_direct',{user:t.user,pass:t.pass,ref:RG_REF.ref,plan:plan,agent:agent}).then(function(r){
