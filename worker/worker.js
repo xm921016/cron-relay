@@ -6648,8 +6648,17 @@ async function handle(request) {
       const pend = await d1All(
         'SELECT pool,uid,name,email,removed_at,kind FROM dead_notice WHERE state=? AND removed_at<=? ORDER BY removed_at LIMIT 100',
         ['pending', cutoff]) || [];
+      // 2026-11-16：550 类永久退信（买家邮箱注销/写错）每天重试一次会试到永远 ——
+      // 改为判死（removed_at）起最多 3 天，超过即标 skip_giveup 停止重试（用户 2026-11-16 定）。
+      // 3 天 ≈ 每日兜底跑 3 轮的机会；之后号主邮箱换对了也走控制台手动补发。
+      const giveupCutoff = bjStamp(nowMs - 3 * 86400000);
       const toSend = [], skipped = [];
       for (const r of pend) {
+        if (String(r.removed_at || '') <= giveupCutoff) {
+          await d1Run("UPDATE dead_notice SET state='skip_giveup',skip_reason='判死超3天未送达(疑似永久退信)，停止重试',claimed_at=? WHERE pool=? AND uid=? AND removed_at=?",
+            [bjStamp(), r.pool, r.uid, r.removed_at]);
+          continue;
+        }
         const uid = String(r.uid || ''), nm = String(r.name || '');
         // 「回来了吗」：同 uid 或同账号名出现在任一池（hz/dz 都算）→ 迁移或重登，不该发
         let back = '';
