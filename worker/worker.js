@@ -3565,8 +3565,12 @@ async function caPut(k, body, ttl) {
 //   （{p: 百分比, t: 探测时间}）。读路径取这个水位：
 //   p ≥ 95 且数据新鲜（≤90 分钟）→ 主动跳过一次 D1 读，先走 KV；
 //   未知 / 过期 / 未配 token → 一律按现状走 D1（闸门自己坏掉不能影响功能）。
-// 只拦「读」：D1 写额度 10 万行/天，单日业务量 <1000，写永远不跳。
-const D1_READ_LIMIT = 5000000;
+// 2026-11-16：Workers Paid 后改成月度计费周期口径（与 cf_quota.py / 控制台「CF额度」卡一致）。
+//   原来是免费日口径 5,000,000 行/天 —— Paid 后当天读超 500 万闸门就误关（11-16 实锤：
+//   日读 512 万 → p=102.5% → mergePool 走 KV 旧快照 → 控制台 relogin 徽章全 false）。
+//   Paid 月包含 250 亿行读，探针窗口改成计费周期（每月 16 日 UTC 重置）。
+// 只拦「读」：D1 写 Paid 月包含 5000 万行，业务量远够不着，写永远不跳。
+const D1_READ_LIMIT = 25000000000;
 const QGATE_KEY = 'qgt:d1';
 const QGATE_HOT = 95;            // ≥95% 视为「该让路」
 let _qgPct = -2, _qgAt = 0;      // -2 = 本次 invocation 还没读过
@@ -3606,8 +3610,15 @@ async function d1QuotaProbe(force) {
   if (!tok || !acc) return { skip: 'no_token' };
   if (!force && last && Date.now() - last < 600000) return { skip: 'fresh', at: last };  // 10 分钟节流
   const today = new Date().toISOString().slice(0, 10);
+  // 2026-11-16：Paid 月度口径 —— 探针统计窗口改成计费周期（每月 16 日 UTC 起）。
+  //   与 cf_quota.py / 控制台「CF额度」卡同一口径；闸门语义从「当日额度」变「月预算」。
+  const _cy = new Date();
+  const _cyDay = _cy.getUTCDate(), _cyM = _cy.getUTCMonth(), _cyY = _cy.getUTCFullYear();
+  const cycleStart = (_cyDay >= 16)
+    ? _cyY + '-' + String(_cyM + 1).padStart(2, '0') + '-16'
+    : (_cyM === 0 ? (_cyY - 1) + '-12-16' : _cyY + '-' + String(_cyM).padStart(2, '0') + '-16');
   const q = 'query{viewer{accounts(filter:{accountTag:"' + acc + '"}){d1AnalyticsAdaptiveGroups(' +
-    'limit:1,orderBy:[date_DESC],filter:{date_geq:"' + today + '",date_leq:"' + today + '"})' +
+    'limit:1,orderBy:[date_DESC],filter:{date_geq:"' + cycleStart + '",date_leq:"' + today + '"})' +
     '{dimensions{date}sum{rowsRead rowsWritten}}}}}';
   try {
     const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
