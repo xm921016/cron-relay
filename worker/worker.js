@@ -6767,10 +6767,25 @@ async function handle(request) {
       // 作废对不上号的旧 pending：续费（exp 变了）/ 降级（pub=1，上面查不到）都算
       const pend = await d1All("SELECT pool,uid,kind,ref FROM mail_queue WHERE kind LIKE 'exp%' AND state='pending'", []);
       if (pend === null) return json({ ok: false, message: '读 mail_queue 失败（' + (_d1LastErr || 'D1 异常') + '），本次不扫描不落闸门' }, 503);
+      // 2026-11-16：CK 失效在池号「每日重登提醒」（用户口径：每天一封，直到补登为止）。
+      //   范围：本池 relogin_at 非空（= CK 已确认失效、已通知号主重登）且有邮箱的在池号；
+      //   kind=relogin2（复用 11-15「网易官方波动」文案，mail_pending 已豁免其在池校验），
+      //   ref=北京日期 —— 唯一键 (pool,uid,kind,ref) 天然去重，一天最多一封；
+      //   号主补登后 d1Upsert 检测到 ck 变化自动清 relogin_at → 第二天起自动停发；
+      //   一直不理则走 RELOGIN_TTL_DAYS（默认 7 天）超时清理，提醒随之自然终止。
+      //   读失败按铁律 3c 返回 503 不落闸门，30 分钟后下一班整体重扫。
+      const relRows = await d1All("SELECT pool,uid,name,email,agent,exp FROM accounts WHERE pool=? AND relogin_at IS NOT NULL AND relogin_at<>'' AND email<>''", [POOL_NAME]);
+      if (relRows === null) return json({ ok: false, message: '读 accounts(relogin) 失败（' + (_d1LastErr || 'D1 异常') + '），本次不扫描不落闸门' }, 503);
+      const relWill = [];
+      for (const r of relRows) {
+        relWill.push({ pool: String(r.pool || ''), uid: String(r.uid != null ? r.uid : ''), kind: 'relogin2',
+          ref: today, email: String(r.email || '').trim(), name: String(r.name || ''),
+          agent: String(r.agent || ''), exp: String(r.exp || '').slice(0, 10) });
+      }
       let dropped = 0;
       if (dry) {
         return json({ ok: true, dry: true, day: today, scanned: rows.length, will_enqueue: will.length,
-          will: will.slice(0, 50) });
+          relogin_will: relWill.length, will: will.slice(0, 50) });
       }
       // —— 2026-11-13 固化：冻结歌自动处置（v3：先查名下独创歌自动换，没有才发邮件）——
       // 口径：最近两个有快照的日期任务进度 rate 相等且<95（冻结）、pub=0、在池、有邮箱、
@@ -6847,6 +6862,23 @@ async function handle(request) {
           enqStmts.push({ sql: 'INSERT OR IGNORE INTO mail_queue (pool,uid,kind,ref,email,name,agent,exp,state,created_at) VALUES ' + vals.join(','), params: ps });
         }
         if (enqStmts.length) await d1Batch(enqStmts);
+      }
+      // 2026-11-16：每日重登提醒入队（kind=relogin2，ref=today 唯一键去重；
+      //   与到期入队同一 INSERT OR IGNORE 语句模板，29 号一天 = 3 语句 = 1 个子请求）
+      {
+        const relStmts = [];
+        for (let i = 0; i < relWill.length; i += 10) {
+          const chunk = relWill.slice(i, i + 10);
+          const vals = [], ps = [];
+          for (const w of chunk) {
+            vals.push('(?,?,?,?,?,?,?,?,?,?)');
+            const nm = String(w.name || '').replace(/^(?:qr|manual|name):[0-9A-Za-z_-]*$/i, '');
+            ps.push(String(w.pool || ''), String(w.uid != null ? w.uid : ''), String(w.kind || ''), String(w.ref || ''),
+              String(w.email || '').trim(), nm, String(w.agent || ''), String(w.exp || ''), 'pending', bjStamp());
+          }
+          relStmts.push({ sql: 'INSERT OR IGNORE INTO mail_queue (pool,uid,kind,ref,email,name,agent,exp,state,created_at) VALUES ' + vals.join(','), params: ps });
+        }
+        if (relStmts.length) await d1Batch(relStmts);
       }
       const sfCnt = { found: 0, enq: 0, swapped: 0, api: 0 };
       if (sfOk) {
