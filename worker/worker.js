@@ -10101,11 +10101,13 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap td:nth-child(20) button{flex:0 0 auto;min-width:64px;padding:7px 0;font-size:11.5px;text-align:center;
     border-radius:8px;background:#fff;border:1px solid #dde3ea;color:#33506e;font-weight:600}
   .twrap td:nth-child(20) .infoBtn{display:inline-block;flex:0 0 auto;background:#255ea6;color:#fff;border-color:#255ea6}
-  /* 19:05 用户简化需求：底部 删号记录/对照表 手机端整体隐藏（要查详情走卡片「详情」弹窗） */
-  #deadBox,#legendBox{display:none}
+  /* 19:05 用户简化需求：底部 删号记录/对照表/数据口径 三块手机端整体隐藏（要查详情走卡片「详情」弹窗） */
+  #deadBox,#legendBox,#kjWrap{display:none}
   /* 采集时间改跟在客服名字后面（今日650格下不再显示） */
   .twrap .agAt{display:inline;font-size:10px;color:#9aa5b1;margin-left:4px;font-weight:400}
   .twrap td:nth-child(11) .snap-at{display:none}
+  /* 「数据口径」在手机端被 JS 包进折叠 details（kjWrap），给个跟 deadbox 一致的观感 */
+  .kjbox{font-size:11.5px;color:#666;line-height:1.7}
   /* 「删号记录」6 列表 / 「标记对照表」3 列表，在 360px 下每列只剩几十 px，会被挤成一字一行。
      手机端改成一条一条的块：删号记录 → 首行 池+UID+账号，下面 原因/通知/时间 各占一行带标签；
      对照表 → 标记一行、意思一行、要怎么处理一行（前缀「意思｜」「处理｜」代替表头）。桌面端不受影响。 */
@@ -12363,7 +12365,7 @@ $('btnCsv').onclick=function(){
 };
 /* ===== 2026-11-15 方案④：手机端布局同步（节点搬运，桌面端零影响、可逆、幂等）=====
    ≤860px：把筛选控件(#fagent/#fplan/#dr/#sort)搬进「筛选」面板、七个低频工具按钮搬进「工具」
-   抽屉；>860px：按记录的原锚点逐一搬回原位。
+   抽屉、「数据口径」长段包进折叠 details(kjWrap)；>860px：按记录的原锚点逐一搬回原位。
    搬的是同一批 DOM 节点 → onclick / addEventListener / applyRole 的显隐全部照旧生效。
    桌面端节点从未离开原位，渲染与改前一致。 */
 var MQM=window.matchMedia('(max-width:860px)');
@@ -12373,6 +12375,8 @@ function mRestoreAll(){
   for(var i=MOV.length-1;i>=0;i--){var m=MOV[i];
     if(m.el.parentNode!==m.par&&m.par){m.par.insertBefore(m.el,m.next);}}
   MOV.length=0;
+  var kj=$('kjWrap');
+  if(kj&&$('kjP')){kj.parentNode.insertBefore($('kjP'),kj);kj.parentNode.removeChild(kj);}
 }
 function mDeployMobile(){
   if(MOV.length)return;
@@ -12380,6 +12384,14 @@ function mDeployMobile(){
   if(fs){fids.forEach(function(id){var el=mGrab(id);if(el)fs.appendChild(el);});}
   var tids=['btnCsv','btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnOut'],ts=$('tdSlot');
   if(ts){tids.forEach(function(id){var el=mGrab(id);if(el)ts.appendChild(el);});}
+  var kp=$('kjP');
+  if(kp&&!$('kjWrap')){
+    var d=document.createElement('details');d.id='kjWrap';d.className='deadbox kjbox';
+    var s=document.createElement('summary');s.textContent='数据口径（点开查看）';
+    d.appendChild(s);d.appendChild(kp);
+    var lg=$('legendBox');
+    if(lg&&lg.parentNode)lg.parentNode.insertBefore(d,lg.nextSibling);else if(kp.parentNode)kp.parentNode.appendChild(d);
+  }
 }
 function syncLayout(){
   var dr=$('toolDrawer'),fp=$('filterPanel'),mk=$('mMask');
