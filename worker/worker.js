@@ -8638,7 +8638,7 @@ async function handle(request) {
         const hitM = storeM.items[cacheKeyM];
         return json(mtMergeM({ ok: true, mode: qM ? 'one' : 'list', q: qM, cached: true, gen: nrmM(hitM.ts) }, hitM.data), 200, CORS);
       }
-      const mtRespond = (dataM, modeM) => {
+      const mtRespond = async (dataM, modeM) => {
         try {
           const curM = (storeM && storeM.v === verM && storeM.items) ? storeM : { v: verM, items: {} };
           curM.items[cacheKeyM] = { ts: bjStamp(), data: dataM };
@@ -8647,7 +8647,9 @@ async function handle(request) {
             ksM.sort((x, y) => (curM.items[x].ts || '') < (curM.items[y].ts || '') ? -1 : 1);
             for (const kM of ksM.slice(0, ksM.length - 20)) delete curM.items[kM];
           }
-          POOL.put('mt:cache', JSON.stringify(curM)).catch(() => {});
+          // 必须 await：Workers 在响应返回后会取消未完成的 promise，fire-and-forget 的
+          // KV put 根本落不了盘（首版实测缓存永远不命中的根因）。
+          await POOL.put('mt:cache', JSON.stringify(curM));
         } catch (e) {}
         return json(mtMergeM({ ok: true, mode: modeM, q: qM, cached: false }, dataM), 200, CORS);
       };
