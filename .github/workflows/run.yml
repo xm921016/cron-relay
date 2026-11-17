@@ -344,6 +344,38 @@ jobs:
           fi
           rm -f "$resp"
 
+      # 2026-11-17 node-016 灰度接线（「主仓转私密+播放外移」Phase 1）：fanout 正常轮额外派
+      # master 末 2 片（fs_lo-2, fs_lo-1）给同账号 follower N2b（xm921016/relay-node），
+      # 与 master 矩阵双播验证链路（~68 号双播一晚，前例：11-15 N2 灰度 2 片双播 ~48 号）。
+      # 全绿后升 Phase 2：master 0 片、N2b 接 0..fs_lo-1、N2 保持 fs_lo..ns-1（另一次提交）。
+      # 同账号部署：node-016 的 job 与 master 矩阵共享本账号 20 并发，灰度 2 片会排队晚跑，属预期。
+      # continue-on-error：失败只告警，不拦 master/N2 正常派发（灰度片 master 本来就播，不产生缺口）。
+      - name: 派 node-016 灰度 2 片（master 末 2 片双播验证）
+        if: steps.plan.outputs.fanout == '1'
+        continue-on-error: true
+        env:
+          NODE016_TOKEN: ${{ secrets.NODE016_TOKEN }}
+          NS: ${{ steps.plan.outputs.ns }}
+          DAY: ${{ steps.plan.outputs.day }}
+          PAR: ${{ steps.plan.outputs.par }}
+          FS_LO: ${{ steps.plan.outputs.fs_lo }}
+        run: |
+          GS=$(printf '%d,%d' $((FS_LO-2)) $((FS_LO-1)))
+          body=$(printf '{"ref":"main","inputs":{"ns_override":"%s","day_override":"%s","par_override":"%s","only_slices":"%s"}}' "$NS" "$DAY" "$PAR" "$GS")
+          resp=$(mktemp)
+          code=$(curl -s -o "$resp" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $NODE016_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/xm921016/relay-node/actions/workflows/run.yml/dispatches \
+            -d "$body")
+          if [ "$code" = "204" ]; then
+            echo "node-016 灰度已派片 $GS（ns=$NS day=$DAY par=$PAR，master 同片双播验证）"
+          else
+            echo "::warning::node-016 灰度 dispatch 失败 http=$code：灰度片当晚不播（master 本来就播这两片，不影响主流程），明晚重试或人工排查。响应：$(cat "$resp")"
+          fi
+          rm -f "$resp"
+
   brush:
     needs: plan
     runs-on: ubuntu-latest
