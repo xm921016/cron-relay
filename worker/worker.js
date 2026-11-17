@@ -8584,7 +8584,8 @@ async function handle(request) {
        回调 /api/relogin_mailed 写 relogin_at 这一条链路会产生记录；号没被采到就
        不会判死、不会有邮件，控制台只会显示「采集缺失」。此前没有任何入口能查
        「某号到底发没发过邮件」，只能翻 D1，现做成控制台一等公民。
-       数据源全部实时读 D1（不快照、不缓存）：
+       数据源实时读 D1，外层套「版本指纹缓存」（2026-11-17 二期，见端点内注释）：
+       邮件数据没变化时反复刷新只读 KV 缓存不读 D1，有新增/状态变化才重建；force=true 强制重读。
          accounts.relogin_at  重登邮件已发时间（直邮成功回调写入）
          accounts.suspect_at  待复核标记（老口径）
          dead_notice          删号通知队列 state: pending/claimed/sent + removed_at/sent_at
@@ -8610,6 +8611,46 @@ async function handle(request) {
       const nrmM = s => String(s == null ? '' : s);
       const hintM = () => '数据库读取失败：' + d1ErrHint() + '（不是查无记录，是这次没读出来，请稍后重试）';
       const qM = String(bodyM.q == null ? '' : bodyM.q).trim().replace(/[^0-9A-Za-z_:@.\-]/g, '');
+      const forceM = bodyM.force === true;
+      /* 2026-11-17 二期：版本指纹缓存 —— 用户要求「反复刷新不反复扣额度，有新增内容才重新读库」。
+         指纹 = 4 条小聚合（mail_queue / dead_notice / dead_log / accounts 各一趟小表扫，
+         现网规模合计 ~4000 行读）拼成 JSON：任何入队 / 发信 / 状态流转 / 删号 / 重登标记 /
+         到期变更都会改变指纹。指纹没变 → 直接回 KV 缓存（KV 读不走 D1，不吃行读配额）；
+         变了（或请求带 force=true 的「强制刷新」）才重建数据并回写缓存。指纹算不出来时
+         降级为每次直读（宁可多读不可错报）。 */
+      const verM = await (async () => {
+        const a1 = await d1All("SELECT COUNT(*) n, MAX(created_at) c, MAX(COALESCE(sent_at,'')) s, MAX(COALESCE(claimed_at,'')) cl, MAX(state) st, MAX(COALESCE(skip_reason,'')) sk, MAX(attempts) at FROM mail_queue", []);
+        if (a1 === null) return null;
+        const b1 = await d1All("SELECT COUNT(*) n, MAX(state) st, MAX(COALESCE(sent_at,'')) s, MAX(COALESCE(removed_at,'')) r FROM dead_notice", []);
+        if (b1 === null) return null;
+        const c1 = await d1All('SELECT COUNT(*) n, MAX(at) a FROM dead_log', []);
+        if (c1 === null) return null;
+        const d1r = await d1All("SELECT COUNT(*) n, MAX(COALESCE(relogin_at,'')) r, MAX(COALESCE(suspect_at,'')) su, MAX(COALESCE(exp,'')) e, MAX(COALESCE(plan,'')) p FROM accounts", []);
+        if (d1r === null) return null;
+        return JSON.stringify([a1[0], b1[0], c1[0], d1r[0]]);
+      })();
+      if (verM === null) return json({ message: hintM() }, 503, CORS);
+      let storeM = null;
+      try { storeM = JSON.parse(await POOL.get('mt:cache') || 'null'); } catch (e) { storeM = null; }
+      const cacheKeyM = qM ? 'one:' + qM.toLowerCase() : 'list';
+      const mtMergeM = (baseM, dataM) => { for (const kM0 in dataM) baseM[kM0] = dataM[kM0]; return baseM; };
+      if (!forceM && storeM && storeM.v === verM && storeM.items && storeM.items[cacheKeyM]) {
+        const hitM = storeM.items[cacheKeyM];
+        return json(mtMergeM({ ok: true, mode: qM ? 'one' : 'list', q: qM, cached: true, gen: nrmM(hitM.ts) }, hitM.data), 200, CORS);
+      }
+      const mtRespond = (dataM, modeM) => {
+        try {
+          const curM = (storeM && storeM.v === verM && storeM.items) ? storeM : { v: verM, items: {} };
+          curM.items[cacheKeyM] = { ts: bjStamp(), data: dataM };
+          const ksM = Object.keys(curM.items);
+          if (ksM.length > 20) {   // 最多留 20 个查询入口的缓存，按生成时间淘汰最旧
+            ksM.sort((x, y) => (curM.items[x].ts || '') < (curM.items[y].ts || '') ? -1 : 1);
+            for (const kM of ksM.slice(0, ksM.length - 20)) delete curM.items[kM];
+          }
+          POOL.put('mt:cache', JSON.stringify(curM)).catch(() => {});
+        } catch (e) {}
+        return json(mtMergeM({ ok: true, mode: modeM, q: qM, cached: false }, dataM), 200, CORS);
+      };
       if (qM.length >= 3) {
         // ---- 单号模式 ----
         const accRows = await d1All('SELECT pool,uid,name,email,agent,plan,exp,added,pub,relogin_at,suspect_at FROM accounts ' +
@@ -8623,7 +8664,7 @@ async function handle(request) {
         const accs = [];
         for (const a of accRows) {
           const mq = await d1All('SELECT pool,uid,kind,ref,state,created_at,claimed_at,sent_at,skip_reason,attempts FROM mail_queue ' +
-            'WHERE pool=? AND uid=? ORDER BY created_at DESC LIMIT 100', [nrmM(a.pool), nrmM(a.uid)]);
+            'WHERE pool=? AND uid=? ORDER BY created_at DESC LIMIT 200', [nrmM(a.pool), nrmM(a.uid)]);
           if (mq === null) return json({ message: hintM() }, 503, CORS);
           accs.push({
             pool: nrmM(a.pool), uid: nrmM(a.uid), name: nrmM(a.name), email: nrmM(a.email),
@@ -8636,7 +8677,7 @@ async function handle(request) {
               || (nrmM(d.name) && nrmM(d.name) === nrmM(a.name))).slice(0, 5),
           });
         }
-        return json({ ok: true, mode: 'one', q: qM, accs: accs }, 200, CORS);
+        return mtRespond({ accs: accs }, 'one');
       }
       // ---- 清单模式：全部失效相关号 + 每号最新一条 relogin2 每日提醒 ----
       const relRows = await d1All("SELECT pool,uid,name,email,agent,plan,exp,added,pub,relogin_at,suspect_at FROM accounts " +
@@ -8660,7 +8701,54 @@ async function handle(request) {
           rel2: m ? { state: nrmM(m.state), created_at: nrmM(m.created_at), sent_at: nrmM(m.sent_at), skip_reason: nrmM(m.skip_reason) } : null,
           notice: n ? { state: nrmM(n.state), kind: nrmM(n.kind), removed_at: nrmM(n.removed_at), sent_at: nrmM(n.sent_at) } : null };
       });
-      return json({ ok: true, mode: 'list', rows: rows }, 200, CORS);
+      return mtRespond({ rows: rows }, 'list');
+    }
+    /* ---- 2026-11-17 二期：邮件补发 /api/console/mailresend（满权限，写 mail_queue）----
+       场景：①某封提醒邮件没发出去（dropped/skipped）或号主说没收到 —— 重发已有队列记录；
+             ②判死链路还没走到、但号主已经找上来的号（13077105665 教训）—— 凭空补发一封
+               relogin2 每日重登提醒（仅此 kind 允许无历史记录时入队，别的 kind 凭空入队
+               会造出从未发生过的假记录，禁止）。
+       发送本体仍走原链路：这里只把 mail_queue 行重置/入队为 pending，由 /api/mail_pending
+       消费者统一校验+渲染+直邮，2 小时 claimed 超时回退、连败 3 次置 dropped 等护栏全部沿用。
+       重发保留原记录（不 INSERT 新行），发出时间会被新一轮发送覆盖 —— 历史上这封邮件
+       「重新发过一次」这件事通过 state=pending→sent 的流转可见。 ---- */
+    if (url.pathname === '/api/console/mailresend' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let bodyR;
+      try { bodyR = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(bodyR))) {
+        const whoR = await consoleRole(bodyR);
+        return json({ message: whoR === 'ro' ? '当前是只读口令：邮件补发只对群主开放' : '账号或密码错误' }, 403, CORS);
+      }
+      if (!d1ok()) return json({ ok: false, message: '数据库读取失败：' + d1ErrHint() }, 503, CORS);
+      const poolR = String(bodyR.pool || '') === 'dz' ? 'dz' : 'hz';
+      const uidR = String(bodyR.uid == null ? '' : bodyR.uid).trim();
+      const kindR = String(bodyR.kind || '').trim().toLowerCase();
+      const refR = String(bodyR.ref == null ? '' : bodyR.ref).trim().slice(0, 80);
+      if (!uidR || !/^[a-z0-9_]{1,24}$/.test(kindR)) return json({ ok: false, message: '参数不完整（uid/kind）' }, 400, CORS);
+      const accR = await d1All('SELECT email,name,agent,exp FROM accounts WHERE pool=? AND uid=? LIMIT 1', [poolR, uidR]);
+      if (accR === null) return json({ ok: false, message: '数据库读取失败（D1 异常）' }, 503, CORS);
+      const exR = await d1All('SELECT email,name,agent,exp FROM mail_queue WHERE pool=? AND uid=? AND kind=? AND ref=? LIMIT 1', [poolR, uidR, kindR, refR]);
+      if (exR === null) return json({ ok: false, message: '数据库读取失败（D1 异常）' }, 503, CORS);
+      let actR;
+      if (exR.length) {
+        actR = 'resent';
+        const okU = await d1Run("UPDATE mail_queue SET state='pending',claimed_at=NULL,sent_at=NULL,skip_reason=NULL,attempts=0 WHERE pool=? AND uid=? AND kind=? AND ref=?", [poolR, uidR, kindR, refR]);
+        if (!okU) return json({ ok: false, message: '写入失败（D1 异常），没有入队' }, 503, CORS);
+      } else {
+        if (kindR !== 'relogin2') return json({ ok: false, message: '该号没有这条邮件记录：只有「重登提醒(relogin2)」允许凭空补发，其他类型只能重发已存在的记录' }, 400, CORS);
+        const aR = accR[0] || null;
+        const emailR = aR ? String(aR.email || '').trim() : '';
+        if (!emailR) return json({ ok: false, message: '该号没留邮箱，发不了（先在「编辑」里补邮箱再补发）' }, 400, CORS);
+        actR = 'enqueued';
+        const okI = await d1Run('INSERT OR IGNORE INTO mail_queue (pool,uid,kind,ref,email,name,agent,exp,state,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+          [poolR, uidR, kindR, refR, emailR,
+           aR ? String(aR.name || '').replace(/^(?:qr|manual|name):[0-9A-Za-z_-]*$/i, '') : '',
+           aR ? String(aR.agent || '') : '', aR ? String(aR.exp || '') : '', 'pending', bjStamp()]);
+        if (!okI) return json({ ok: false, message: '写入失败（D1 异常），没有入队' }, 503, CORS);
+      }
+      return json({ ok: true, action: actR,
+        message: actR === 'resent' ? '已重置为排队中，下一班发信（约 30 分钟内）会重发这封邮件' : '已入队，下一班发信（约 30 分钟内）发出' }, 200, CORS);
     }
     /* ---- 2026-11-17：CK 实时验证 /api/console/cktest（只读）----
        回答「换绑 / 改 CK 之后，到底生效没」：拿号池里当前存的这条 CK 实时调网易
@@ -10512,12 +10600,27 @@ body:has(.modal:not([hidden])){overflow:hidden}
 </div></div>
 <!-- ===== 2026-11-17：失效号邮件提醒查询（实时读 D1，满权限专属） ===== -->
 <div class="modal" id="mtModal" hidden><div class="mbox" style="width:1040px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
-  <h3>失效号邮件提醒查询（实时）</h3>
-  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>失效的号，提醒邮件到底发没发、什么时候发的</b>。数据每次点按钮都实时读 D1，不走缓存。<br><b>查单号</b>：输 UID / 手机号（≥3 位），返回这个号的全部邮件记录 —— 重登邮件（relogin_at）、删号通知、每日重登提醒、登记/到期提醒，含状态与时间。<br><b>失效号清单</b>：不输入直接点，列出全部「已通知重登」+「待复核」的号，以及每人最新一封每日提醒的发送状态。注意：清单里没出现的号 = 系统还没判它失效（比如只显示「采集缺失」的号还没走到判死那步，所以还没发过邮件）。</p>
+  <h3>失效号邮件提醒查询（实时 + 缓存）</h3>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），返回这个号近 180 天内<b>全部类型</b>邮件 —— 重登邮件（relogin_at）、删号通知、每日重登提醒、登记、到期提醒、换歌引导……可用下方「类型/时间」筛选（筛选在本机做，不耗配额）；每封队列邮件后面有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」。<br><b>失效号清单</b>：列出全部「已通知重登」+「待复核」的号 + 每人最新一封每日提醒状态。注意：清单里没出现的号 = 系统还没判它失效（比如只显示「采集缺失」的号还没走到判死那步，所以还没发过邮件）。</p>
   <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
-    <div style="flex:1;min-width:230px"><label style="margin-top:0">搜索（UID / 手机号片段，可留空）</label><input id="mtQ" placeholder="如 13077105665，留空则点右侧查失效号清单" style="width:100%"></div>
+    <div style="flex:1;min-width:220px"><label style="margin-top:0">搜索（UID / 手机号片段，可留空）</label><input id="mtQ" placeholder="如 13077105665，留空则点右侧查失效号清单" style="width:100%"></div>
+    <div style="min-width:170px"><label style="margin-top:0">类型筛选</label><select id="mtKind" style="width:100%">
+      <option value="">全部类型</option>
+      <option value="relogin2">重登提醒 (relogin2)</option>
+      <option value="reg">登记成功 (reg)</option>
+      <option value="exp">到期提醒 (exp*)</option>
+      <option value="song">换歌类 (songfix*/songchange/feenote/nomus/songok)</option>
+      <option value="notice">删号通知</option>
+    </select></div>
+    <div style="min-width:110px"><label style="margin-top:0">时间范围</label><select id="mtDays" style="width:100%">
+      <option value="30">近 30 天</option>
+      <option value="7">近 7 天</option>
+      <option value="90">近 90 天</option>
+      <option value="180">近 180 天</option>
+    </select></div>
     <button class="mini" id="mtGo" style="margin-top:0;padding:9px 16px">查单号</button>
     <button class="mini" id="mtList" style="margin-top:0;padding:9px 16px">失效号清单</button>
+    <button class="mini gray" id="mtForce" style="margin-top:0;padding:9px 16px" title="忽略缓存，强制重读 D1">强制刷新</button>
   </div>
   <div id="mtBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto"></div>
   <div class="row2"><button class="gray" id="mtClose">关闭</button></div>
@@ -12109,23 +12212,40 @@ function mtRenderOne(o){
       +' · 邮箱 '+esc(a.email||'（未留）')+'</div>'
       +'<p style="margin:4px 0 8px;font-size:12.5px">'
       +'重登邮件：<b>'+(a.relogin_at?'<span class="good">已发出 '+mtTime(a.relogin_at)+'</span>':'<span class="muted">从未发出</span>')+'</b>'
+      +(a.relogin_at?'':' <button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="relogin2" data-ref="" style="padding:2px 10px;font-size:11px" title="这个号还没发过重登邮件，手动补一封每日重登提醒（走原发信链路，约 30 分钟内发出）">补发重登提醒</button>')
       +' ｜ 待复核标记：'+(a.suspect_at?esc(String(a.suspect_at).slice(5,16)):'无')
       +(a.dead&&a.dead.length?(' ｜ 删号流水：<b style="color:#a32d2d">'+esc(String(a.dead[0].reason||''))+' '+mtTime(a.dead[0].at)+'</b>'):'')
       +'</p>';
-    var mails=(a.mails||[]).concat([]);
+    // 2026-11-17 二期：类型/时间筛选（本机过滤，不耗 D1 配额）—— 服务端一次拉回近 200 条
+    var selK=($('mtKind')?$('mtKind').value:'')||'';
+    var daysN=($('mtDays')?parseInt($('mtDays').value,10):30)||30;
+    var cutD=new Date(Date.now()-daysN*86400000).toISOString().slice(0,10);
+    var mails=[];
+    for(var k2=0;k2<(a.mails||[]).length;k2++){var mm2=a.mails[k2];mm2.__mq=1;mails.push(mm2);}
     if(a.notices&&a.notices.length){
       for(var j=0;j<a.notices.length;j++){
-        mails.push({kind:'删号通知('+(a.notices[j].kind||'dead')+')',ref:'',state:a.notices[j].state,
+        mails.push({__mq:0,kind:'删号通知('+(a.notices[j].kind||'dead')+')',ref:'',state:a.notices[j].state,
           created_at:a.notices[j].removed_at,claimed_at:'',sent_at:a.notices[j].sent_at,skip_reason:a.notices[j].skip_reason});
       }
     }
+    mails=mails.filter(function(m){
+      var dd=String(m.created_at||'').slice(0,10);
+      if(dd&&dd<cutD)return false;
+      if(!selK)return true;
+      if(selK==='notice')return !m.__mq;
+      if(!m.__mq)return false;
+      var kk=String(m.kind||'');
+      if(selK==='exp')return kk.indexOf('exp')===0;
+      if(selK==='song')return /^(songfix|songchange|feenote|nomus|songok)/.test(kk);
+      return kk===selK;
+    });
     if(!mails.length){
-      h+='<p style="color:#888;font-size:12.5px;margin:0 0 14px">邮件队列为空：这个号从未进过任何邮件队列'+(a.relogin_at?'':'，也从未发过重登邮件')+'。</p>';
+      h+='<p style="color:#888;font-size:12.5px;margin:0 0 14px">'+(selK||daysN<180?'当前筛选条件下没有邮件记录（可放宽类型/时间范围）。':'邮件队列为空：这个号从未进过任何邮件队列'+(a.relogin_at?'':'，也从未发过重登邮件')+'。')+'</p>';
       continue;
     }
     h+='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px;margin:0 0 14px"><thead><tr>'
       +'<th style="'+TH+'">邮件类型</th><th style="'+TH+'">关联单号/日期</th><th style="'+TH+'">状态</th>'
-      +'<th style="'+TH+'">入队时间</th><th style="'+TH+'">发出时间</th><th style="'+TH+'">备注</th></tr></thead><tbody>';
+      +'<th style="'+TH+'">入队时间</th><th style="'+TH+'">发出时间</th><th style="'+TH+'">备注</th><th style="'+TH+'">操作</th></tr></thead><tbody>';
     for(var k=0;k<mails.length;k++){var m=mails[k];
       h+='<tr'+(k%2?' style="background:#fafbfc"':'')+'>'
         +'<td style="'+TD+'">'+esc(m.kind||'—')+'</td>'
@@ -12134,6 +12254,7 @@ function mtRenderOne(o){
         +'<td style="'+TD+'">'+mtTime(m.created_at)+'</td>'
         +'<td style="'+TD+'">'+(m.sent_at?('<span class="good">'+mtTime(m.sent_at)+'</span>'):'—')+'</td>'
         +'<td style="'+TD+';color:#777;max-width:220px;overflow:hidden;text-overflow:ellipsis">'+esc(m.skip_reason||'')+'</td>'
+        +(m.__mq?('<td style="'+TD+'"><button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="'+esc(m.kind||'')+'" data-ref="'+esc(m.ref||'')+'" style="padding:2px 10px;font-size:11px" title="把这封邮件重新入队，走原发信链路（约 30 分钟内）发出">补发</button></td>'):'<td style="'+TD+'"></td>')
       +'</tr>';
     }
     h+='</tbody></table>';
@@ -12172,22 +12293,58 @@ function mtRenderList(d){
   h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">共 '+rs.length+' 个失效相关号（已通知重登 + 待复核）。每日提醒=最新一封 relogin2 邮件；「未发」重登邮件的号说明判死邮件链路没走到它（还没被采集判死）。</p>';
   return h;
 }
-function mtQuery(mode){
+var MT_LAST=null;   // 最近一次查询结果（含 mode），筛选切换/补发后在本机重渲染，不重复读库
+function mtApplyFilter(){
+  if(!MT_LAST)return;
+  $('mtBody').innerHTML=MT_LAST.mode==='one'?mtRenderOne(MT_LAST.data):mtRenderList(MT_LAST.data);
+}
+function mtQuery(mode,force){
   var t=JSON.parse(TOKEN||'{}'),q=($('mtQ').value||'').trim();
   if(mode==='one'&&q.replace(/[^0-9A-Za-z]/g,'').length<3){$('mtm').textContent='查单号请输至少 3 位（UID / 手机号片段）';$('mtm').className='msg err';return;}
-  $('mtm').textContent='实时查询中…';$('mtm').className='msg';
-  $('mtGo').disabled=true;$('mtList').disabled=true;$('mtBody').innerHTML='';
-  api('/api/console/mailtrace',mode==='one'?{user:t.user,pass:t.pass,q:q}:{user:t.user,pass:t.pass}).then(function(o){
-    $('mtGo').disabled=false;$('mtList').disabled=false;
+  $('mtm').textContent=force?'强制刷新中（重读 D1）…':'查询中…';$('mtm').className='msg';
+  $('mtGo').disabled=true;$('mtList').disabled=true;$('mtForce').disabled=true;$('mtBody').innerHTML='';
+  api('/api/console/mailtrace',mode==='one'?{user:t.user,pass:t.pass,q:q,force:!!force}:{user:t.user,pass:t.pass,force:!!force}).then(function(o){
+    $('mtGo').disabled=false;$('mtList').disabled=false;$('mtForce').disabled=false;
     if(!(o.ok&&o.d&&o.d.ok)){$('mtm').textContent=(o.d&&o.d.message)||'查询失败';$('mtm').className='msg err';return;}
-    $('mtm').textContent='';$('mtm').className='msg';
-    $('mtBody').innerHTML=mode==='one'?mtRenderOne(o.d):mtRenderList(o.d);
-  }).catch(function(){$('mtGo').disabled=false;$('mtList').disabled=false;$('mtm').textContent='网络错误';$('mtm').className='msg err';});
+    MT_LAST={mode:mode,data:o.d};
+    $('mtm').textContent=o.d.cached?('缓存命中（生成于 '+esc(String(o.d.gen||'').slice(5,16))+'，期间邮件数据无变化，未读库）'):'已实时读取 D1';
+    $('mtm').className='msg';
+    mtApplyFilter();
+  }).catch(function(){$('mtGo').disabled=false;$('mtList').disabled=false;$('mtForce').disabled=false;$('mtm').textContent='网络错误';$('mtm').className='msg err';});
 }
 $('mtGo').onclick=function(){mtQuery('one');};
 $('mtList').onclick=function(){mtQuery('list');};
+$('mtForce').onclick=function(){mtQuery(MT_LAST?MT_LAST.mode:'list',true);};
+$('mtKind').onchange=mtApplyFilter;   // 筛选只在本机过滤已拉回的数据，切换不耗配额
+$('mtDays').onchange=mtApplyFilter;
 $('mtQ').onkeydown=function(e){if(e&&(e.key==='Enter'||e.keyCode===13))mtQuery('one');};
 $('mtClose').onclick=function(){$('mtModal').hidden=true;};
+// 补发按钮（事件委托：表格是动态渲染的，不能逐个绑）
+$('mtBody').addEventListener('click',function(ev){
+  var el=ev.target;
+  if(!el||!el.getAttribute||el.getAttribute('data-act')!=='resend')return;
+  mtResend(el);
+});
+function mtResend(btn){
+  var t=JSON.parse(TOKEN||'{}');
+  var pool=btn.getAttribute('data-pool'),uid=btn.getAttribute('data-uid'),kind=btn.getAttribute('data-kind'),ref=btn.getAttribute('data-ref');
+  if(btn.getAttribute('data-armed')!=='1'){   // 两段确认：第一下变红，再点一下才真发
+    btn.setAttribute('data-armed','1');btn.textContent='确认补发?';btn.style.background='#a32d2d';btn.style.color='#fff';btn.style.borderColor='#a32d2d';
+    setTimeout(function(){if(btn.parentNode){btn.setAttribute('data-armed','0');btn.textContent='补发';btn.style.background='';btn.style.color='';btn.style.borderColor='';}},4000);
+    return;
+  }
+  btn.disabled=true;btn.textContent='入队中…';
+  api('/api/console/mailresend',{user:t.user,pass:t.pass,pool:pool,uid:uid,kind:kind,ref:ref}).then(function(o){
+    if(o.ok&&o.d&&o.d.ok){
+      $('mtm').textContent=(o.d.message||'已入队')+' —— 查询缓存已自动失效，下次刷新会重新读库';
+      $('mtm').className='msg good';
+      mtQuery(MT_LAST?MT_LAST.mode:'one');   // 补发改变了 mail_queue，指纹变化 → 自动走实时重建
+    }else{
+      btn.disabled=false;btn.textContent='补发';
+      $('mtm').textContent=(o.d&&o.d.message)||'补发失败';$('mtm').className='msg err';
+    }
+  }).catch(function(){btn.disabled=false;btn.textContent='补发';$('mtm').textContent='网络错误';$('mtm').className='msg err';});
+}
 $('btnMailTrace').onclick=function(){
   $('mtm').textContent='';$('mtBody').innerHTML='';
   $('mtModal').hidden=false;
