@@ -276,27 +276,35 @@ jobs:
           if _nsov.isdigit() and int(_nsov) > 0:
               ns = int(_nsov)
           _only = [int(x) for x in (os.environ.get("ONLY_SLICES") or "").replace(" ", "").split(",") if x.isdigit()]
-          # 2026-11-15 fanout 扩片（阶段二，按比例对半分；2026-11-14 阶段一 2 片灰度全绿后扩）：
-          # 正常轮（无 ns_override 且无 only_slices）master 只跑 0..fs_lo-1，
-          # 后一半 fs_lo..ns-1 由下方 dispatch step 派给 follower N2（带同轮 ns/day/par，
-          # 分片键与 master 完全一致）。follower 片数 = ns - fs_lo，随每晚 ns 动态变化，
-          # ns 为奇数时 follower 多 1 片（如 ns=61 → master 0..29 共 30 片、follower 30..60 共 31 片）。
+          # 2026-11-15 fanout 扩片（阶段二对半分）→ 2026-11-17 Phase 2 升级为「master 0 片」：
+          # 正常轮（无 ns_override 且无 only_slices）master 不再自跑任何片（brush 0 job），
+          # 前一半 0..fs_lo-1 派 follower N2b（xm921016/relay-node，m2_slices）、
+          # 后一半 fs_lo..ns-1 派 N2（fs_slices），两者带同轮 ns/day/par，分片键与原 master 完全一致。
+          # ns 为奇数时 N2 多 1 片（如 ns=61 → N2b 0..29 共 30 片、N2 30..60 共 31 片）。
           # 兜底：fs_lo < 3（总片数太少，follower 分不到有意义的量）时 fanout 关闭，
           # 回退 master 0..ns-1 全跑原语义，fs_lo/fs_hi 输出 0/-1 哨兵，dispatch 被 if fanout==1 拦住。
           # 带 ns_override / only_slices 的补跑/排查保持原语义：master 全跑、不派 follower
           # （补跑片号不能变，且 follower 不该掺和定向补跑）。
           # follower dispatch 失败只告警不拦 master：漏播片由 warning 显式暴露人工补。
+          # 2026-11-17 Phase 2（「主仓转私密+播放外移」，N2b 灰度通过前提，见
+          # 文档\主仓转私密与播放外移实施清单-20261117.md）：master 降 0 片——
+          # 正常轮前一半 0..fs_lo-1 派 N2b（xm921016/relay-node，m2_slices 输出），
+          # 后一半 fs_lo..ns-1 派 N2（fs_slices，不变）；master 矩阵清空（brush 0 job，仅剩 plan）。
+          # ns/par/per/fanout 触发条件与分片键一个字都不动；带 ns_override/only_slices 的
+          # 补跑/排查保持原语义：master 全跑/定向跑、不派 follower。回退：_slices=list(range(_fs_lo))。
           _fanout = (not _nsov) and (not _only) and (ns // 2) >= 3
           if _fanout:
               _fs_lo = ns // 2
               _fs_slices = list(range(_fs_lo, ns))
-              _slices = list(range(_fs_lo))
+              _m2_slices = list(range(_fs_lo))
+              _slices = []
           else:
               _fs_lo = 0
               _fs_slices = []
+              _m2_slices = []
               _slices = [x for x in _only if 0 <= x < ns] if _only else list(range(ns))
-          if not _slices:
-              _slices = list(range(ns))
+              if not _slices:
+                  _slices = list(range(ns))
           _dayov = (os.environ.get("DAY_OVERRIDE") or "").strip()
           if len(_dayov) == 10 and _dayov[4] == "-" and _dayov[7] == "-":
               day = _dayov
@@ -311,7 +319,8 @@ jobs:
               f.write(f"fs_lo={_fs_lo}\n")
               f.write(f"fs_hi={ns - 1 if _fs_slices else -1}\n")
               f.write("fs_slices=%s\n" % ",".join(str(x) for x in _fs_slices))
-          print(f"pool_size={n} ns={ns} slices={len(_slices)} day={day} fanout={'on' if _fanout else 'off'} follower_slices={_fs_slices[:2]}...{(_fs_slices[-1] if _fs_slices else 'none')}")
+              f.write("m2_slices=%s\n" % ",".join(str(x) for x in _m2_slices))
+          print(f"pool_size={n} ns={ns} master_slices={len(_slices)} day={day} fanout={'on' if _fanout else 'off'} m2={(_m2_slices[0] if _m2_slices else 'none')}..{(_m2_slices[-1] if _m2_slices else 'none')} n2={(_fs_slices[0] if _fs_slices else 'none')}..{(_fs_slices[-1] if _fs_slices else 'none')}")
           EOF
 
       # 2026-11-15 fanout 扩片（阶段二）：把本轮后一半片（fs_slices，由 plan 动态生成）
@@ -344,13 +353,12 @@ jobs:
           fi
           rm -f "$resp"
 
-      # 2026-11-17 node-016 灰度接线（「主仓转私密+播放外移」Phase 1）：fanout 正常轮额外派
-      # master 末 2 片（fs_lo-2, fs_lo-1）给同账号 follower N2b（xm921016/relay-node），
-      # 与 master 矩阵双播验证链路（~68 号双播一晚，前例：11-15 N2 灰度 2 片双播 ~48 号）。
-      # 全绿后升 Phase 2：master 0 片、N2b 接 0..fs_lo-1、N2 保持 fs_lo..ns-1（另一次提交）。
-      # 同账号部署：node-016 的 job 与 master 矩阵共享本账号 20 并发，灰度 2 片会排队晚跑，属预期。
-      # continue-on-error：失败只告警，不拦 master/N2 正常派发（灰度片 master 本来就播，不产生缺口）。
-      - name: 派 node-016 灰度 2 片（master 末 2 片双播验证）
+      # 2026-11-17 Phase 2（「主仓转私密+播放外移」）：master 降 0 片后，前一半片（0..fs_lo-1）
+      # 正式派给同账号 follower N2b（xm921016/relay-node）；N2 保持后一半 fs_lo..ns-1 不变。
+      # 原 Phase 1 灰度 step（fs_lo-2,fs_lo-1 双播）随本接线移除，避免与 N2b 正式片重复 dispatch。
+      # 同账号 20 并发由 N2b 独占（master brush 已 0 job）。dispatch 失败只告警：
+      # 前一半片当晚无人播，backfill（FOLLOWERS 已含 016）在轮次结束/14:30 自动补。
+      - name: 派 node-016 前一半片（Phase 2：master 0 片）
         if: steps.plan.outputs.fanout == '1'
         continue-on-error: true
         env:
@@ -358,10 +366,9 @@ jobs:
           NS: ${{ steps.plan.outputs.ns }}
           DAY: ${{ steps.plan.outputs.day }}
           PAR: ${{ steps.plan.outputs.par }}
-          FS_LO: ${{ steps.plan.outputs.fs_lo }}
+          M2_SLICES: ${{ steps.plan.outputs.m2_slices }}
         run: |
-          GS=$(printf '%d,%d' $((FS_LO-2)) $((FS_LO-1)))
-          body=$(printf '{"ref":"main","inputs":{"ns_override":"%s","day_override":"%s","par_override":"%s","only_slices":"%s"}}' "$NS" "$DAY" "$PAR" "$GS")
+          body=$(printf '{"ref":"main","inputs":{"ns_override":"%s","day_override":"%s","par_override":"%s","only_slices":"%s"}}' "$NS" "$DAY" "$PAR" "$M2_SLICES")
           resp=$(mktemp)
           code=$(curl -s -o "$resp" -w '%{http_code}' -X POST \
             -H "Authorization: Bearer $NODE016_TOKEN" \
@@ -370,9 +377,9 @@ jobs:
             https://api.github.com/repos/xm921016/relay-node/actions/workflows/run.yml/dispatches \
             -d "$body")
           if [ "$code" = "204" ]; then
-            echo "node-016 灰度已派片 $GS（ns=$NS day=$DAY par=$PAR，master 同片双播验证）"
+            echo "node-016 已派片 $M2_SLICES（ns=$NS day=$DAY par=$PAR，共 $(echo "$M2_SLICES" | tr ',' '\n' | wc -l) 片）"
           else
-            echo "::warning::node-016 灰度 dispatch 失败 http=$code：灰度片当晚不播（master 本来就播这两片，不影响主流程），明晚重试或人工排查。响应：$(cat "$resp")"
+            echo "::warning::node-016 dispatch 失败 http=$code：片 $M2_SLICES 今晚无人播（backfill 会自动补），响应：$(cat "$resp")"
           fi
           rm -f "$resp"
 
