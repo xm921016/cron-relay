@@ -8826,6 +8826,8 @@ async function handle(request) {
       if (weekN === null) return json({ message: hintN() }, 503, CORS);
       const accN = await d1All("SELECT uid,name,agent,added,exp,relogin_at,suspect_at FROM accounts WHERE pool='hz'", []);
       if (accN === null) return json({ message: hintN() }, 503, CORS);
+      const accMapN = {};   // 快照表的 name 列基本是空的，账号名/代理/到期以 accounts 表为准
+      for (const a of accN) accMapN[nrmN(a.uid)] = a;
       const pMapN = {};
       for (const p of snapP) pMapN[nrmN(p.uid)] = (p.rpc30 == null ? null : Number(p.rpc30));
       const effWeekN = {};
@@ -8843,9 +8845,11 @@ async function handle(request) {
       };
       const rowN = (s, kind) => {
         const uid = nrmN(s.uid);
+        const aN = accMapN[uid] || null;
         const rP = pMapN[uid];
         const dR = (s.rpc30 != null && rP != null) ? Number(s.rpc30) - rP : null;
-        return { uid: uid, name: nrmN(s.name), kind: kind, effect: (s.missions && JSON.parse(nrmN(s.missions) || '{}').mission_code_recently_play_effect_count_v2 != null)
+        return { uid: uid, name: aN ? nrmN(aN.name) : nrmN(s.name), agent: aN ? nrmN(aN.agent) : '',
+          exp: aN ? nrmN(aN.exp) : '', effect: (s.missions && JSON.parse(nrmN(s.missions) || '{}').mission_code_recently_play_effect_count_v2 != null)
             ? Number(JSON.parse(nrmN(s.missions) || '{}').mission_code_recently_play_effect_count_v2) : null,
           rpc30: (s.rpc30 == null ? null : Number(s.rpc30)), rpcDelta: dR, streak: streakOfN(uid) };
       };
@@ -12462,11 +12466,11 @@ function mtRenderAnom(d){
   function mtRpc(r){return String(r.rpc30==null?'—':r.rpc30)+(r.rpcDelta==null?'':'（'+(r.rpcDelta>0?'+':'')+r.rpcDelta+'）');}
   function mtStreak(r){return r.streak>=2?'<b style="color:#a32d2d">'+r.streak+' 天</b>':String(r.streak)+' 天';}
   h+=mtSec('播放无效（播了但生效数=0）','#a32d2d',d.noEffect||[],[
-    ['账号',mtAcc],['UID',mtUid],['生效数',function(r){return String(r.effect==null?'—':r.effect);}],
+    ['账号',mtAcc],['UID',mtUid],['代理',function(r){return esc(r.agent||'—');}],['生效数',function(r){return String(r.effect==null?'—':r.effect);}],
     ['近30日播放',mtRpc],['连续',mtStreak]
   ]);
   h+=mtSec('播放量停滞（近30日播放与前一天持平）','#8a6d1a',d.flatRpc||[],[
-    ['账号',mtAcc],['UID',mtUid],['近30日播放',mtRpc],['连续',mtStreak]
+    ['账号',mtAcc],['UID',mtUid],['代理',function(r){return esc(r.agent||'—');}],['近30日播放',mtRpc],['连续',mtStreak]
   ]);
   h+=mtSec('缺采（基准日没采到且无失效标记）','#555',d.missing||[],[
     ['账号',mtAcc],['UID',mtUid],['代理',function(r){return esc(r.agent||'—');}],
