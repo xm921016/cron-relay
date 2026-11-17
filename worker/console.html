@@ -1577,8 +1577,11 @@ function openInfo(i){
   var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
   var ai=r.ai||artistInfo(e);
   var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
-  var sourceLabels={manual_web:'客服手动登记',qr_cf:'Cloudflare 扫码登记',qr_home:'家宽真浏览器扫码登记'};
-  var src=sourceLabels[String(e.source||'').trim()]||'未记录';
+  var methodLabels={manual_import:'客服手动提交',link_qr:'链接扫码',browser_qr:'真浏览器扫码'};
+  var exitLabels={home_relay:'本机家宽转发',cf_direct:'Cloudflare 直连',home_browser:'真浏览器家宽'};
+  var legacyMethod={manual_web:'客服手动提交',qr_cf:'链接扫码',qr_home:'真浏览器扫码'};
+  var methodTxt=methodLabels[e.registrationMethod]||legacyMethod[e.source]||'未记录';
+  var exitTxt=exitLabels[e.loginEgress]||'未记录';
   /* 2026-11-17（用户拍板方案 A）：有效期永远单独说清楚（加剩余天数）；
      「套餐」改名「最近购买」—— plan 字段只记最后一单（月度结算/提成/筛选的统计口径），
      续费累加都记在有效期上，两者独立，不解释就会被当成「显示错了」。 */
@@ -1599,7 +1602,8 @@ function openInfo(i){
     +kv('客服',e.agent?esc(e.agent):'—')
     +kv('邮箱',e.email?esc(e.email):'未绑')
     +kv('入池',esc(String(e.added||'').slice(0,10)))
-    +kv('登记来源',esc(src))
+    +kv('登记方式',esc(methodTxt))
+    +kv('实际出口',esc(exitTxt))
     +kv('有效期',_expTxt)
     +kv('最近购买',e.plan?(esc(e.plan)+' <span style="color:#888;font-weight:400;font-size:11px">只记最近一单（续费会覆盖）；总有效期看上面「有效期」</span>'):'未标注')
     +'</div>'

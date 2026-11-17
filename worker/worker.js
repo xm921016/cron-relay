@@ -3062,7 +3062,7 @@ async function d1Upsert(e, opt) {
       'rb_from=CASE WHEN excluded.rb_from>0 THEN excluded.rb_from ELSE COALESCE(accounts.rb_from,0) END, ' +
       'rb_start=CASE WHEN excluded.rb_start<>\'\' THEN excluded.rb_start ELSE COALESCE(accounts.rb_start,\'\') END';
   return d1Run(
-    'INSERT INTO accounts (pool,uid,name,song,ck,added,exp,no_listen,email,updated_at,agent,plan,pub,note,rb,rb_from,rb_start,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ' +
+    'INSERT INTO accounts (pool,uid,name,song,ck,added,exp,no_listen,email,updated_at,agent,plan,pub,note,rb,rb_from,rb_start,source,registration_method,login_egress) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ' +
     'ON CONFLICT(pool,uid) DO UPDATE SET name=excluded.name, song=excluded.song, ck=excluded.ck, ' +
     'added=excluded.added, exp=excluded.exp, no_listen=excluded.no_listen, email=excluded.email, ' +
     'updated_at=excluded.updated_at, pub=excluded.pub, ' +
@@ -3072,6 +3072,8 @@ async function d1Upsert(e, opt) {
     'plan=CASE WHEN excluded.plan<>\'\' THEN excluded.plan ELSE accounts.plan END, ' +
     'source=CASE WHEN COALESCE(accounts.source,\'\')=\'\' AND excluded.source<>\'\' THEN excluded.source ELSE COALESCE(accounts.source,\'\') END, ' +
     // 2026-11-05：备注/补号标记（按上面的 clearable 决定是否允许写空）
+    "registration_method=CASE WHEN accounts.ck<>excluded.ck OR excluded.registration_method<>'' THEN excluded.registration_method ELSE COALESCE(accounts.registration_method,'') END, " +
+    "login_egress=CASE WHEN accounts.ck<>excluded.ck OR excluded.login_egress<>'' THEN excluded.login_egress ELSE COALESCE(accounts.login_egress,'') END, " +
     noteSet + ', ' + rbSet + ', ' +
     // 2026-11-04：号主重新登记（CK 真变了）→ 清掉「已通知重登」标记，下一轮自动回到听众环。
     // 必须按 CK 变化判断而不是每次登记都清：/api/d1_sync 之类从 KV 老数据回灌时 CK 不变，
@@ -3083,7 +3085,8 @@ async function d1Upsert(e, opt) {
      // 有到期日的公益号」这个不变量 —— 否则某条路径漏改，第二天到期号会被当成普通号再算一遍。
      e.pub ? 'forever' : String(e.exp || ''), e.noListen ? 1 : 0, String(e.email || ''), new Date().toISOString(),
      String(e.agent || ''), String(e.plan || ''), e.pub ? 1 : 0,
-     String(e.note || ''), e.rb ? 1 : 0, Number(e.rbFrom) || 0, String(e.rbStart || ''), String(e.source || '')]
+     String(e.note || ''), e.rb ? 1 : 0, Number(e.rbFrom) || 0, String(e.rbStart || ''), String(e.source || ''),
+     String(e.registrationMethod || ''), String(e.loginEgress || '')]
   );
 }
 // 2026-11-10：登记补偿重放（配 acct_fixups 表，建表见 tmp/d1_acct_fixups_1110.py）。
@@ -3307,7 +3310,7 @@ async function ledgerMarkRebind(pool, uid, name, on, rbFrom, rbStart, remark, ne
 // ====================================================================
 // 2026-11-05：加 note（备注，复用库里已有的 note 列）/ rb（补号标记）/ rb_from（关联原单）/
 // rb_start（原单登记日）。缺这几个的话控制台改完备注一刷新就变回空。
-const D1_COLS = 'uid,name,song,ck,added,exp,no_listen,email,agent,plan,pub,note,rb,rb_from,rb_start,relogin_at,source';
+const D1_COLS = 'uid,name,song,ck,added,exp,no_listen,email,agent,plan,pub,note,rb,rb_from,rb_start,relogin_at,source,registration_method,login_egress';
 
 // ---- 2026-11-08 省额度：全池读的排序从 SQL 挪到 JS ----
 // D1 的 rows_read 把 `USE TEMP B-TREE FOR ORDER BY` 的代价也算进「读行数」：
@@ -3384,6 +3387,8 @@ function d1RowToEntry(r) {
     agent: String(r.agent || ''),
     plan: String(r.plan || ''),
     source: String(r.source || ''),
+    registrationMethod: String(r.registration_method || ''),
+    loginEgress: String(r.login_egress || ''),
   };
   // 2026-11-05：备注（D1 列名 note）+ 补号标记。空值不写进 entry，保持 KV 条目干净。
   if (r.note) e.note = String(r.note);
@@ -4831,6 +4836,21 @@ const NC_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKi
 const NC_BASE = 'https://music.163.com';
 const NC_QTYPE = '3';                    /* 3 = 官方 st/platform 扫码；1 = 老接口（会被判环境异常） */
 
+// 服务端凭证绑定链接和 CK，不相信客户端自报出口；不存储明文 CK。
+async function ncReceiptKey(code, mu) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(regNormCode(code) + ':' + mu));
+  return 'login-route:' + Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
+}
+async function ncReceiptRead(code, mu) {
+  try {
+    const rows = await d1All('SELECT v FROM kv_misc WHERE k=? LIMIT 1', [await ncReceiptKey(code, mu)]);
+    const r = rows && rows.length ? JSON.parse(rows[0].v) : null;
+    if (r && Date.now() - r.at < 86400000 && ['home_relay', 'cf_direct'].includes(r.loginEgress))
+      return { registrationMethod: 'link_qr', loginEgress: r.loginEgress };
+  } catch (e) { console.error('扫码来源证据读取失败'); }
+  return { registrationMethod: 'link_qr', loginEgress: '' };
+}
+
 function ncSetCookies(r) {
   let out = [];
   try { if (typeof r.headers.getSetCookie === 'function') out = r.headers.getSetCookie() || []; } catch (e) {}
@@ -4934,7 +4954,8 @@ async function ncNewKey(bag) {
 }
 async function ncPollOnce(bag, key) {
   const u = '/api/login/qrcode/client/login?key=' + encodeURIComponent(key) + '&type=' + NC_QTYPE;
-  const r = await ncFetch(u, { headers: ncHdr(bag) }, await ncEgressMode(bag));
+  const eg = await ncEgressMode(bag);
+  const r = await ncFetch(u, { headers: ncHdr(bag) }, eg);
   const txt = await r.text();
   const scs = ncSetCookies(r);
   ncAbsorb(bag, scs);
@@ -4945,6 +4966,7 @@ async function ncPollOnce(bag, key) {
     code: (j && j.code) || 0,
     message: (j && j.message) || '',
     musicU: ncPickCookie(scs, 'MUSIC_U'),
+    loginEgress: eg ? 'home_relay' : 'cf_direct',
     isJson: !!j,
     /* 2026-11-08：803 却拿不到 MUSIC_U 时（买家反馈「手机确认了、网页没反应」），
        把响应状态和 Set-Cookie 的**名字**带回去（只带名字不带值），方便定位是
@@ -5807,7 +5829,8 @@ async function handle(request) {
         }
       }
       const ent = { ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: phone || ('qr:' + v.uid), uid: v.uid, email: email, phone: phone, grp: isG2 ? 2 : 1, exp: expQ.exp || (pl2 ? pl2.exp : undefined),
-        agent: normAgent(body.agent), plan: pl2 ? pl2.label : normAgent(body.plan).slice(0, 8), source: 'manual_web' };
+        agent: normAgent(body.agent), plan: pl2 ? pl2.label : normAgent(body.plan).slice(0, 8), source: 'manual_web',
+        registrationMethod: 'manual_import', loginEgress: '' };
       /* 2026-11-10：客服端也可以指定这一单是「续费」还是「补登」（主界面下拉框）。
          不传 / 传 auto → 保持原来的自动判定（号在池里=续费；号不在池但台账原单没到期=补登），
          老版本 EXE 不带这个字段，行为完全不变。
@@ -5836,6 +5859,8 @@ async function handle(request) {
             + '换绑只给还在池里的号用，掉线的号请发「补登」链接免费补回。' }, 404);
         }
         sTgtM.ck = ent.ck;
+        sTgtM.registrationMethod = 'manual_import';
+        sTgtM.loginEgress = '';
         if (sTgtM.relogin) sTgtM.relogin = 0;
         let kvOkM = true;
         try { await POOL.put(entryKeyOf(sTgtM), JSON.stringify(sTgtM)); }
@@ -6010,6 +6035,8 @@ async function handle(request) {
           + '请确认用原来登记的那个网易云账号取的凭证；确实换号了请联系管理员' }, 400);
       }
       sTgt.ck = 'MUSIC_U=' + muS;
+      sTgt.registrationMethod = 'manual_import';
+      sTgt.loginEgress = '';
       if (sTgt.relogin) sTgt.relogin = 0;
       let sKvOk = true;
       try { await POOL.put(entryKeyOf(sTgt), JSON.stringify(sTgt)); }
@@ -6132,6 +6159,11 @@ async function handle(request) {
       catch (e) { return json({ ok: false, code: 0, message: '稍后自动重试', bag: ncEncBag(bag) }, 200); }
       const out = { ok: true, code: p.code, message: p.message, bag: ncEncBag(bag) };
       if (p.code === 803 && p.musicU) {
+        try {
+          await d1Run('INSERT OR REPLACE INTO kv_misc (k,v,updated_at) VALUES (?,?,?)',
+            [await ncReceiptKey(url.searchParams.get('t'), p.musicU),
+             JSON.stringify({ loginEgress: p.loginEgress, at: Date.now() }), bjStamp()]);
+        } catch (e) { console.error('扫码来源证据保存失败'); }
         out.mu = p.musicU;
         const pr = await ncProfile(p.musicU);
         if (pr) { out.uid = pr.uid; out.nick = pr.nick; }
@@ -6206,6 +6238,7 @@ async function handle(request) {
         if (csGrabbed === -1) return json({ ok: false, message: '数据库暂时不可用，请稍后重试' }, 503);
         if (csGrabbed === 0) return json({ ok: false, message: '这个链接刚刚已被使用，请联系客服' }, 410);
         csTgt.ck = 'MUSIC_U=' + csMu;
+        Object.assign(csTgt, await ncReceiptRead(code, csMu));
         if (csTgt.relogin) csTgt.relogin = 0;
         let csKvOk = true;
         try { await POOL.put(entryKeyOf(csTgt), JSON.stringify(csTgt)); }
@@ -6293,6 +6326,7 @@ async function handle(request) {
         uid: v.uid, email: email, phone: phone, grp: 1,
         exp: (pl1 && pl1.exp) ? pl1.exp : beijingDatePlus(days1),
         agent: agent1, plan: pl1 ? pl1.label : String(row.plan || '').slice(0, 8), source: 'qr_cf',
+        ...(await ncReceiptRead(code, mu)),
       };
       /* 2026-11-10：链接上标了补登/续费 → 强制按那个类型走。
          这样客户换手机号、换网易号都不影响判定 —— 类型在发链接时就定了。 */
@@ -7910,6 +7944,8 @@ async function handle(request) {
         name: e.name || '', uid: e.uid != null ? String(e.uid) : '',
         song: e.song != null ? String(e.song) : '', added: e.added || '',
         source: String(e.source || ''),
+        registrationMethod: role === 'full' ? String(e.registrationMethod || '') : '',
+        loginEgress: role === 'full' ? String(e.loginEgress || '') : '',
         email: e.email || '', phone: e.phone || '', noListen: !!e.noListen, exp: e.exp || '',
         // 2026-10-27：客服标签 + 套餐档位（控制台新增两列 / 顶部套餐汇总 / 按客服筛选的数据源）
         agent: e.agent || '', plan: e.plan || '',
@@ -10065,13 +10101,11 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap td:nth-child(20) button{flex:0 0 auto;min-width:64px;padding:7px 0;font-size:11.5px;text-align:center;
     border-radius:8px;background:#fff;border:1px solid #dde3ea;color:#33506e;font-weight:600}
   .twrap td:nth-child(20) .infoBtn{display:inline-block;flex:0 0 auto;background:#255ea6;color:#fff;border-color:#255ea6}
-  /* 19:05 用户简化需求：底部 删号记录/对照表/数据口径 三块手机端整体隐藏（要查详情走卡片「详情」弹窗） */
-  #deadBox,#legendBox,#kjWrap{display:none}
+  /* 19:05 用户简化需求：底部 删号记录/对照表 手机端整体隐藏（要查详情走卡片「详情」弹窗） */
+  #deadBox,#legendBox{display:none}
   /* 采集时间改跟在客服名字后面（今日650格下不再显示） */
   .twrap .agAt{display:inline;font-size:10px;color:#9aa5b1;margin-left:4px;font-weight:400}
   .twrap td:nth-child(11) .snap-at{display:none}
-  /* 「数据口径」在手机端被 JS 包进折叠 details（kjWrap），给个跟 deadbox 一致的观感 */
-  .kjbox{font-size:11.5px;color:#666;line-height:1.7}
   /* 「删号记录」6 列表 / 「标记对照表」3 列表，在 360px 下每列只剩几十 px，会被挤成一字一行。
      手机端改成一条一条的块：删号记录 → 首行 池+UID+账号，下面 原因/通知/时间 各占一行带标签；
      对照表 → 标记一行、意思一行、要怎么处理一行（前缀「意思｜」「处理｜」代替表头）。桌面端不受影响。 */
@@ -10189,7 +10223,6 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <br data-page-node-id="JnAEaMOOAfmVBhREawBOlr">⑤ <b data-page-node-id="U6dkLtNlOthFnVg7bvLpdx">「播放补了但总量没涨」看「净增≤0」</b>：近30日播放量是 30 天滚动窗口，今天补的播放会被 30 天前的老播放到期退出抵掉，看起来总量持平甚至略降，但播放确实补进去了。偶发一两天正常；连续 3 天以上净增≤0 才说明补的量追不上退的量，要加每号播放次数或换更热的歌。
     <br data-page-node-id="bles9yImorwMKuFfBcbQNM"><b data-page-node-id="wWaP5KM4houm8B3rQ0IZvx">所以判断号有没有问题，看「今日零增长 / 净增≤0」连续几天 + 「近30日播放量」在涨还是在跌</b>：播放量在跌且 650 也不动 = 今天补的播放被 30 天前老量退出抵消（「净增≤0」，偶发正常）；播放量在涨但 650 一直不动 = 播放被判无效（「650未结算」，连续 3 天以上才查）；650 是 0% 的先把「实时复核」结果看完再动手。
   </div></details>
-  <p id="kjP" style="font-size:12px;color:#888;margin:10px 0 0" data-page-node-id="nuPz7pgE09pleT3HoAKpAo">数据口径：<b data-page-node-id="R5hS7ujyNIcxFp81aBcoVL">650进度</b>=音乐人后台 650 任务完成度（近30日滚动，会回吐，100%=达标）；<b data-page-node-id="vfeaQyYyTHRPniLyNu5jW0">近30日播放量</b>=工作台播放次数（≠有效播放，≠650进度；30 天滚动，今天补的量可能被 30 天前的老量退出抵掉 → 标「净增≤0」）；<b data-page-node-id="pi2BCqxfG67icaTPQE4P8z">650 实时复核</b>=对「快照 0% 但近30日播放≥650」的号直接查一次工作台当前进度（KV 缓存 30 分钟，不写回 rate、不动任何其它列）：实时有进度标灰「实时已恢复」，实时仍 0% 才继续标「有播放·650为0」；<b data-page-node-id="XNVZ0abW9yDOpkt3Fyv2n7">较昨日</b>=今天快照-昨天快照，前一日无快照显示 —（数据断层，非故障；<b data-page-node-id="ZhWT2Vr26sLWLLf2VmsKiG">今晚听歌</b>=按当前号池回放的今晚计划（每号本群歌单首数，已配平；加速档每天每首歌要几个听众，被稀释时标红）；顶部每个统计名的用词与标记列完全一致，搜索框直接搜那个词就能筛出对应行）；昨日≥80% 今日 0% 且播放量没塌的显示为灰色「周期归零」= 650 换新周期不是掉量（已从「今日下跌」剔除）；<b data-page-node-id="ER4mEcRjYh9kFk6S35ao62">笔记任务</b>=与 650 无关的同组小任务（发布图文笔记，按「已发x/4」显示：30 天内发布图文笔记天数≥4，4/4 即完成），显示 — 表示只有 650 一个任务；<b data-page-node-id="0fVFyu9LY09DfZ9WzGyC8X">时长</b>=登记歌曲长度（红=短歌&lt;2:12、黄=长歌&gt;5:36，仅提示，10-22 修完后都能正常计入）；<b data-page-node-id="tcyk6N8QngCUFYABBf28dc">今日进度下的小字</b>=该行快照采集时间（北京时间；凌晨轮次边跑边采，不代表当天最终值，11:40 主采后的数才准）；各标记含义见上方「标记看不懂」对照表。<b data-page-node-id="OWn1Q3fxAHV1GiWCJktqqn">运行状态横条</b>：作业=两仓库最近一次定时轮次（GitHub API，5 分钟缓存）；应跑/实跑=按当前号池对所选日期回放的轮转计划与 runs 表核对（历史日期为近似值）；快照更新=该日快照最后写入时间（北京时间）；今日删号/待复核来自 D1。</p>
 </div>
 <div class="modal" id="modal" hidden data-page-node-id="HrNaAIFT1KILEXBoLc7f06"><div class="mbox" data-page-node-id="WOex3wAhapNmyUDkOVY0xj">
   <h3 id="mTitle" data-page-node-id="hsdKqBm7YiKHZAcLQoTSTz">编辑账号</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="mSub" data-page-node-id="tlhtfU3BjD9FMhhgv4IMTc"></p>
@@ -11389,8 +11422,11 @@ function openInfo(i){
   var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
   var ai=r.ai||artistInfo(e);
   var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
-  var sourceLabels={manual_web:'客服手动登记',qr_cf:'Cloudflare 扫码登记',qr_home:'家宽真浏览器扫码登记'};
-  var src=sourceLabels[String(e.source||'').trim()]||'未记录';
+  var methodLabels={manual_import:'客服手动提交',link_qr:'链接扫码',browser_qr:'真浏览器扫码'};
+  var exitLabels={home_relay:'本机家宽转发',cf_direct:'Cloudflare 直连',home_browser:'真浏览器家宽'};
+  var legacyMethod={manual_web:'客服手动提交',qr_cf:'链接扫码',qr_home:'真浏览器扫码'};
+  var methodTxt=methodLabels[e.registrationMethod]||legacyMethod[e.source]||'未记录';
+  var exitTxt=exitLabels[e.loginEgress]||'未记录';
   /* 2026-11-17（用户拍板方案 A）：有效期永远单独说清楚（加剩余天数）；
      「套餐」改名「最近购买」—— plan 字段只记最后一单（月度结算/提成/筛选的统计口径），
      续费累加都记在有效期上，两者独立，不解释就会被当成「显示错了」。 */
@@ -11411,7 +11447,8 @@ function openInfo(i){
     +kv('客服',e.agent?esc(e.agent):'—')
     +kv('邮箱',e.email?esc(e.email):'未绑')
     +kv('入池',esc(String(e.added||'').slice(0,10)))
-    +kv('登记来源',esc(src))
+    +kv('登记方式',esc(methodTxt))
+    +kv('实际出口',esc(exitTxt))
     +kv('有效期',_expTxt)
     +kv('最近购买',e.plan?(esc(e.plan)+' <span style="color:#888;font-weight:400;font-size:11px">只记最近一单（续费会覆盖）；总有效期看上面「有效期」</span>'):'未标注')
     +'</div>'
@@ -12326,7 +12363,7 @@ $('btnCsv').onclick=function(){
 };
 /* ===== 2026-11-15 方案④：手机端布局同步（节点搬运，桌面端零影响、可逆、幂等）=====
    ≤860px：把筛选控件(#fagent/#fplan/#dr/#sort)搬进「筛选」面板、七个低频工具按钮搬进「工具」
-   抽屉、「数据口径」长段包进折叠 details(kjWrap)；>860px：按记录的原锚点逐一搬回原位。
+   抽屉；>860px：按记录的原锚点逐一搬回原位。
    搬的是同一批 DOM 节点 → onclick / addEventListener / applyRole 的显隐全部照旧生效。
    桌面端节点从未离开原位，渲染与改前一致。 */
 var MQM=window.matchMedia('(max-width:860px)');
@@ -12336,8 +12373,6 @@ function mRestoreAll(){
   for(var i=MOV.length-1;i>=0;i--){var m=MOV[i];
     if(m.el.parentNode!==m.par&&m.par){m.par.insertBefore(m.el,m.next);}}
   MOV.length=0;
-  var kj=$('kjWrap');
-  if(kj&&$('kjP')){kj.parentNode.insertBefore($('kjP'),kj);kj.parentNode.removeChild(kj);}
 }
 function mDeployMobile(){
   if(MOV.length)return;
@@ -12345,14 +12380,6 @@ function mDeployMobile(){
   if(fs){fids.forEach(function(id){var el=mGrab(id);if(el)fs.appendChild(el);});}
   var tids=['btnCsv','btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnOut'],ts=$('tdSlot');
   if(ts){tids.forEach(function(id){var el=mGrab(id);if(el)ts.appendChild(el);});}
-  var kp=$('kjP');
-  if(kp&&!$('kjWrap')){
-    var d=document.createElement('details');d.id='kjWrap';d.className='deadbox kjbox';
-    var s=document.createElement('summary');s.textContent='数据口径（点开查看）';
-    d.appendChild(s);d.appendChild(kp);
-    var lg=$('legendBox');
-    if(lg&&lg.parentNode)lg.parentNode.insertBefore(d,lg.nextSibling);else if(kp.parentNode)kp.parentNode.appendChild(d);
-  }
 }
 function syncLayout(){
   var dr=$('toolDrawer'),fp=$('filterPanel'),mk=$('mMask');
