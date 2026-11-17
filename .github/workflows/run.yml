@@ -314,7 +314,9 @@ jobs:
               f.write(f"ns={ns}\n")
               f.write(f"par={par}\n")
               f.write("day=" + day + "\n")
-              f.write(f"matrix={json.dumps({'slice': _slices})}\n")
+              # 2026-11-18：空矩阵（master 0 片正常轮）输出哨兵片 [-1]，
+              # 避免 GitHub 把「矩阵为空」的 run 判 failure 发失败邮件；brush 侧按矩阵值整 job 跳过。
+              f.write(f"matrix={json.dumps({'slice': _slices if _slices else [-1]})}\n")
               f.write("fanout=%d\n" % (1 if _fanout else 0))
               f.write(f"fs_lo={_fs_lo}\n")
               f.write(f"fs_hi={ns - 1 if _fs_slices else -1}\n")
@@ -385,6 +387,11 @@ jobs:
 
   brush:
     needs: plan
+    # 2026-11-18：Phase 2「master 0 片」后正常轮矩阵为空。GitHub 对空矩阵 run 一律判 failure
+    # 并发失败邮件（00:18 实测：plan 全绿、0 brush job、run=failure）。plan 改为输出哨兵片
+    # [-1]，brush 用本条件整 job 跳过（skipped 不 fail run），让正常轮回绿、不再误报。
+    if: >-
+      needs.plan.outputs.matrix != '{"slice": [-1]}'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
