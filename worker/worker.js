@@ -8645,7 +8645,7 @@ async function handle(request) {
       if (verM === null) return json({ message: hintM() }, 503, CORS);
       let storeM = null;
       try { storeM = JSON.parse(await POOL.get('mt:cache') || 'null'); } catch (e) { storeM = null; }
-      const cacheKeyM = qM ? 'one:' + qM.toLowerCase() + ':' + daysM : 'list';
+      const cacheKeyM = qM ? 'one:' + qM.toLowerCase() + ':' + daysM : 'list:' + daysM;
       const mtMergeM = (baseM, dataM) => { for (const kM0 in dataM) baseM[kM0] = dataM[kM0]; return baseM; };
       if (!forceM && storeM && storeM.v === verM && storeM.items && storeM.items[cacheKeyM]) {
         const hitM = storeM.items[cacheKeyM];
@@ -8704,9 +8704,14 @@ async function handle(request) {
       if (rel2 === null) return json({ message: hintM() }, 503, CORS);
       const noticeRows2 = await d1All('SELECT pool,uid,state,kind,removed_at,sent_at,skip_reason FROM dead_notice LIMIT 1500', []);
       if (noticeRows2 === null) return json({ message: hintM() }, 503, CORS);
-      const rel2Map = {}, noticeMap = {};
+      // 2026-11-18 四期：清单模式也支持类型筛选 —— 每号带「窗口内出现过的全部邮件 kind」，
+      // 一趟 DISTINCT 小扫（mail_queue 全表现网 ~4000 行）即可，客户端本机过滤不耗配额。
+      const kindRows2 = await d1All('SELECT DISTINCT pool,uid,kind FROM mail_queue WHERE created_at>=? LIMIT 3000', [mqCutM]);
+      if (kindRows2 === null) return json({ message: hintM() }, 503, CORS);
+      const rel2Map = {}, noticeMap = {}, kindMap2 = {};
       for (const m of rel2) { const k = histKey(m.pool, m.uid); if (!rel2Map[k]) rel2Map[k] = m; }
       for (const n of noticeRows2) { const k = histKey(n.pool, n.uid); if (!noticeMap[k]) noticeMap[k] = n; }
+      for (const kk of kindRows2) { const k = histKey(kk.pool, kk.uid); (kindMap2[k] = kindMap2[k] || []).push(nrmM(kk.kind)); }
       const rows = relRows.map(a => {
         const k = histKey(a.pool, a.uid);
         const m = rel2Map[k] || null, n = noticeMap[k] || null;
@@ -8714,7 +8719,8 @@ async function handle(request) {
           agent: nrmM(a.agent), exp: nrmM(a.exp), added: nrmM(a.added), pub: Number(a.pub) || 0,
           relogin_at: nrmM(a.relogin_at), suspect_at: nrmM(a.suspect_at),
           rel2: m ? { state: nrmM(m.state), created_at: nrmM(m.created_at), sent_at: nrmM(m.sent_at), skip_reason: nrmM(m.skip_reason) } : null,
-          notice: n ? { state: nrmM(n.state), kind: nrmM(n.kind), removed_at: nrmM(n.removed_at), sent_at: nrmM(n.sent_at) } : null };
+          notice: n ? { state: nrmM(n.state), kind: nrmM(n.kind), removed_at: nrmM(n.removed_at), sent_at: nrmM(n.sent_at) } : null,
+          kinds: kindMap2[k] || [] };
       });
       return mtRespond({ rows: rows }, 'list');
     }
@@ -12400,7 +12406,26 @@ function mtRenderOne(o){
 }
 function mtRenderList(d){
   var rs=(d&&d.rows)||[];
-  if(!rs.length)return '<p style="color:#888">当前没有任何「已通知重登」或「待复核」的号 —— 失效邮件体系空转中。</p>';
+  // 2026-11-18 四期：清单模式也接类型/时间筛选（本机过滤）——按每号窗口内出现过的邮件 kind 匹配
+  var selK=($('mtKind')?$('mtKind').value:'')||'';
+  var daysN=($('mtDays')?parseInt($('mtDays').value,10):30)||30;
+  var cutD=new Date(Date.now()-daysN*86400000).toISOString().slice(0,10);
+  var totalAll=rs.length;
+  if(selK){
+    rs=rs.filter(function(r){
+      if(selK==='notice')return !!r.notice;
+      if(selK==='relogin2')return (r.kinds||[]).indexOf('relogin2')>=0||(r.relogin_at&&String(r.relogin_at).slice(0,10)>=cutD);
+      var ks=r.kinds||[];
+      for(var i=0;i<ks.length;i++){
+        var k=String(ks[i]);
+        if(selK==='exp'&&k.indexOf('exp')===0)return true;
+        if(selK==='song'&&/^(songfix|songchange|feenote|nomus|songok)/.test(k))return true;
+        if(k===selK)return true;
+      }
+      return false;
+    });
+  }
+  if(!rs.length)return '<p style="color:#888">'+(selK?'当前筛选条件下没有匹配的号（'+totalAll+' 个失效相关号里没有窗口内发过该类型邮件的）——把类型/时间范围放宽一点试试。':'当前没有任何「已通知重登」或「待复核」的号 —— 失效邮件体系空转中。')+'</p>';
   var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;position:sticky;top:0;border-bottom:1px solid #e6e8ec;text-align:left';
   var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
   var h='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px"><thead><tr>'
@@ -12428,7 +12453,7 @@ function mtRenderList(d){
       +'<td style="'+TD+'"><button class="mini" data-act="mtopen" data-uid="'+esc(r.uid)+'" style="padding:2px 10px;font-size:11px" title="跳到这个号的邮件明细（类型筛选/补发都在那里）">邮件</button></td>'
     +'</tr>';
   }
-  h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">共 '+rs.length+' 个失效相关号（已通知重登 + 待复核）。每日提醒=最新一封 relogin2 邮件；「未发」重登邮件的号说明判死邮件链路没走到它（还没被采集判死）。</p>';
+  h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">'+(selK?('筛选后 '+rs.length+' / 共 '+totalAll+' 个失效相关号（类型筛选只在本机过滤已拉回的数据，切换不耗配额）。'):'共 '+rs.length+' 个失效相关号（已通知重登 + 待复核）。')+'每日提醒=最新一封 relogin2 邮件；「未发」重登邮件的号说明判死邮件链路没走到它（还没被采集判死）。</p>';
   return h;
 }
 var MT_LAST=null;   // 最近一次查询结果（含 mode），筛选切换/补发后在本机重渲染，不重复读库
