@@ -2374,6 +2374,8 @@ async function renewDirectCore(refRaw, planRaw, agentRaw) {
 }
 
 async function addEntry(entry) {
+  const sourceCodes = ['manual_web', 'qr_cf', 'qr_home'];
+  if (!sourceCodes.includes(String(entry.source || ''))) entry.source = '';
   // 有效期默认 2 年（730 天），管理端可随时修改（exp=YYYY-MM-DD，forever=永久）
   if (!entry.exp) entry.exp = beijingDatePlus(730);
   // 2026-11-13：自登记本仓登记上限到共享 D1（kv_misc k='pool_cap:hz'，汇总见 poolCaps()）。
@@ -2536,6 +2538,8 @@ async function addEntry(entry) {
       } else {
         boughtDays = planDaysOf(entry.exp);                       // 新登记：本次套餐天数
       }
+      const knownSource = dup.find(d => d && String(d.source || '').trim());
+      if (knownSource) entry.source = String(knownSource.source);
       entry.__kind = kind;                                        // 给台账用，写库前删掉
 
       // 清掉「其它重复行」：同一个号可能同时按 uid / name 命中两条，
@@ -3058,7 +3062,7 @@ async function d1Upsert(e, opt) {
       'rb_from=CASE WHEN excluded.rb_from>0 THEN excluded.rb_from ELSE COALESCE(accounts.rb_from,0) END, ' +
       'rb_start=CASE WHEN excluded.rb_start<>\'\' THEN excluded.rb_start ELSE COALESCE(accounts.rb_start,\'\') END';
   return d1Run(
-    'INSERT INTO accounts (pool,uid,name,song,ck,added,exp,no_listen,email,updated_at,agent,plan,pub,note,rb,rb_from,rb_start) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ' +
+    'INSERT INTO accounts (pool,uid,name,song,ck,added,exp,no_listen,email,updated_at,agent,plan,pub,note,rb,rb_from,rb_start,source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ' +
     'ON CONFLICT(pool,uid) DO UPDATE SET name=excluded.name, song=excluded.song, ck=excluded.ck, ' +
     'added=excluded.added, exp=excluded.exp, no_listen=excluded.no_listen, email=excluded.email, ' +
     'updated_at=excluded.updated_at, pub=excluded.pub, ' +
@@ -3066,6 +3070,7 @@ async function d1Upsert(e, opt) {
     // KV 里没有这两列，无脑覆盖会把 505 个存量号的客服归属一次清空。
     'agent=CASE WHEN excluded.agent<>\'\' THEN excluded.agent ELSE accounts.agent END, ' +
     'plan=CASE WHEN excluded.plan<>\'\' THEN excluded.plan ELSE accounts.plan END, ' +
+    'source=CASE WHEN COALESCE(accounts.source,\'\')=\'\' AND excluded.source<>\'\' THEN excluded.source ELSE COALESCE(accounts.source,\'\') END, ' +
     // 2026-11-05：备注/补号标记（按上面的 clearable 决定是否允许写空）
     noteSet + ', ' + rbSet + ', ' +
     // 2026-11-04：号主重新登记（CK 真变了）→ 清掉「已通知重登」标记，下一轮自动回到听众环。
@@ -3078,7 +3083,7 @@ async function d1Upsert(e, opt) {
      // 有到期日的公益号」这个不变量 —— 否则某条路径漏改，第二天到期号会被当成普通号再算一遍。
      e.pub ? 'forever' : String(e.exp || ''), e.noListen ? 1 : 0, String(e.email || ''), new Date().toISOString(),
      String(e.agent || ''), String(e.plan || ''), e.pub ? 1 : 0,
-     String(e.note || ''), e.rb ? 1 : 0, Number(e.rbFrom) || 0, String(e.rbStart || '')]
+     String(e.note || ''), e.rb ? 1 : 0, Number(e.rbFrom) || 0, String(e.rbStart || ''), String(e.source || '')]
   );
 }
 // 2026-11-10：登记补偿重放（配 acct_fixups 表，建表见 tmp/d1_acct_fixups_1110.py）。
@@ -3302,7 +3307,7 @@ async function ledgerMarkRebind(pool, uid, name, on, rbFrom, rbStart, remark, ne
 // ====================================================================
 // 2026-11-05：加 note（备注，复用库里已有的 note 列）/ rb（补号标记）/ rb_from（关联原单）/
 // rb_start（原单登记日）。缺这几个的话控制台改完备注一刷新就变回空。
-const D1_COLS = 'uid,name,song,ck,added,exp,no_listen,email,agent,plan,pub,note,rb,rb_from,rb_start,relogin_at';
+const D1_COLS = 'uid,name,song,ck,added,exp,no_listen,email,agent,plan,pub,note,rb,rb_from,rb_start,relogin_at,source';
 
 // ---- 2026-11-08 省额度：全池读的排序从 SQL 挪到 JS ----
 // D1 的 rows_read 把 `USE TEMP B-TREE FOR ORDER BY` 的代价也算进「读行数」：
@@ -3340,8 +3345,8 @@ async function d1FindDup(uidKey, name) {
   // RELOGIN_TTL_DAYS（默认 7 天）超时清理，buildPlanFrom 会把它摘出听众环，**其实并不参与播放**。
   // 不查这一列，这种号会被 addEntry 判成「还在池里正常运行」→ 客户拿补登链接来重登被拒，
   // 且提示恰好说反（详见 addEntry 里 live/dead 分离处）。
-  if (uidKey) qs.push(d1All('SELECT uid,exp,pub,added,agent,plan,relogin_at FROM accounts WHERE pool=? AND uid=? LIMIT 1', [POOL_NAME, uidKey]));
-  if (nm) qs.push(d1All('SELECT uid,exp,pub,added,agent,plan,relogin_at FROM accounts WHERE pool=? AND name=? LIMIT 1', [POOL_NAME, nm]));
+  if (uidKey) qs.push(d1All('SELECT uid,exp,pub,added,agent,plan,relogin_at,source FROM accounts WHERE pool=? AND uid=? LIMIT 1', [POOL_NAME, uidKey]));
+  if (nm) qs.push(d1All('SELECT uid,exp,pub,added,agent,plan,relogin_at,source FROM accounts WHERE pool=? AND name=? LIMIT 1', [POOL_NAME, nm]));
   if (!qs.length) return [];
   const rs = await Promise.all(qs);
   const out = [];
@@ -3378,6 +3383,7 @@ function d1RowToEntry(r) {
     // 2026-10-27：客服标签 + 套餐档位。存量行 ALTER 时清一色刷成「徐」/空（空=未标注）。
     agent: String(r.agent || ''),
     plan: String(r.plan || ''),
+    source: String(r.source || ''),
   };
   // 2026-11-05：备注（D1 列名 note）+ 补号标记。空值不写进 entry，保持 KV 条目干净。
   if (r.note) e.note = String(r.note);
@@ -5801,7 +5807,7 @@ async function handle(request) {
         }
       }
       const ent = { ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: phone || ('qr:' + v.uid), uid: v.uid, email: email, phone: phone, grp: isG2 ? 2 : 1, exp: expQ.exp || (pl2 ? pl2.exp : undefined),
-        agent: normAgent(body.agent), plan: pl2 ? pl2.label : normAgent(body.plan).slice(0, 8) };
+        agent: normAgent(body.agent), plan: pl2 ? pl2.label : normAgent(body.plan).slice(0, 8), source: 'manual_web' };
       /* 2026-11-10：客服端也可以指定这一单是「续费」还是「补登」（主界面下拉框）。
          不传 / 传 auto → 保持原来的自动判定（号在池里=续费；号不在池但台账原单没到期=补登），
          老版本 EXE 不带这个字段，行为完全不变。
@@ -6286,7 +6292,7 @@ async function handle(request) {
         ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: name,
         uid: v.uid, email: email, phone: phone, grp: 1,
         exp: (pl1 && pl1.exp) ? pl1.exp : beijingDatePlus(days1),
-        agent: agent1, plan: pl1 ? pl1.label : String(row.plan || '').slice(0, 8),
+        agent: agent1, plan: pl1 ? pl1.label : String(row.plan || '').slice(0, 8), source: 'qr_cf',
       };
       /* 2026-11-10：链接上标了补登/续费 → 强制按那个类型走。
          这样客户换手机号、换网易号都不影响判定 —— 类型在发链接时就定了。 */
@@ -10057,7 +10063,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     padding-top:7px;margin-top:8px;border-top:1px solid #f2f4f6}
   .twrap td:nth-child(20) button{flex:0 0 auto;min-width:64px;padding:7px 0;font-size:11.5px;text-align:center;
     border-radius:8px;background:#fff;border:1px solid #dde3ea;color:#33506e;font-weight:600}
-  .twrap td:nth-child(20) .infoBtn{display:inline-block;flex:0 0 36%;background:#255ea6;color:#fff;border-color:#255ea6}
+  .twrap td:nth-child(20) .infoBtn{display:inline-block;flex:0 0 auto;background:#255ea6;color:#fff;border-color:#255ea6}
   /* 19:05 用户简化需求：底部 删号记录/对照表/数据口径 三块手机端整体隐藏（要查详情走卡片「详情」弹窗） */
   #deadBox,#legendBox,#kjWrap{display:none}
   /* 采集时间改跟在客服名字后面（今日650格下不再显示） */
@@ -11077,7 +11083,7 @@ function render(){
       // 2026-11-16：只读口令放宽 —— 给「改邮箱/歌」按钮，openEdit 里只放开邮箱和歌曲链接两栏
       : '<button class="mini" style="padding:4px 10px;font-size:12px;background:#eef4fb;color:#255ea6;border-color:#c9d8ee" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'" title="只读口令只能改通知邮箱和歌曲链接">改邮箱/歌</button>';
     // 详情仅对满权限角色开放，并放在编辑按钮右侧；只读角色不渲染详情入口。
-    if(ROLE==='full')opCell+='<button class="mini infoBtn" data-info="'+i+'" title="查看该号详情">详情</button>';
+    if(ROLE==='full')opCell+='<button class="mini infoBtn" style="padding:4px 10px;font-size:12px" data-info="'+i+'" title="查看该号详情">详情</button>';
     // 2026-11-05：备注列 + 补号标签。
     // 「补」的意义在结账时才体现：这行是客户掉线后免费补的号，钱不算、客服也不提成。
     var noteCell='';
@@ -11382,6 +11388,7 @@ function openInfo(i){
   var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
   var ai=r.ai||artistInfo(e);
   var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
+  var src=String(e.source||'').trim()||'未记录';
   /* 2026-11-17（用户拍板方案 A）：有效期永远单独说清楚（加剩余天数）；
      「套餐」改名「最近购买」—— plan 字段只记最后一单（月度结算/提成/筛选的统计口径），
      续费累加都记在有效期上，两者独立，不解释就会被当成「显示错了」。 */
@@ -11402,6 +11409,7 @@ function openInfo(i){
     +kv('客服',e.agent?esc(e.agent):'—')
     +kv('邮箱',e.email?esc(e.email):'未绑')
     +kv('入池',esc(String(e.added||'').slice(0,10)))
+    +kv('登记来源',esc(src))
     +kv('有效期',_expTxt)
     +kv('最近购买',e.plan?(esc(e.plan)+' <span style="color:#888;font-weight:400;font-size:11px">只记最近一单（续费会覆盖）；总有效期看上面「有效期」</span>'):'未标注')
     +'</div>'
@@ -12398,7 +12406,8 @@ syncLayout();
   // 点「刷新」按钮仍是强制回源（loadData(true)），登记完点一下就能看到最新名单。
   if(s){TOKEN=s.t;applyRole(s.role);$('loginBox').hidden=true;$('mainBox').hidden=false;loadData('auto');}
 })();
-</script></body></html>`;
+</script></body></html>
+`;
 
 // 2026-10-22：D1 绑定只支持 ES Module 格式，故入口从 addEventListener 改为
 // export default { fetch }。既有代码全部按 service-worker 时代的「绑定即全局变量」

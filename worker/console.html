@@ -95,10 +95,10 @@ body:has(.modal:not([hidden])){overflow:hidden}
 .deadbox{margin:10px 0 0;font-size:12px;color:#555}
 .deadbox summary{cursor:pointer;color:#3b6d11;padding:4px 0}
 .deadbox table{margin-top:6px;border:1px solid #eee;border-radius:8px}
-/* ===== 2026-11-15 方案④手机整页重做：桌面端只新增下面这几个「隐藏/不可达」件，渲染零变化 =====
-   infoBtn（卡片上的详情按钮）只在 <=860px 显示；筛选面板/工具抽屉/遮罩/工具按钮是手机专属容器；
+/* ===== 2026-11-15 方案④手机整页重做：桌面端只新增下面这几个手机专属容器，渲染零变化 =====
+   infoBtn（详情按钮）由满权限角色渲染，在桌面和手机端均可见；筛选面板/工具抽屉/遮罩/工具按钮是手机专属容器；
    #infoBody 的 kv 样式放基础层，保证任何环境打开详情弹窗都可读。 */
-.infoBtn{display:none}
+.infoBtn{display:inline-block}
 .agAt{display:none}  /* 2026-11-15：采集时间跟在客服后面，仅手机端显示（今日650格下方不再重复） */
 .mdrawer,.mmask,.mpanel,.mOnly{display:none}
 #infoBody .dsec{background:#f6f8fb;border-radius:10px;padding:9px 12px;margin-bottom:8px}
@@ -252,7 +252,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     padding-top:7px;margin-top:8px;border-top:1px solid #f2f4f6}
   .twrap td:nth-child(20) button{flex:0 0 auto;min-width:64px;padding:7px 0;font-size:11.5px;text-align:center;
     border-radius:8px;background:#fff;border:1px solid #dde3ea;color:#33506e;font-weight:600}
-  .twrap td:nth-child(20) .infoBtn{display:inline-block;flex:0 0 36%;background:#255ea6;color:#fff;border-color:#255ea6}
+  .twrap td:nth-child(20) .infoBtn{display:inline-block;flex:0 0 auto;background:#255ea6;color:#fff;border-color:#255ea6}
   /* 19:05 用户简化需求：底部 删号记录/对照表/数据口径 三块手机端整体隐藏（要查详情走卡片「详情」弹窗） */
   #deadBox,#legendBox,#kjWrap{display:none}
   /* 采集时间改跟在客服名字后面（今日650格下不再显示） */
@@ -529,7 +529,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
   <div class="row2" data-page-node-id="hMTvrMqibZ3wv4Yy3fsCna"><button class="gray" id="rcClose" data-page-node-id="L64GYRerH2zswYgizFwC1K">关闭</button></div>
   <div class="msg" id="rcm" data-page-node-id="qWqgk28EsFSRTjV4zMZLJI"></div>
 </div></div>
-<!-- ===== 2026-11-15 方案④：账号详情弹窗（手机卡片上的「详情」按钮；桌面 infoBtn 隐藏不可达）=====
+<!-- ===== 2026-11-15 方案④：账号详情弹窗（满权限账号表的「详情」按钮）=====
      只读展示该行全部字段（数据源 render 时的 window.ROWS[i]），满权限时给「编辑」按钮走原 openEdit。 -->
 <div class="modal" id="infoModal" hidden data-page-node-id="6HpiU5UmfrPZ8lUIWiN2Kj"><div class="mbox" id="infoBox" data-page-node-id="JPeAYz32g1x6exQUKltOJi">
   <h3 id="infoTitle" data-page-node-id="nl5knxNSilQ0qJcXVORCgb">账号详情</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="infoSub" data-page-node-id="wJUrtlrTXbtiWldkYpBkLW"></p>
@@ -1271,9 +1271,8 @@ function render(){
       ? '<button class="mini" style="padding:4px 10px;font-size:12px" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'">编辑</button>'
       // 2026-11-16：只读口令放宽 —— 给「改邮箱/歌」按钮，openEdit 里只放开邮箱和歌曲链接两栏
       : '<button class="mini" style="padding:4px 10px;font-size:12px;background:#eef4fb;color:#255ea6;border-color:#c9d8ee" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'" title="只读口令只能改通知邮箱和歌曲链接">改邮箱/歌</button>';
-    // 2026-11-15 方案④：卡片加「详情」按钮（手机端显示；桌面 .infoBtn display:none，渲染零变化）。
-    // 只读弹窗展示本行全部字段，data-info=行号直接索引 window.ROWS；编辑仍走原 openEdit。
-    opCell='<button class="mini infoBtn" data-info="'+i+'" title="查看该号全部字段">详情</button>'+opCell;
+    // 详情仅对满权限角色开放，并放在编辑按钮右侧；只读角色不渲染详情入口。
+    if(ROLE==='full')opCell+='<button class="mini infoBtn" style="padding:4px 10px;font-size:12px" data-info="'+i+'" title="查看该号详情">详情</button>';
     // 2026-11-05：备注列 + 补号标签。
     // 「补」的意义在结账时才体现：这行是客户掉线后免费补的号，钱不算、客服也不提成。
     var noteCell='';
@@ -1578,6 +1577,7 @@ function openInfo(i){
   var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
   var ai=r.ai||artistInfo(e);
   var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
+  var src=String(e.source||'').trim()||'未记录';
   /* 2026-11-17（用户拍板方案 A）：有效期永远单独说清楚（加剩余天数）；
      「套餐」改名「最近购买」—— plan 字段只记最后一单（月度结算/提成/筛选的统计口径），
      续费累加都记在有效期上，两者独立，不解释就会被当成「显示错了」。 */
@@ -1598,6 +1598,7 @@ function openInfo(i){
     +kv('客服',e.agent?esc(e.agent):'—')
     +kv('邮箱',e.email?esc(e.email):'未绑')
     +kv('入池',esc(String(e.added||'').slice(0,10)))
+    +kv('登记来源',esc(src))
     +kv('有效期',_expTxt)
     +kv('最近购买',e.plan?(esc(e.plan)+' <span style="color:#888;font-weight:400;font-size:11px">只记最近一单（续费会覆盖）；总有效期看上面「有效期」</span>'):'未标注')
     +'</div>'
