@@ -8807,8 +8807,8 @@ async function handle(request) {
       if (verN === null) return json({ message: hintN() }, 503, CORS);
       let storeN = null;
       try { storeN = JSON.parse(await POOL.get('mt:cache') || 'null'); } catch (e) { storeN = null; }
-      if (!forceN && storeN && storeN.v === verN && storeN.items && storeN.items['anom']) {
-        const hitN = storeN.items['anom'];
+      if (!forceN && storeN && storeN.v === verN && storeN.items && storeN.items['anom2']) {
+        const hitN = storeN.items['anom2'];
         return json(Object.assign({ ok: true, mode: 'anom', cached: true, gen: nrmN(hitN.ts) }, hitN.data), 200, CORS);
       }
       // 基准日：今天的快照已落地用今天，否则用昨天
@@ -8876,7 +8876,7 @@ async function handle(request) {
         n: { snap: snapD.length, noEffect: noEffN.length, flatRpc: flatN.length, missing: missN.length, accounts: accN.length } };
       try {
         const curN = (storeN && storeN.v === verN && storeN.items) ? storeN : { v: verN, items: {} };
-        curN.items['anom'] = { ts: bjStamp(), data: { dayD: dayD, dayP: dayP, noEffect: noEffN, flatRpc: flatN, missing: missN.slice(0, 200), n: dataN.n } };
+        curN.items['anom2'] = { ts: bjStamp(), data: { dayD: dayD, dayP: dayP, noEffect: noEffN, flatRpc: flatN, missing: missN.slice(0, 200), n: dataN.n } };
         const ksN = Object.keys(curN.items);
         if (ksN.length > 20) {
           ksN.sort((x, y) => (curN.items[x].ts || '') < (curN.items[y].ts || '') ? -1 : 1);
