@@ -8612,6 +8612,10 @@ async function handle(request) {
       const hintM = () => '数据库读取失败：' + d1ErrHint() + '（不是查无记录，是这次没读出来，请稍后重试）';
       const qM = String(bodyM.q == null ? '' : bodyM.q).trim().replace(/[^0-9A-Za-z_:@.\-]/g, '');
       const forceM = bodyM.force === true;
+      // 2026-11-18 三期：单号邮件查询窗口（天），默认 30，可选 7/30/90/180 —— 服务端过滤，
+      // 默认只拉 30 天，切到更大窗口才多读（用户要求：省额度）。缓存键按窗口分开。
+      const daysM = Math.min(365, Math.max(1, parseInt(bodyM.days, 10) || 30));
+      const mqCutM = bjStamp(Date.now() - daysM * 86400000).slice(0, 10) + ' 00:00:00';
       /* 2026-11-17 二期：版本指纹缓存 —— 用户要求「反复刷新不反复扣额度，有新增内容才重新读库」。
          指纹 = 4 条小聚合（mail_queue / dead_notice / dead_log / accounts 各一趟小表扫，
          现网规模合计 ~4000 行读）拼成 JSON：任何入队 / 发信 / 状态流转 / 删号 / 重登标记 /
@@ -8627,12 +8631,21 @@ async function handle(request) {
         if (c1 === null) return null;
         const d1r = await d1All("SELECT COUNT(*) n, MAX(COALESCE(relogin_at,'')) r, MAX(COALESCE(suspect_at,'')) su, MAX(COALESCE(exp,'')) e, MAX(COALESCE(plan,'')) p FROM accounts", []);
         if (d1r === null) return null;
-        return JSON.stringify([a1[0], b1[0], c1[0], d1r[0]]);
+        // 2026-11-18 三期：快照指纹（今天/昨天两个日分区的 COUNT+MAX(at)）——
+        // 异常检查（/api/console/anomalies）的缓存失效依赖它；快照每天 09:30 落一次，
+        // 落地时全族缓存自动失效重建，代价可以接受。
+        const dayT1 = bjStamp().slice(0, 10);
+        const dayY1 = bjStamp(Date.now() - 86400000).slice(0, 10);
+        const e1 = await d1All('SELECT COUNT(*) n, MAX(at) a FROM snapshots WHERE day=?', [dayT1]);
+        if (e1 === null) return null;
+        const f1 = await d1All('SELECT COUNT(*) n, MAX(at) a FROM snapshots WHERE day=?', [dayY1]);
+        if (f1 === null) return null;
+        return JSON.stringify([a1[0], b1[0], c1[0], d1r[0], e1[0], f1[0]]);
       })();
       if (verM === null) return json({ message: hintM() }, 503, CORS);
       let storeM = null;
       try { storeM = JSON.parse(await POOL.get('mt:cache') || 'null'); } catch (e) { storeM = null; }
-      const cacheKeyM = qM ? 'one:' + qM.toLowerCase() : 'list';
+      const cacheKeyM = qM ? 'one:' + qM.toLowerCase() + ':' + daysM : 'list';
       const mtMergeM = (baseM, dataM) => { for (const kM0 in dataM) baseM[kM0] = dataM[kM0]; return baseM; };
       if (!forceM && storeM && storeM.v === verM && storeM.items && storeM.items[cacheKeyM]) {
         const hitM = storeM.items[cacheKeyM];
@@ -8666,7 +8679,7 @@ async function handle(request) {
         const accs = [];
         for (const a of accRows) {
           const mq = await d1All('SELECT pool,uid,kind,ref,state,created_at,claimed_at,sent_at,skip_reason,attempts FROM mail_queue ' +
-            'WHERE pool=? AND uid=? ORDER BY created_at DESC LIMIT 200', [nrmM(a.pool), nrmM(a.uid)]);
+            'WHERE pool=? AND uid=? AND created_at>=? ORDER BY created_at DESC LIMIT 200', [nrmM(a.pool), nrmM(a.uid), mqCutM]);
           if (mq === null) return json({ message: hintM() }, 503, CORS);
           accs.push({
             pool: nrmM(a.pool), uid: nrmM(a.uid), name: nrmM(a.name), email: nrmM(a.email),
@@ -8751,6 +8764,123 @@ async function handle(request) {
       }
       return json({ ok: true, action: actR,
         message: actR === 'resent' ? '已重置为排队中，下一班发信（约 30 分钟内）会重发这封邮件' : '已入队，下一班发信（约 30 分钟内）发出' }, 200, CORS);
+    }
+    /* ---- 2026-11-18：播放异常检查 /api/console/anomalies（只读，满权限）----
+       用户口径（2026-11-18 拍板，替代过去「只盯登录死活」的静默盲区）：今天播了，
+       明天就得有播放量 —— 正常号全是这样。三类异常，全部基于最近两个快照日
+       （基准日 D=今天的快照，还没采就自动回退昨天）：
+         A 播放无效嫌疑：D 日有快照但 mission_code_recently_play_effect_count_v2 = 0。
+           基线（11-16 全池实测）：92% 的号 effect>0，=0 只占 6.8% —— 不是结算滞后的常态。
+           结算滞后的正常形态是 rate 平但 rpc30 还在涨（snapshot.yml 11-15 注释）。
+         B 播放量停滞：D 日 rpc30 与 D-1 完全持平。基线：涨 84.5% / 跌 14%（30 日滑窗自然
+           滚出，不算异常）/ 持平仅 1.4% —— 持平才可疑。
+         C 缺采：D 日无快照、账号在池（入池≤D）、无 relogin_at/suspect_at 标记 ——
+           夜轮和快照都没碰到它，就是当天真的漏了。
+       连续天数：拉近 7 天快照的 effect，给 A 类算连续命中天数（连续 ≥2 天=重点嫌疑）。
+       只读展示，不自动发邮件：A/B 的号 CK 多半还活着（能被采到），处理动作留给人工；
+       C 里真死的号下一轮 run.py 会走既有判死+直邮链路（补漏轮 9:30/12:00 会更快碰到它）。 ---- */
+    if (url.pathname === '/api/console/anomalies' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let bodyN;
+      try { bodyN = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(bodyN))) {
+        const whoN = await consoleRole(bodyN);
+        return json({ message: whoN === 'ro' ? '当前是只读口令：异常检查只对群主开放' : '账号或密码错误' }, 403, CORS);
+      }
+      if (!d1ok()) return json({ message: '数据库读取失败：' + d1ErrHint() + '（这次没读出来，请稍后重试）' }, 503, CORS);
+      const nrmN = s => String(s == null ? '' : s);
+      const hintN = () => '数据库读取失败：' + d1ErrHint() + '（不是查无记录，是这次没读出来，请稍后重试）';
+      const forceN = bodyN.force === true;
+      // 指纹：accounts + 今天/昨天两个快照日分区（与 mailtrace 的 mtVer 后三项一致，
+      // 这里独立算，只取异常检查需要的 3 条小聚合，~3.6k 行读）
+      const verN = await (async () => {
+        const d2 = await d1All("SELECT COUNT(*) n, MAX(COALESCE(relogin_at,'')) r, MAX(COALESCE(suspect_at,'')) su FROM accounts", []);
+        if (d2 === null) return null;
+        const dayT2 = bjStamp().slice(0, 10);
+        const dayY2 = bjStamp(Date.now() - 86400000).slice(0, 10);
+        const e2 = await d1All('SELECT COUNT(*) n, MAX(at) a FROM snapshots WHERE day=?', [dayT2]);
+        if (e2 === null) return null;
+        const f2 = await d1All('SELECT COUNT(*) n, MAX(at) a FROM snapshots WHERE day=?', [dayY2]);
+        if (f2 === null) return null;
+        return JSON.stringify([d2[0], e2[0], f2[0]]);
+      })();
+      if (verN === null) return json({ message: hintN() }, 503, CORS);
+      let storeN = null;
+      try { storeN = JSON.parse(await POOL.get('mt:cache') || 'null'); } catch (e) { storeN = null; }
+      if (!forceN && storeN && storeN.v === verN && storeN.items && storeN.items['anom']) {
+        const hitN = storeN.items['anom'];
+        return json(Object.assign({ ok: true, mode: 'anom', cached: true, gen: nrmN(hitN.ts) }, hitN.data), 200, CORS);
+      }
+      // 基准日：今天的快照已落地用今天，否则用昨天
+      const dayTN = bjStamp().slice(0, 10);
+      const tN = await d1All('SELECT COUNT(*) n FROM snapshots WHERE pool=? AND day=?', ['hz', dayTN]);
+      if (tN === null) return json({ message: hintN() }, 503, CORS);
+      const dayD = (Number(tN[0].n) > 0) ? dayTN : bjStamp(Date.now() - 86400000).slice(0, 10);
+      const dayP = bjStamp(Date.parse(dayD + 'T00:00:00+08:00') - 86400000).slice(0, 10);
+      const day7 = bjStamp(Date.parse(dayD + 'T00:00:00+08:00') - 6 * 86400000).slice(0, 10);
+      const snapD = await d1All('SELECT uid,name,rate,rpc30,missions FROM snapshots WHERE pool=? AND day=?', ['hz', dayD]);
+      if (snapD === null) return json({ message: hintN() }, 503, CORS);
+      const snapP = await d1All('SELECT uid,rpc30 FROM snapshots WHERE pool=? AND day=?', ['hz', dayP]);
+      if (snapP === null) return json({ message: hintN() }, 503, CORS);
+      const weekN = await d1All('SELECT uid,day,missions FROM snapshots WHERE pool=? AND day>=?', ['hz', day7]);
+      if (weekN === null) return json({ message: hintN() }, 503, CORS);
+      const accN = await d1All("SELECT uid,name,agent,added,exp,relogin_at,suspect_at FROM accounts WHERE pool='hz'", []);
+      if (accN === null) return json({ message: hintN() }, 503, CORS);
+      const pMapN = {};
+      for (const p of snapP) pMapN[nrmN(p.uid)] = (p.rpc30 == null ? null : Number(p.rpc30));
+      const effWeekN = {};
+      for (const w of weekN) {
+        let m2 = null;
+        try { m2 = JSON.parse(nrmN(w.missions) || '{}'); } catch (e) { m2 = {}; }
+        const v2 = (m2 && m2.mission_code_recently_play_effect_count_v2 != null) ? Number(m2.mission_code_recently_play_effect_count_v2) : null;
+        (effWeekN[nrmN(w.uid)] = effWeekN[nrmN(w.uid)] || []).push({ day: nrmN(w.day), v: v2 });
+      }
+      const streakOfN = uid => {   // 从基准日往回数「effect=0」连续天数（无快照=断）
+        const arr = (effWeekN[uid] || []).sort((x, y) => x.day < y.day ? 1 : -1);
+        let n2 = 0;
+        for (const it of arr) { if (it.v === 0) n2++; else break; }
+        return n2;
+      };
+      const rowN = (s, kind) => {
+        const uid = nrmN(s.uid);
+        const rP = pMapN[uid];
+        const dR = (s.rpc30 != null && rP != null) ? Number(s.rpc30) - rP : null;
+        return { uid: uid, name: nrmN(s.name), kind: kind, effect: (s.missions && JSON.parse(nrmN(s.missions) || '{}').mission_code_recently_play_effect_count_v2 != null)
+            ? Number(JSON.parse(nrmN(s.missions) || '{}').mission_code_recently_play_effect_count_v2) : null,
+          rpc30: (s.rpc30 == null ? null : Number(s.rpc30)), rpcDelta: dR, streak: streakOfN(uid) };
+      };
+      const noEffN = [], flatN = [];
+      const seenN = {};
+      for (const s of snapD) {
+        seenN[nrmN(s.uid)] = 1;
+        let m3 = null;
+        try { m3 = JSON.parse(nrmN(s.missions) || '{}'); } catch (e) { m3 = {}; }
+        const eff = (m3 && m3.mission_code_recently_play_effect_count_v2 != null) ? Number(m3.mission_code_recently_play_effect_count_v2) : null;
+        const rP = pMapN[nrmN(s.uid)];
+        const dR = (s.rpc30 != null && rP != null) ? Number(s.rpc30) - rP : null;
+        if (eff === 0) noEffN.push(rowN(s, 'A'));
+        else if (dR === 0) flatN.push(rowN(s, 'B'));
+      }
+      const missN = [];
+      for (const a of accN) {
+        if (nrmN(a.relogin_at) || nrmN(a.suspect_at)) continue;
+        if (nrmN(a.added).slice(0, 10) > dayD) continue;   // 基准日之后入池的不算缺采
+        if (!seenN[nrmN(a.uid)]) missN.push({ uid: nrmN(a.uid), name: nrmN(a.name), agent: nrmN(a.agent), added: nrmN(a.added), exp: nrmN(a.exp) });
+      }
+      const dataN = { ok: true, mode: 'anom', dayD: dayD, dayP: dayP,
+        noEffect: noEffN, flatRpc: flatN, missing: missN.slice(0, 200),
+        n: { snap: snapD.length, noEffect: noEffN.length, flatRpc: flatN.length, missing: missN.length, accounts: accN.length } };
+      try {
+        const curN = (storeN && storeN.v === verN && storeN.items) ? storeN : { v: verN, items: {} };
+        curN.items['anom'] = { ts: bjStamp(), data: { dayD: dayD, dayP: dayP, noEffect: noEffN, flatRpc: flatN, missing: missN.slice(0, 200), n: dataN.n } };
+        const ksN = Object.keys(curN.items);
+        if (ksN.length > 20) {
+          ksN.sort((x, y) => (curN.items[x].ts || '') < (curN.items[y].ts || '') ? -1 : 1);
+          for (const kN of ksN.slice(0, ksN.length - 20)) delete curN.items[kN];
+        }
+        await POOL.put('mt:cache', JSON.stringify(curN));
+      } catch (e) {}
+      return json(Object.assign({ ok: true, mode: 'anom', cached: false }, dataN), 200, CORS);
     }
     /* ---- 2026-11-17：CK 实时验证 /api/console/cktest（只读）----
        回答「换绑 / 改 CK 之后，到底生效没」：拿号池里当前存的这条 CK 实时调网易
@@ -10603,26 +10733,27 @@ body:has(.modal:not([hidden])){overflow:hidden}
 <!-- ===== 2026-11-17：失效号邮件提醒查询（实时读 D1，满权限专属） ===== -->
 <div class="modal" id="mtModal" hidden><div class="mbox" style="width:1040px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
   <h3>失效号邮件提醒查询（实时 + 缓存）</h3>
-  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），返回这个号近 180 天内<b>全部类型</b>邮件 —— 重登邮件（relogin_at）、删号通知、每日重登提醒、登记、到期提醒、换歌引导……可用下方「类型/时间」筛选（筛选在本机做，不耗配额）；每封队列邮件后面有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」。<br><b>失效号清单</b>：列出全部「已通知重登」+「待复核」的号 + 每人最新一封每日提醒状态。注意：清单里没出现的号 = 系统还没判它失效（比如只显示「采集缺失」的号还没走到判死那步，所以还没发过邮件）。</p>
-  <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
-    <div style="flex:1;min-width:220px"><label style="margin-top:0">搜索（UID / 手机号片段，可留空）</label><input id="mtQ" placeholder="如 13077105665，留空则点右侧查失效号清单" style="width:100%"></div>
-    <div style="min-width:170px"><label style="margin-top:0">类型筛选</label><select id="mtKind" style="width:100%">
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），默认返回近 <b>30 天</b>全部类型邮件（切大时间范围才多读，省配额），类型筛选在本机过滤不耗配额；每封队列邮件后有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」。<br><b>失效号清单</b>：列出全部「已通知重登」+「待复核」的号，每行可点「邮件」直达该号明细。<br><b>异常检查</b>：按 2026-11-18 拍板口径「今天播了明天就得有播放量」，列三类异常 —— 播放无效（生效数=0）/ 播放量停滞（近30日播放持平）/ 缺采（当天没采到且无标记）。</p>
+  <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
+    <div style="flex:1;min-width:220px"><label style="margin-top:0">搜索（UID / 手机号片段，可留空）</label><input id="mtQ" placeholder="如 13077105665" style="width:100%"></div>
+    <button class="mini" id="mtGo" style="margin-top:0;padding:9px 14px">查单号</button>
+    <button class="mini" id="mtList" style="margin-top:0;padding:9px 14px">失效号清单</button>
+    <button class="mini" id="mtAnom" style="margin-top:0;padding:9px 14px" title="按「今天播了明天就得有播放量」口径查三类异常：播放无效 / 播放量停滞 / 缺采（2026-11-18 拍板口径）">异常检查</button>
+    <button class="mini gray" id="mtForce" style="margin-top:0;padding:9px 14px" title="忽略缓存，强制重读 D1">强制刷新</button>
+    <div style="min-width:118px"><label style="margin-top:0">类型筛选</label><select id="mtKind" style="width:100%">
       <option value="">全部类型</option>
-      <option value="relogin2">重登提醒 (relogin2)</option>
-      <option value="reg">登记成功 (reg)</option>
-      <option value="exp">到期提醒 (exp*)</option>
-      <option value="song">换歌类 (songfix*/songchange/feenote/nomus/songok)</option>
+      <option value="relogin2">重登提醒</option>
+      <option value="reg">登记成功</option>
+      <option value="exp">到期提醒</option>
+      <option value="song">换歌类</option>
       <option value="notice">删号通知</option>
     </select></div>
-    <div style="min-width:110px"><label style="margin-top:0">时间范围</label><select id="mtDays" style="width:100%">
+    <div style="min-width:100px"><label style="margin-top:0">时间范围</label><select id="mtDays" style="width:100%">
       <option value="30">近 30 天</option>
       <option value="7">近 7 天</option>
       <option value="90">近 90 天</option>
       <option value="180">近 180 天</option>
     </select></div>
-    <button class="mini" id="mtGo" style="margin-top:0;padding:9px 16px">查单号</button>
-    <button class="mini" id="mtList" style="margin-top:0;padding:9px 16px">失效号清单</button>
-    <button class="mini gray" id="mtForce" style="margin-top:0;padding:9px 16px" title="忽略缓存，强制重读 D1">强制刷新</button>
   </div>
   <div id="mtBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto"></div>
   <div class="row2"><button class="gray" id="mtClose">关闭</button></div>
@@ -12272,7 +12403,7 @@ function mtRenderList(d){
     +'<th style="'+TH+'">群</th><th style="'+TH+'">账号</th><th style="'+TH+'">UID</th><th style="'+TH+'">邮箱</th>'
     +'<th style="'+TH+'" title="重登邮件已发时间（run.py 直邮成功后写入 relogin_at）">重登邮件</th>'
     +'<th style="'+TH+'" title="每天一封的 relogin2 提醒，取最新一条">每日提醒</th>'
-    +'<th style="'+TH+'" title="手动删号通知状态">删号通知</th><th style="'+TH+'">待复核</th><th style="'+TH+'">到期</th></tr></thead><tbody>';
+    +'<th style="'+TH+'" title="手动删号通知状态">删号通知</th><th style="'+TH+'">待复核</th><th style="'+TH+'">到期</th><th style="'+TH+'">邮件</th></tr></thead><tbody>';
   for(var i=0;i<rs.length;i++){var r=rs[i];
     var rel2=r.rel2,nt=r.notice;
     var rel2Txt='—';
@@ -12290,6 +12421,7 @@ function mtRenderList(d){
       +'<td style="'+TD+'">'+(nt?(mtMailState(nt.state)+(nt.sent_at?(' '+mtTime(nt.sent_at)):'')):'—')+'</td>'
       +'<td style="'+TD+'">'+(r.suspect_at?esc(String(r.suspect_at).slice(5,16)):'—')+'</td>'
       +'<td style="'+TD+'">'+esc(r.exp||'—')+'</td>'
+      +'<td style="'+TD+'"><button class="mini" data-act="mtopen" data-uid="'+esc(r.uid)+'" style="padding:2px 10px;font-size:11px" title="跳到这个号的邮件明细（类型筛选/补发都在那里）">邮件</button></td>'
     +'</tr>';
   }
   h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">共 '+rs.length+' 个失效相关号（已通知重登 + 待复核）。每日提醒=最新一封 relogin2 邮件；「未发」重登邮件的号说明判死邮件链路没走到它（还没被采集判死）。</p>';
@@ -12298,34 +12430,85 @@ function mtRenderList(d){
 var MT_LAST=null;   // 最近一次查询结果（含 mode），筛选切换/补发后在本机重渲染，不重复读库
 function mtApplyFilter(){
   if(!MT_LAST)return;
+  if(MT_LAST.mode==='anom'){$('mtBody').innerHTML=mtRenderAnom(MT_LAST.data);return;}
   $('mtBody').innerHTML=MT_LAST.mode==='one'?mtRenderOne(MT_LAST.data):mtRenderList(MT_LAST.data);
+}
+// 2026-11-18 三期：异常检查渲染（口径 = 用户拍板「今天播了明天就得有播放量」）
+function mtRenderAnom(d){
+  if(!d)return '<p style="color:#888">没有数据。</p>';
+  var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;border-bottom:1px solid #e6e8ec;text-align:left';
+  var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;vertical-align:top;white-space:nowrap';
+  var nn=(d.n||{});
+  var h='<p style="margin:0 0 8px;font-size:12.5px">基准日 <b>'+esc(d.dayD)+'</b>（对比 '+esc(d.dayP)+'）· 当日快照 '+esc(String(nn.snap||0))+' 个 · 在池 '+esc(String(nn.accounts||0))+' 个'
+    +' ｜ <b style="color:#a32d2d">播放无效 '+esc(String(nn.noEffect||0))+'</b> ｜ <b style="color:#8a6d1a">播放量停滞 '+esc(String(nn.flatRpc||0))+'</b> ｜ <b>缺采 '+esc(String(nn.missing||0))+'</b></p>'
+    +'<p style="margin:0 0 10px;font-size:12px;color:#777;line-height:1.7">口径（2026-11-18 拍板）：今天播了，明天就得有播放量。<b>播放无效</b>＝播了但「生效数」为 0（全池常态 92% 的号有生效，=0 只占 6.8%）；<b>播放量停滞</b>＝近30日播放与前一天完全持平（常态 84% 在涨、14% 自然回落、持平仅 1.4%，持平才可疑）；<b>缺采</b>＝当天没被采到且无失效标记。「连续」＝连续 N 天生效数为 0，≥2 天为重点嫌疑。</p>';
+  function mtSec(title,color,rows,cols){
+    var s='<h4 style="margin:12px 0 6px;font-size:13px;color:'+color+'">'+title+'（'+rows.length+'）</h4>';
+    if(!rows.length)return s+'<p style="color:#888;font-size:12.5px;margin:0 0 10px">无 ✓</p>';
+    s+='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px;margin:0 0 10px"><thead><tr>';
+    for(var i=0;i<cols.length;i++)s+='<th style="'+TH+'">'+cols[i][0]+'</th>';
+    s+='</tr></thead><tbody>';
+    for(var j=0;j<rows.length&&j<100;j++){
+      s+='<tr'+(j%2?' style="background:#fafbfc"':'')+'>';
+      for(var k=0;k<cols.length;k++)s+='<td style="'+TD+'">'+cols[k][1](rows[j])+'</td>';
+      s+='</tr>';
+    }
+    s+='</tbody></table>';
+    if(rows.length>100)s+='<p style="font-size:11px;color:#999;margin:0 0 10px">只显示前 100 个（共 '+rows.length+'，缺采清单完整数据以接口为准）。</p>';
+    return s;
+  }
+  function mtAcc(r){return esc(String(r.name||'—').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'));}
+  function mtUid(r){return '<span class="num">'+esc(r.uid)+'</span>';}
+  function mtRpc(r){return String(r.rpc30==null?'—':r.rpc30)+(r.rpcDelta==null?'':'（'+(r.rpcDelta>0?'+':'')+r.rpcDelta+'）');}
+  function mtStreak(r){return r.streak>=2?'<b style="color:#a32d2d">'+r.streak+' 天</b>':String(r.streak)+' 天';}
+  h+=mtSec('播放无效（播了但生效数=0）','#a32d2d',d.noEffect||[],[
+    ['账号',mtAcc],['UID',mtUid],['生效数',function(r){return String(r.effect==null?'—':r.effect);}],
+    ['近30日播放',mtRpc],['连续',mtStreak]
+  ]);
+  h+=mtSec('播放量停滞（近30日播放与前一天持平）','#8a6d1a',d.flatRpc||[],[
+    ['账号',mtAcc],['UID',mtUid],['近30日播放',mtRpc],['连续',mtStreak]
+  ]);
+  h+=mtSec('缺采（基准日没采到且无失效标记）','#555',d.missing||[],[
+    ['账号',mtAcc],['UID',mtUid],['代理',function(r){return esc(r.agent||'—');}],
+    ['入池',function(r){return esc(String(r.added||'—').slice(0,10));}],['到期',function(r){return esc(r.exp||'—');}]
+  ]);
+  h+='<p style="font-size:11px;color:#999;margin:8px 0 0">只读检查，不自动发邮件：播放无效/停滞的号 CK 多半还活着（能被采到），处理动作（换 CK / 联系号主）由人工决定；缺采里真死的号下一轮播放轮会走既有判死+直邮链路。</p>';
+  return h;
 }
 function mtQuery(mode,force){
   var t=JSON.parse(TOKEN||'{}'),q=($('mtQ').value||'').trim();
   if(mode==='one'&&q.replace(/[^0-9A-Za-z]/g,'').length<3){$('mtm').textContent='查单号请输至少 3 位（UID / 手机号片段）';$('mtm').className='msg err';return;}
   $('mtm').textContent=force?'强制刷新中（重读 D1）…':'查询中…';$('mtm').className='msg';
-  $('mtGo').disabled=true;$('mtList').disabled=true;$('mtForce').disabled=true;$('mtBody').innerHTML='';
-  api('/api/console/mailtrace',mode==='one'?{user:t.user,pass:t.pass,q:q,force:!!force}:{user:t.user,pass:t.pass,force:!!force}).then(function(o){
-    $('mtGo').disabled=false;$('mtList').disabled=false;$('mtForce').disabled=false;
+  $('mtGo').disabled=true;$('mtList').disabled=true;$('mtAnom').disabled=true;$('mtForce').disabled=true;$('mtBody').innerHTML='';
+  // 2026-11-18 三期：时间范围走服务端过滤（默认 30 天，切大窗口才多读，省配额）
+  var days=parseInt(($('mtDays')&&$('mtDays').value)||'30',10)||30;
+  var pay={user:t.user,pass:t.pass,force:!!force,days:days};
+  if(mode==='one')pay.q=q;
+  var ep=mode==='anom'?'/api/console/anomalies':'/api/console/mailtrace';
+  api(ep,pay).then(function(o){
+    $('mtGo').disabled=false;$('mtList').disabled=false;$('mtAnom').disabled=false;$('mtForce').disabled=false;
     if(!(o.ok&&o.d&&o.d.ok)){$('mtm').textContent=(o.d&&o.d.message)||'查询失败';$('mtm').className='msg err';return;}
     MT_LAST={mode:mode,data:o.d};
-    $('mtm').textContent=o.d.cached?('缓存命中（生成于 '+esc(String(o.d.gen||'').slice(5,16))+'，期间邮件数据无变化，未读库）'):'已实时读取 D1';
+    $('mtm').textContent=o.d.cached?('缓存命中（生成于 '+esc(String(o.d.gen||'').slice(5,16))+'，期间数据无变化，未读库）'):'已实时读取 D1';
     $('mtm').className='msg';
     mtApplyFilter();
-  }).catch(function(){$('mtGo').disabled=false;$('mtList').disabled=false;$('mtForce').disabled=false;$('mtm').textContent='网络错误';$('mtm').className='msg err';});
+  }).catch(function(){$('mtGo').disabled=false;$('mtList').disabled=false;$('mtAnom').disabled=false;$('mtForce').disabled=false;$('mtm').textContent='网络错误';$('mtm').className='msg err';});
 }
 $('mtGo').onclick=function(){mtQuery('one');};
 $('mtList').onclick=function(){mtQuery('list');};
+$('mtAnom').onclick=function(){mtQuery('anom');};
 $('mtForce').onclick=function(){mtQuery(MT_LAST?MT_LAST.mode:'list',true);};
-$('mtKind').onchange=mtApplyFilter;   // 筛选只在本机过滤已拉回的数据，切换不耗配额
-$('mtDays').onchange=mtApplyFilter;
+$('mtKind').onchange=mtApplyFilter;   // 类型筛选：本机过滤已拉回的数据，切换不耗配额
+$('mtDays').onchange=function(){mtQuery(MT_LAST?MT_LAST.mode:'one');};   // 时间范围走服务端重查（省额度：默认只拉 30 天）
 $('mtQ').onkeydown=function(e){if(e&&(e.key==='Enter'||e.keyCode===13))mtQuery('one');};
 $('mtClose').onclick=function(){$('mtModal').hidden=true;};
-// 补发按钮（事件委托：表格是动态渲染的，不能逐个绑）
+// 弹窗内动态按钮（事件委托）：data-act=resend 补发 / mtopen 跳到该号邮件明细
 $('mtBody').addEventListener('click',function(ev){
   var el=ev.target;
-  if(!el||!el.getAttribute||el.getAttribute('data-act')!=='resend')return;
-  mtResend(el);
+  if(!el||!el.getAttribute)return;
+  var act=el.getAttribute('data-act');
+  if(act==='resend')return mtResend(el);
+  if(act==='mtopen'){$('mtQ').value=el.getAttribute('data-uid')||'';mtQuery('one');}
 });
 function mtResend(btn){
   var t=JSON.parse(TOKEN||'{}');
