@@ -7909,6 +7909,7 @@ async function handle(request) {
       const disp = e => ({
         name: e.name || '', uid: e.uid != null ? String(e.uid) : '',
         song: e.song != null ? String(e.song) : '', added: e.added || '',
+        source: String(e.source || ''),
         email: e.email || '', phone: e.phone || '', noListen: !!e.noListen, exp: e.exp || '',
         // 2026-10-27：客服标签 + 套餐档位（控制台新增两列 / 顶部套餐汇总 / 按客服筛选的数据源）
         agent: e.agent || '', plan: e.plan || '',
