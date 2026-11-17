@@ -5927,23 +5927,28 @@ async function handle(request) {
         'Access-Control-Allow-Headers': 'Content-Type' } });
     }
     if (url.pathname === '/api/renew_direct' && request.method === 'POST') {
+      /* 2026-11-17 修复：APK ck.html（file:// 页面）fetch 本接口时，POST 响应必须带
+         Access-Control-Allow-Origin，否则 WebView 判 CORS 失败 → fetch reject → 客服看到
+         「网络错误」。之前只给 OPTIONS 预检开了 CORS，真正的 POST 响应全漏了 ——
+         桌面控制台同源请求不受影响，所以 EXE/网页正常、只有手机 App 报错（11-17 实锤）。 */
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
       let bR;
-      try { bR = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      try { bR = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400, CORS); }
       const pwR = await regPass();
       let passOkR = !!pwR && String(bR.pass || '') === pwR;
       const fromConsoleR = !passOkR ? await consoleAuthFull(bR) : false;
       if (!passOkR) passOkR = fromConsoleR;
       if (!passOkR) {
-        if (!pwR) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
-        return json({ ok: false, message: '口令不正确' }, 403);
+        if (!pwR) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503, CORS);
+        return json({ ok: false, message: '口令不正确' }, 403, CORS);
       }
       const agentR = normAgent(bR.agent);
       const dchkR = fromConsoleR ? { ok: true, dev: '' } : await regDevCheck(bR.dev, agentR);
-      if (!dchkR.ok) return json({ ok: false, need_auth: true, dev: dchkR.dev || '', message: dchkR.msg }, 403);
+      if (!dchkR.ok) return json({ ok: false, need_auth: true, dev: dchkR.dev || '', message: dchkR.msg }, 403, CORS);
       if (dchkR.dev) { try { await regDevTouch(dchkR.dev, agentR); } catch (e) {} }
       const rr = await renewDirectCore(bR.ref, bR.plan, bR.agent);
       return json({ ok: rr.ok, message: rr.message || '', kind: rr.kind || '', exp: rr.exp || '', days: rr.days || 0 },
-        rr.ok ? 200 : (rr.status || 400));
+        rr.ok ? 200 : (rr.status || 400), CORS);
     }
     /* ===== 2026-11-16：直接换绑（原 ckswap 链接的软件内版本） =====
        号主把新 CK 交给客服（扫码/网页取CK），客服在本软件里直接原地换凭证；
@@ -5957,33 +5962,35 @@ async function handle(request) {
         'Access-Control-Allow-Headers': 'Content-Type' } });
     }
     if (url.pathname === '/api/ckswap_direct' && request.method === 'POST') {
+      /* 2026-11-17 修复：同 renew_direct —— POST 响应补 CORS，否则 APK 换绑登录 fetch 全报网络错误 */
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
       let bS;
-      try { bS = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      try { bS = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400, CORS); }
       const pwS = await regPass();
       let passOkS = !!pwS && String(bS.pass || '') === pwS;
       const fromConsoleS = !passOkS ? await consoleAuthFull(bS) : false;
       if (!passOkS) passOkS = fromConsoleS;
       if (!passOkS) {
-        if (!pwS) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
-        return json({ ok: false, message: '口令不正确' }, 403);
+        if (!pwS) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503, CORS);
+        return json({ ok: false, message: '口令不正确' }, 403, CORS);
       }
       const agentS = normAgent(bS.agent);
       const dchkS = fromConsoleS ? { ok: true, dev: '' } : await regDevCheck(bS.dev, agentS);
-      if (!dchkS.ok) return json({ ok: false, need_auth: true, dev: dchkS.dev || '', message: dchkS.msg }, 403);
+      if (!dchkS.ok) return json({ ok: false, need_auth: true, dev: dchkS.dev || '', message: dchkS.msg }, 403, CORS);
       if (dchkS.dev) { try { await regDevTouch(dchkS.dev, agentS); } catch (e) {} }
       const muS = String(bS.mu || '').trim();
-      if (!muS) return json({ ok: false, message: '没有拿到登录凭证：请先扫码取新 CK，或把号主发来的 MUSIC_U 粘进来' }, 400);
+      if (!muS) return json({ ok: false, message: '没有拿到登录凭证：请先扫码取新 CK，或把号主发来的 MUSIC_U 粘进来' }, 400, CORS);
       /* 长度闸：MUSIC_U 正常 80~120 位。超长说明粘进来的是整段请求头/日志之类的垃圾，
          不拦的话会白白打一次网易校验接口（还把日志撑爆）。与 EXE 粘贴框的正则口径一致。 */
       if (muS.length > 200) {
         return json({ ok: false, message: '凭证格式不对：MUSIC_U 太长（正常 80~120 位）。'
-          + '请只粘 MUSIC_U 的值或整段 Cookie，不要粘整页日志' }, 400);
+          + '请只粘 MUSIC_U 的值或整段 Cookie，不要粘整页日志' }, 400, CORS);
       }
       const vS = await validateCookie(muS);
-      if (!vS.ok) return json({ ok: false, message: vS.msg || '登录凭证已失效，请重新取一次 CK' }, 400);
+      if (!vS.ok) return json({ ok: false, message: vS.msg || '登录凭证已失效，请重新取一次 CK' }, 400, CORS);
       if (vS.provisional) {
         return json({ ok: false, message: '网易校验接口暂时不可达（' + (vS.diag || '网络异常')
-          + '），没法核对账号，请稍后重试' }, 503);
+          + '），没法核对账号，请稍后重试' }, 503, CORS);
       }
       const sMaster = await mergePool();
       const sTgt = sMaster.find(e => e && e.uid != null && String(e.uid) === String(vS.uid)) || null;
@@ -6005,7 +6012,7 @@ async function handle(request) {
       try { sD1Ok = await d1Upsert(sTgt, { keepEmpty: false }); }
       catch (e) { console.error('直连换绑 D1 镜像失败:', e && e.message); }
       if (!sKvOk && !sD1Ok) {
-        return json({ ok: false, message: '数据库暂时繁忙，换绑没有完成，请稍后再试一次' }, 503);
+        return json({ ok: false, message: '数据库暂时繁忙，换绑没有完成，请稍后再试一次' }, 503, CORS);
       }
       try { await pushPool(sMaster.map(e => (e === sTgt ? sTgt : e))); } catch (e) {}
       try { await refreshPoolSnap(true); } catch (e) {}
@@ -6014,7 +6021,7 @@ async function handle(request) {
         + '，D1 ' + (sD1Ok ? 'ok' : 'FAIL') + '，客服软件内操作）');
       return json({ ok: true, uid: String(vS.uid), name: String(sTgt.name || ''), kind: 'ckswap',
         message: '换绑成功：这个号的登录凭证已经换成全新的了（有效期、歌曲、邮箱都没动，听歌不受影响）。'
-          + '明天开始自动发动态就会用新凭证。' });
+          + '明天开始自动发动态就会用新凭证。' }, 200, CORS);
     }
     /* ================= 方案C：网页自助扫码登记 ================= */
     /* 买家页面：/r/<8 位码>。不走 PAGE_ROUTES 口令（那是内部成员页，不能发给买家）。 */
