@@ -11389,7 +11389,8 @@ function openInfo(i){
   var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
   var ai=r.ai||artistInfo(e);
   var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
-  var src=String(e.source||'').trim()||'未记录';
+  var sourceLabels={manual_web:'客服手动登记',qr_cf:'Cloudflare 扫码登记',qr_home:'家宽真浏览器扫码登记'};
+  var src=sourceLabels[String(e.source||'').trim()]||'未记录';
   /* 2026-11-17（用户拍板方案 A）：有效期永远单独说清楚（加剩余天数）；
      「套餐」改名「最近购买」—— plan 字段只记最后一单（月度结算/提成/筛选的统计口径），
      续费累加都记在有效期上，两者独立，不解释就会被当成「显示错了」。 */
