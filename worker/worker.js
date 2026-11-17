@@ -8662,6 +8662,46 @@ async function handle(request) {
       });
       return json({ ok: true, mode: 'list', rows: rows }, 200, CORS);
     }
+    /* ---- 2026-11-17：CK 实时验证 /api/console/cktest（只读）----
+       回答「换绑 / 改 CK 之后，到底生效没」：拿号池里当前存的这条 CK 实时调网易
+       登录校验（validateCookie，与登记/换绑落库前是同一个函数），返回活死 + uid
+       是否对得上。只读，不写任何数据。
+       背景：三个换绑入口（自助换绑链接扫码 / EXE 软件内换绑 / 控制台编辑改 CK）
+       落库前都会过 validateCookie，落库成功=当时就验证过；但事后没有任何入口能
+       「随时再验一次」，只能等下一轮采集出快照才知道。这个接口补的就是这一块。
+       额度：单次 = mergePool 一次小读 + 网易一条只读查询，D1 无大读。 */
+    if (url.pathname === '/api/console/cktest' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let bodyK;
+      try { bodyK = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(bodyK))) {
+        const whoK = await consoleRole(bodyK);
+        return json({ message: whoK === 'ro' ? '当前是只读口令：CK 验证只对群主开放' : '账号或密码错误' }, 403, CORS);
+      }
+      const masterK = await mergePool();
+      const targetK = masterK.find(e =>
+        (bodyK.uid != null && String(bodyK.uid) !== '' && e.uid != null && String(e.uid) === String(bodyK.uid)) ||
+        (bodyK.name && String(e.name) === String(bodyK.name)));
+      if (!targetK) return json({ ok: false, message: '没找到该账号（可能已被删除）' }, 404, CORS);
+      const ckRawK = String(targetK.ck || '');
+      const mmK = ckRawK.match(/MUSIC_U=([^;\s"']+)/);
+      const muK = mmK ? mmK[1] : ckRawK.trim();
+      if (!muK) return json({ ok: false, message: '该账号没有存 CK' }, 400, CORS);
+      const vK = await validateCookie(muK);
+      if (vK.provisional) {
+        return json({ ok: true, verdict: 'unknown', uid: String(targetK.uid || ''), name: String(targetK.name || ''),
+          message: '网易校验接口暂时不可达（' + (vK.diag || '网络异常') + '），这次判断不了，稍后再点一次' }, 200, CORS);
+      }
+      if (!vK.ok) {
+        return json({ ok: true, verdict: 'dead', uid: String(targetK.uid || ''), name: String(targetK.name || ''),
+          message: 'CK 已失效（网易登录校验未通过）' }, 200, CORS);
+      }
+      const matchK = String(vK.uid) === String(targetK.uid);
+      return json({ ok: true, verdict: matchK ? 'alive' : 'mismatch', uid: String(targetK.uid || ''),
+        name: String(targetK.name || ''), realUid: String(vK.uid),
+        message: matchK ? 'CK 有效（网易登录校验通过，uid 与登记一致）'
+                        : 'CK 能登录，但返回的 uid（' + vK.uid + '）和登记的 uid（' + targetK.uid + '）不一致——存的凭证可能不是这个号的！' }, 200, CORS);
+    }
     /* ---- P1 待挽回清单（2026-11-15）----
        「该收钱但断了」的号一屏列完，按可挽回金额排序：
        ① CK 失效判死且至今没回任何池（uid 在任一群 accounts 里就算回了——迁移/重登不算流失）
@@ -11588,6 +11628,8 @@ function openInfo(i){
     +'</div>'
   +(e.note?('<div class="dsec">'+kv('备注',esc(e.note))+'</div>'):'')
   +'<div class="dsec"><i>标记</i>'+(r.markHtml||'<span style="color:#bbb">正常</span>')+'</div>'
+  /* 2026-11-17：CK 实时验证结果区（点底部「验证CK」按钮触发，只读不改数据）*/
+  +(ROLE==='full'?('<div class="dsec" id="infoCkRes" hidden><i>CK验证</i><span style="color:#888">点下方「验证CK」实时测试当前存的凭证</span></div>'):'')
   /* 2026-11-17（方案 A）：台账购买记录 —— 与「补号查原单」同源（/api/console/findorder，
      满权限专属，只读口令服务端 403 所以直接不渲染这一段）。按 UID 精确过滤后按单展示，
      套餐本来就是按单记的，按单看才是它的本体；总有效期永远以上面「有效期」为准。 */
@@ -11600,6 +11642,28 @@ function openInfo(i){
     eb2.id='infoEdit';eb2.textContent='编辑';
     eb2.onclick=function(){$('infoModal').hidden=true;openEdit(r.pool,e.uid,e.name);};
     $('infoClose').parentNode.insertBefore(eb2,$('infoClose'));
+    /* 2026-11-17：验证CK —— 拿当前存的 CK 实时调网易登录校验（worker /api/console/cktest）。
+       换绑/改 CK 落库时虽然都验过一次，但事后想知道「现在还活着没」此前只能等下一轮采集；
+       这个按钮当场出结果，不等快照。 */
+    var oldCk=$('infoCkTest');if(oldCk&&oldCk.parentNode)oldCk.parentNode.removeChild(oldCk);
+    var cb2=document.createElement('button');
+    cb2.id='infoCkTest';cb2.textContent='验证CK';
+    cb2.title='拿当前存的 CK 实时调网易登录校验（只读，不改任何数据）';
+    cb2.onclick=function(){
+      var res=$('infoCkRes');if(res)res.hidden=false;
+      var _tC=JSON.parse(TOKEN||'{}');
+      cb2.disabled=true;
+      if(res)res.innerHTML='<i>CK验证</i><span style="color:#888">实时校验中…（约 1~3 秒）</span>';
+      api('/api/console/cktest',{user:_tC.user,pass:_tC.pass,uid:e.uid,name:e.name}).then(function(o){
+        cb2.disabled=false;
+        var d=(o&&o.d)||{};
+        var col=d.verdict==='alive'?'#1a7f37':(d.verdict==='dead'?'#a32d2d':'#b06a00');
+        var icon=d.verdict==='alive'?'✅':(d.verdict==='dead'?'❌':'⚠️');
+        if(res)res.innerHTML='<i>CK验证</i><span style="color:'+col+';font-weight:600">'+icon+' '+esc(d.message||'验证失败')+'</span>'
+          +(d.realUid?(' <span style="color:#888;font-size:11px">（网易返回 uid '+esc(d.realUid)+'，校验时刻 '+bjTime(new Date(Date.now()+8*3600*1000).toISOString())+'）</span>'):'');
+      }).catch(function(){cb2.disabled=false;var r2=$('infoCkRes');if(r2)r2.innerHTML='<i>CK验证</i><span style="color:#a32d2d">网络错误，稍后再试</span>';});
+    };
+    $('infoClose').parentNode.insertBefore(cb2,$('infoClose'));
   }
   $('infoTitle').textContent='账号详情';
   $('infoSub').textContent='该号全部字段；完整标记说明见「标记对照表」';
