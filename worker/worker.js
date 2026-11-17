@@ -9093,8 +9093,12 @@ async function fetchActionsStatus() {
   // 只有主仓日志入口，节点的运行记录没地方点。给 hz 条目附 nodes[]：每仓只拉最近 1 轮
   //（1 个子请求，不拉 job 明细——分片进度主仓卡已有，这里只提供日志入口）。
   // GH_TOKEN(xm921016) 实测对节点仓 runs 可读（200，2026-11-14 验证）；没跑过记录的节点不返回。
+  // 2026-11-17：新增 016=N2b（xm921016/relay-node，公开仓）——主仓 cron-relay 转私密后浏览器
+  // 点日志必 404，且 Phase 2 后主仓不跑片、前一半片（0..fs_lo-1）归 N2b，其日志链接替代原
+  // 「016日志」（前端已移除主仓链接，见 console.html 同日注释）。
   const NODE_REPOS = [
     { name: '015', owner: 'xm921015', repo: 'relay-node' },
+    { name: '016', owner: 'xm921016', repo: 'relay-node' },
     { name: '014', owner: 'xm921014', repo: 'relay-node' },
     { name: '013', owner: 'xm921013', repo: 'relay-node' },
   ];
@@ -11221,9 +11225,11 @@ function renderRunbar(){
       }
       // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，
       // 这里再按 ROLE 兜一层（缓存里的旧数据 / 将来字段改名时不至于漏出链接）。
-      // 2026-11-15：日志链接带仓库名（016=主群主仓 cron-relay，017=定制群 dingzhi），
-      // 与节点仓「015日志/014日志/013日志」对齐，一眼分清哪条链接是哪个仓。
-      var logLink=((ROLE==='full')&&a.url)?' · <a href="'+esc(a.url)+'" target="_blank">'+(a.pool==='hz'?'016':'017')+'日志</a>':'';
+      // 2026-11-17：hz 主仓 cron-relay 已转私密（「主仓转私密+播放外移」Phase 3），浏览器
+      // 未登录 xm921016 点链接必 404，且 Phase 2 后 master 不再跑片（只剩 plan job）——
+      // hz 的主仓日志链接移除，hz 分片日志统一走下方节点仓链接（016=公开薄壳 N2b 接前一半片）。
+      // dz 仓（017）仍公开，链接保留。
+      var logLink=((ROLE==='full')&&a.url&&a.pool==='dz')?' · <a href="'+esc(a.url)+'" target="_blank">017日志</a>':'';
       // 2026-11-14：follower 节点仓日志入口（015/014/013，服务端已附 nodes[]，只读无 url 不渲染）。
       // 主群分片现在由主仓+节点仓一起跑，只看主仓日志会漏掉节点那几片的成败。
       var nodeLinks='';
