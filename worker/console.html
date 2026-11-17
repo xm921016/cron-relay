@@ -1234,20 +1234,16 @@ function render(){
   // 2026-11-16：套餐条末尾追加「CF额度」卡（满权限才渲染）。render() 每次重画套餐条，
   // 额度卡必须跟着重挂一次，且永远排在最后 —— 以后套餐加新档位，这张卡自动往后顺延。
   cfqChipSync();
-  // 2026-10-27：套餐和有效期是**两个字段**——套餐（plan）只用于统计口径，真正卡播放/互听时长的是有效期（exp）。
-  // 手动改有效期不会自动改套餐，所以两边可能对不上（比如选了「1年」又把有效期改到 730 天）。
-  // 这里只在渲染时标一个「≠」提示，不改任何数据、不拦任何操作。
-  function planDaysOf(label){for(var i=0;i<PLANS.length;i++){if(PLANS[i].label===label)return PLANS[i].days;}return null;}
-  function actualDaysOf(e){
-    var x=String(e.exp||'').trim();
-    if(!x||x==='forever'||x==='永久')return 0;                 // 0 = 永久
-    var t1=Date.parse(x.slice(0,10)+'T00:00:00Z'),t2=Date.parse(String(e.added||'').slice(0,10)+'T00:00:00Z');
-    if(isNaN(t1)||isNaN(t2))return null;
-    return Math.round((t1-t2)/864e5);
-  }
+  /* 2026-11-17（用户拍板方案 A）：≠ 徽标下线（原 2026-10-27「套餐和有效期是两个字段」的
+     提示徽标）—— 续费过的号 plan 只记最后一单，按入池日算的「实际天数」必然和它对不上，
+     徽标对续费号是恒现噪音。语义解释移到「详情」弹窗：有效期+剩余天数 /
+     最近购买（只记最后一单）/ 台账购买记录。
+     列表「套餐」列保留原样（月度结算/汇总条/筛选的统计口径不动）。
+     plCell 的计算放在下面 forEach 行内（每行各自的 e.plan）。 */
   var h='';
   rows.forEach(function(r,i){
     var e=r.e,a=r.a;
+    var plCell=e.plan?esc(e.plan):'<span style="color:#ccc">未标注</span>';
     var rateNow=a&&a.rate!=null?a.rate:'—',ratePrev=r.p&&r.p.rate!=null?r.p.rate:'—';
     var dCell=r.delta==null?'<span class="flat">—</span>':(r.reset?'<span class="badge b-gray" title="650 任务按 31 天一个周期结算：上一周期已结束、新周期从头计，所以今天变 0% 不是掉量（近30日播放量并没有塌）。不计入「今日下跌」，通常几天内会重新爬回">周期归零</span>':(r.delta>0?'<span class="up">+'+r.delta+'</span>':(r.delta<0?'<span class="down">'+r.delta+'</span>':'<span class="flat">0</span>')));
     var misCell=otherMis(a);
@@ -1263,15 +1259,6 @@ function render(){
     var marks=r.markHtml||'';   // 2026-10-25：标记已在 render 开头由 computeMarks 算好（搜索框也能命中）
     // 2026-10-27：客服 / 套餐两列；data-l 提供手机端卡片标签（列顺序变了标签不会跟着错）。
     var agCell=e.agent?'<span class="badge b-gray" title="这条登记是 '+esc(e.agent)+' 录的">'+esc(e.agent)+'</span>':'<span style="color:#ccc">—</span>';
-    var plCell='';
-    if(!e.plan){plCell='<span style="color:#ccc">未标注</span>';}
-    else{
-      plCell=esc(e.plan);
-      var _pd=planDaysOf(e.plan),_ad=actualDaysOf(e);
-      if(_pd!==null&&_ad!==null&&Math.abs(_ad-_pd)>10){
-        plCell+='<span class="badge b-yellow" style="margin-left:4px" title="套餐记的是「'+esc(e.plan)+'」（'+(_pd?(_pd+' 天'):'永久')+'），但按入池日算有效期实际是 '+(_ad?(_ad+' 天'):'永久')+'。两个字段互相独立：套餐只影响统计口径，卡时长的是有效期；改一边不会自动改另一边。">≠</span>';
-      }
-    }
     // 2026-11-11（当晚简化）：只显示该号自己的音乐人昵称，一行、不换行。
     // 不再显示歌的歌手列表（共创人太多把行撑得很高）、不再显示 ✓/✗ 与「非音乐人/未同步」徽标
     // —— 非音乐人/绑错歌判定都在右侧「标记」列（按 artist id 判，比人眼核对名字可靠）。
@@ -1579,6 +1566,7 @@ $('tb').addEventListener('click',function(ev){
 // ===== 2026-11-15 方案④：账号详情弹窗（手机卡片「详情」按钮）=====
 // 数据源 window.ROWS[i]（render 时存的当前筛选+排序后的行），只读展示全部字段；
 // 满权限给「编辑」按钮 → 关闭本弹窗走原 openEdit（编辑/删号/补号逻辑一个字没动）。
+var INFO_SEQ=0;   /* 2026-11-17：详情弹窗开一次 +1，旧响应不许写进新弹窗 */
 function openInfo(i){
   var r=(window.ROWS||[])[i];
   if(!r)return;
@@ -1590,6 +1578,19 @@ function openInfo(i){
   var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
   var ai=r.ai||artistInfo(e);
   var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
+  /* 2026-11-17（用户拍板方案 A）：有效期永远单独说清楚（加剩余天数）；
+     「套餐」改名「最近购买」—— plan 字段只记最后一单（月度结算/提成/筛选的统计口径），
+     续费累加都记在有效期上，两者独立，不解释就会被当成「显示错了」。 */
+  var _ex=String(e.exp||'').trim(),_expTxt='永久';
+  if(_ex&&_ex!=='forever'&&_ex!=='永久'){
+    var _t1=Date.parse(_ex.slice(0,10)+'T00:00:00Z');
+    var _today=new Date(Date.now()+8*3600*1000).toISOString().slice(0,10);
+    var _t0=Date.parse(_today+'T00:00:00Z');
+    if(!isNaN(_t1)&&!isNaN(_t0)){
+      var _dd=Math.round((_t1-_t0)/864e5);
+      _expTxt=esc(_ex.slice(0,10))+'（'+(_dd>=0?('剩 '+_dd+' 天'):('已过期 '+(-_dd)+' 天'))+'）';
+    }else{_expTxt=esc(_ex);}
+  }
   var bodyH='<div class="dsec">'
     +kv('池',r.pool==='hz'?'主群':'定制群')
     +kv('账号',esc(String(e.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·')))
@@ -1597,8 +1598,8 @@ function openInfo(i){
     +kv('客服',e.agent?esc(e.agent):'—')
     +kv('邮箱',e.email?esc(e.email):'未绑')
     +kv('入池',esc(String(e.added||'').slice(0,10)))
-    +kv('有效期',esc(e.exp||'永久'))
-    +kv('套餐',e.plan?esc(e.plan):'未标注')
+    +kv('有效期',_expTxt)
+    +kv('最近购买',e.plan?(esc(e.plan)+' <span style="color:#888;font-weight:400;font-size:11px">只记最近一单（续费会覆盖）；总有效期看上面「有效期」</span>'):'未标注')
     +'</div>'
     +'<div class="dsec">'
     +kv('昨日650',(p&&p.rate!=null)?(p.rate+'%'):'—')
@@ -1610,8 +1611,12 @@ function openInfo(i){
     +kv('音乐人',ai.mus?esc(ai.mus):'—')
     +kv('时长',durTxt)
     +'</div>'
-    +(e.note?('<div class="dsec">'+kv('备注',esc(e.note))+'</div>'):'')
-    +'<div class="dsec"><i>标记</i>'+(r.markHtml||'<span style="color:#bbb">正常</span>')+'</div>';
+  +(e.note?('<div class="dsec">'+kv('备注',esc(e.note))+'</div>'):'')
+  +'<div class="dsec"><i>标记</i>'+(r.markHtml||'<span style="color:#bbb">正常</span>')+'</div>'
+  /* 2026-11-17（方案 A）：台账购买记录 —— 与「补号查原单」同源（/api/console/findorder，
+     满权限专属，只读口令服务端 403 所以直接不渲染这一段）。按 UID 精确过滤后按单展示，
+     套餐本来就是按单记的，按单看才是它的本体；总有效期永远以上面「有效期」为准。 */
+  +(ROLE==='full'?('<div class="dsec" id="infoLedger"><i>购买记录</i><span style="color:#888">查询中…</span></div>'):'');
   /* 2026-11-15：编辑按钮动态插进弹窗底部唯一的 row2（模板自带一个关闭）。
      原来在 infoBody 里再拼一行「编辑+关闭」，和模板底部的关闭重复 —— 弹窗出现两个关闭（买家实测）。 */
   if(ROLE==='full'){
@@ -1625,6 +1630,31 @@ function openInfo(i){
   $('infoSub').textContent='该号全部字段；完整标记说明见「标记对照表」';
   $('infoBody').innerHTML=bodyH;
   $('infoModal').hidden=false;
+  /* 2026-11-17（方案 A）：异步补台账购买记录（满权限）。INFO_SEQ 防串：连开两个详情时，
+     慢的旧响应不许写进新弹窗。UID 精确过滤（findorder 是 LIKE 查询，可能带出 uid 里
+     含同片段的其他单）；没有 uid 的老号退化为按 name 精确匹配。 */
+  if(ROLE==='full'){
+    INFO_SEQ=(INFO_SEQ||0)+1;
+    var _seq=INFO_SEQ,_uid=String(e.uid||''),_nm=String(e.name||'');
+    var _tI=JSON.parse(TOKEN||'{}');
+    api('/api/console/findorder',{user:_tI.user,pass:_tI.pass,q:(_uid||_nm)}).then(function(o){
+      var el=$('infoLedger');if(!el||INFO_SEQ!==_seq)return;
+      var rs=(o.ok&&o.d&&o.d.ok)?(o.d.rows||[]):null;
+      if(!rs){el.innerHTML='<i>购买记录</i><span style="color:#a32d2d">'+esc((o.d&&o.d.message)||'查询失败')+'</span>';return;}
+      rs=rs.filter(function(x){return _uid?String(x.uid||'')===_uid:(!!_nm&&String(x.name||'')===_nm);});
+      if(!rs.length){el.innerHTML='<i>购买记录</i><span style="color:#888">台账里没有这个号的成交记录</span>';return;}
+      var lh='';
+      for(var li=0;li<rs.length;li++){var _r=rs[li];
+        lh+='<div style="font-size:12px;color:#444;margin:3px 0">'+esc(String(_r.day||'').slice(0,10))
+          +' · '+esc(_r.plan||'未标注')
+          +' · 到期 '+esc(_r.exp||'永久')
+          +(_r.rb?' <span class="badge b-blue">补</span>':'')
+          +(li===0?' <span class="badge b-green" title="台账按登记日倒序，第一行就是最近一单（「最近购买」的来源）">最近</span>':'')
+          +'</div>';
+      }
+      el.innerHTML='<i>购买记录</i>'+lh;
+    }).catch(function(){var el2=$('infoLedger');if(el2&&INFO_SEQ===_seq)el2.innerHTML='<i>购买记录</i><span style="color:#a32d2d">网络错误</span>';});
+  }
 }
 $('infoClose').onclick=function(){$('infoModal').hidden=true;};
 function doEdit(pool,e,action){

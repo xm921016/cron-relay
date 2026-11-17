@@ -9900,10 +9900,10 @@ body:has(.modal:not([hidden])){overflow:hidden}
 .deadbox{margin:10px 0 0;font-size:12px;color:#555}
 .deadbox summary{cursor:pointer;color:#3b6d11;padding:4px 0}
 .deadbox table{margin-top:6px;border:1px solid #eee;border-radius:8px}
-/* ===== 2026-11-15 方案④手机整页重做：桌面端只新增下面这几个「隐藏/不可达」件，渲染零变化 =====
-   infoBtn（卡片上的详情按钮）只在 <=860px 显示；筛选面板/工具抽屉/遮罩/工具按钮是手机专属容器；
+/* ===== 2026-11-15 方案④手机整页重做：桌面端只新增下面这几个手机专属容器，渲染零变化 =====
+   infoBtn（详情按钮）由满权限角色渲染，在桌面和手机端均可见；筛选面板/工具抽屉/遮罩/工具按钮是手机专属容器；
    #infoBody 的 kv 样式放基础层，保证任何环境打开详情弹窗都可读。 */
-.infoBtn{display:none}
+.infoBtn{display:inline-block}
 .agAt{display:none}  /* 2026-11-15：采集时间跟在客服后面，仅手机端显示（今日650格下方不再重复） */
 .mdrawer,.mmask,.mpanel,.mOnly{display:none}
 #infoBody .dsec{background:#f6f8fb;border-radius:10px;padding:9px 12px;margin-bottom:8px}
@@ -10334,7 +10334,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
   <div class="row2" data-page-node-id="hMTvrMqibZ3wv4Yy3fsCna"><button class="gray" id="rcClose" data-page-node-id="L64GYRerH2zswYgizFwC1K">关闭</button></div>
   <div class="msg" id="rcm" data-page-node-id="qWqgk28EsFSRTjV4zMZLJI"></div>
 </div></div>
-<!-- ===== 2026-11-15 方案④：账号详情弹窗（手机卡片上的「详情」按钮；桌面 infoBtn 隐藏不可达）=====
+<!-- ===== 2026-11-15 方案④：账号详情弹窗（满权限账号表的「详情」按钮）=====
      只读展示该行全部字段（数据源 render 时的 window.ROWS[i]），满权限时给「编辑」按钮走原 openEdit。 -->
 <div class="modal" id="infoModal" hidden data-page-node-id="6HpiU5UmfrPZ8lUIWiN2Kj"><div class="mbox" id="infoBox" data-page-node-id="JPeAYz32g1x6exQUKltOJi">
   <h3 id="infoTitle" data-page-node-id="nl5knxNSilQ0qJcXVORCgb">账号详情</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="infoSub" data-page-node-id="wJUrtlrTXbtiWldkYpBkLW"></p>
@@ -11076,9 +11076,8 @@ function render(){
       ? '<button class="mini" style="padding:4px 10px;font-size:12px" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'">编辑</button>'
       // 2026-11-16：只读口令放宽 —— 给「改邮箱/歌」按钮，openEdit 里只放开邮箱和歌曲链接两栏
       : '<button class="mini" style="padding:4px 10px;font-size:12px;background:#eef4fb;color:#255ea6;border-color:#c9d8ee" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'" title="只读口令只能改通知邮箱和歌曲链接">改邮箱/歌</button>';
-    // 2026-11-15 方案④：卡片加「详情」按钮（手机端显示；桌面 .infoBtn display:none，渲染零变化）。
-    // 只读弹窗展示本行全部字段，data-info=行号直接索引 window.ROWS；编辑仍走原 openEdit。
-    opCell='<button class="mini infoBtn" data-info="'+i+'" title="查看该号全部字段">详情</button>'+opCell;
+    // 详情仅对满权限角色开放，并放在编辑按钮右侧；只读角色不渲染详情入口。
+    if(ROLE==='full')opCell+='<button class="mini infoBtn" data-info="'+i+'" title="查看该号详情">详情</button>';
     // 2026-11-05：备注列 + 补号标签。
     // 「补」的意义在结账时才体现：这行是客户掉线后免费补的号，钱不算、客服也不提成。
     var noteCell='';
