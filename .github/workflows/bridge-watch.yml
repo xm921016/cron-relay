@@ -8,7 +8,7 @@ name: bridge-watch
 # 邮件走 hz 仓 secrets（EMAIL_FROM/EMAIL_AUTH_CODE/ALERT_TO），与 alert-relay.yml 同款。
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 concurrency:
