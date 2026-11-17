@@ -11448,7 +11448,9 @@ function openInfo(i){
     +kv('UID',esc(e.uid))
     +kv('客服',e.agent?esc(e.agent):'—')
     +kv('邮箱',e.email?esc(e.email):'未绑')
-    +kv('入池',esc(String(e.added||'').slice(0,10)))
+    /* 2026-11-17：入池细化到秒 —— added 入库本来就是完整 YYYY-MM-DD HH:MM:SS（worker beijingDateTime），
+       详情弹窗此前 slice(0,10) 截掉了时间。老数据只有日期（length 10），slice(0,19) 兜底原样显示。 */
+    +kv('入池',esc(String(e.added||'').slice(0,19)))
     +kv('登记方式',esc(methodTxt))
     +kv('实际出口',esc(exitTxt))
     +kv('有效期',_expTxt)
