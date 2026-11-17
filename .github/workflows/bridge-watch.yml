@@ -1,0 +1,96 @@
+name: bridge-watch
+
+# 2026-11-17 新增：家宽笔记本 bridge（qr-laptop.xx1031.xyz）掉线监控。
+# 背景：笔记本在家跑真浏览器出码 bridge，家里无 BIOS 来电自启，断电后需人工按开机键，
+# 所以必须有人收到提醒。本 workflow 独立于笔记本运行（GitHub Actions 云端），每 30 分钟探测一次：
+#   /health 探测失败 → 60s 后重试 → 仍失败判离线
+#   同一次掉线只发 1 封离线邮件（Actions cache 记状态）；恢复时补 1 封恢复邮件。
+# 邮件走 hz 仓 secrets（EMAIL_FROM/EMAIL_AUTH_CODE/ALERT_TO），与 alert-relay.yml 同款。
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: bridge-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe health (2 tries)
+        id: probe
+        run: |
+          UP=0
+          for i in 1 2; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "https://qr-laptop.xx1031.xyz/health" || true)
+            echo "try$i code=$code"
+            if [ "$code" = "200" ]; then UP=1; break; fi
+            sleep 60
+          done
+          echo "up=$UP" >> "$GITHUB_OUTPUT"
+
+      - name: restore state
+        uses: actions/cache@v4
+        with:
+          path: bridge_state
+          key: bridge-watch-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: bridge-watch-state-
+
+      - name: notify on change
+        env:
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+          UP: ${{ steps.probe.outputs.up }}
+        run: |
+          python3 - <<'EOF'
+          import os, smtplib
+          from email.mime.text import MIMEText
+
+          up = os.environ.get("UP") == "1"
+          state = "up"
+          if os.path.exists("bridge_state"):
+              state = open("bridge_state").read().strip() or "up"
+
+          print("probe up =", up, "| previous state =", state)
+
+          if up and state != "up":
+              subject = "[bridge-watch] 家宽笔记本 bridge 已恢复"
+              body = "qr-laptop.xx1031.xyz /health 已恢复 200。\n笔记本 bridge 回到线上，无需处理。"
+              action = "send"
+              new_state = "up"
+          elif (not up) and state != "down":
+              subject = "[bridge-watch] 家宽笔记本 bridge 离线"
+              body = ("qr-laptop.xx1031.xyz /health 探测失败（2 次，间隔 60s）。\n\n"
+                      "可能原因：家里断电/笔记本关机/断网。\n"
+                      "处理：回家后按笔记本电源键开机即可（隧道服务和看门狗会自动恢复 bridge），\n"
+                      "不需要其他操作。本邮件对同一次离线只发一次，恢复时会再发一封。")
+              action = "send"
+              new_state = "down"
+          else:
+              action = "skip"
+              new_state = state
+
+          open("bridge_state", "w").write(new_state)
+
+          if action != "send":
+              print("no state change, skip mail")
+              raise SystemExit(0)
+
+          frm = (os.environ.get("EMAIL_FROM") or "").strip()
+          code = (os.environ.get("EMAIL_AUTH_CODE") or "").strip()
+          to = (os.environ.get("ALERT_TO") or frm).strip()
+          if not (frm and code and to):
+              print("::error::hz 未配置 EMAIL_FROM/EMAIL_AUTH_CODE/ALERT_TO")
+              raise SystemExit(1)
+          msg = MIMEText(body, "plain", "utf-8")
+          msg["Subject"] = subject
+          msg["From"] = frm
+          msg["To"] = to
+          with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30) as s:
+              s.login(frm, code)
+              s.sendmail(frm, [x.strip() for x in to.split(",") if x.strip()], msg.as_string())
+          print("已发送:", subject)
+          EOF
