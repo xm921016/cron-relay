@@ -1628,16 +1628,21 @@ async function poolUsageSummary() {
   const used = {};
   if (rows) for (const r of rows) used[String(r.pool || '')] = Number(r.n) || 0;
   let totalCap = 0, totalUsed = 0;
+  const pools = {};
   const list = [];
   for (const p of Object.keys(caps)) {
     const u = used[p] != null ? used[p] : (readFail ? null : 0);
     totalCap += caps[p];
     if (u != null) totalUsed += u;
+    pools[p] = { used: u, cap: caps[p] };
     list.push(p + ' ' + (u == null ? '?' : u) + '/' + caps[p]);
     delete used[p];
   }
-  for (const p of Object.keys(used)) { totalUsed += used[p]; list.push(p + ' ' + used[p] + '/?'); }
-  return { totalCap: totalCap, totalUsed: readFail ? null : totalUsed, list: list, readFail: readFail };
+  for (const p of Object.keys(used)) { totalUsed += used[p]; pools[p] = { used: used[p], cap: 0 }; list.push(p + ' ' + used[p] + '/?'); }
+  // 2026-11-17：新增 pools 结构化分群口径（{池名:{used,cap}}）——控制台「号池容量」卡随
+  // 全部/主群/定制群 标签切到对应池时，显示该池实际 used/cap 而不是全项目合计。
+  // 上限来源仍是 poolCaps()（代码兜底 + kv_misc pool_cap:* 覆盖），以后改上限/加新池这里自动跟随，不用再改前端。
+  return { totalCap: totalCap, totalUsed: readFail ? null : totalUsed, list: list, readFail: readFail, pools: pools };
 }
 // 满员闸口的计数口径（2026-10-26 修复）：排除「已过期但还没被 pruneExpired 清掉」的号。
 // 这些号到期后已不参与轮转，却仍然占着人数上限，导致满员提示比实际可登记名额早出现。
@@ -11027,8 +11032,17 @@ function render(){
   // 其他 2 行的卡被 flex 拉伸后底下空一截。字号档位按内宽最窄 ~66px、数字宽≈0.6×字号推算。
   var capHtml='';
   if(DATA.cap){
-    var cu=(DATA.cap.totalUsed==null)?'?':DATA.cap.totalUsed;
-    var capVal=cu+'/'+(DATA.cap.totalCap||0);
+    var cu,cc;
+    // 2026-11-17：号池容量卡跟随顶部 全部/主群/定制群 标签——切到主群/定制群时显示该池的实际 used/cap
+    // （数据来自服务端 cap.pools，poolUsageSummary 逐池结构化；上限改了/加了新池自动跟随，前端不用再动）。
+    // 「全部」仍是各池合计；旧缓存里没有 pools 字段时回退为全项目合计，宁显示合计也不显示错数。
+    if(POOLF!=='all'&&DATA.cap.pools&&DATA.cap.pools[POOLF]){
+      cu=DATA.cap.pools[POOLF].used;cc=DATA.cap.pools[POOLF].cap;
+      if(cu==null)cu='?';
+    }else{
+      cu=(DATA.cap.totalUsed==null)?'?':DATA.cap.totalUsed;cc=DATA.cap.totalCap||0;
+    }
+    var capVal=cu+'/'+cc;
     var fs=capVal.length>=12?9:(capVal.length>=8?11:16);
     capHtml='<div class="stat" title="号池容量 = 已登记人数/登记上限（公益号、过期号不占名额）。明细：'+esc(String((DATA.cap.list||[]).join('，')||'暂无'))+'"><b style="font-size:'+fs+'px;line-height:21.6px;white-space:nowrap">'+capVal+'</b><span>号池容量</span></div>';
   }

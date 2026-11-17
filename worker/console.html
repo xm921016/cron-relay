@@ -377,7 +377,6 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <br data-page-node-id="JnAEaMOOAfmVBhREawBOlr">⑤ <b data-page-node-id="U6dkLtNlOthFnVg7bvLpdx">「播放补了但总量没涨」看「净增≤0」</b>：近30日播放量是 30 天滚动窗口，今天补的播放会被 30 天前的老播放到期退出抵掉，看起来总量持平甚至略降，但播放确实补进去了。偶发一两天正常；连续 3 天以上净增≤0 才说明补的量追不上退的量，要加每号播放次数或换更热的歌。
     <br data-page-node-id="bles9yImorwMKuFfBcbQNM"><b data-page-node-id="wWaP5KM4houm8B3rQ0IZvx">所以判断号有没有问题，看「今日零增长 / 净增≤0」连续几天 + 「近30日播放量」在涨还是在跌</b>：播放量在跌且 650 也不动 = 今天补的播放被 30 天前老量退出抵消（「净增≤0」，偶发正常）；播放量在涨但 650 一直不动 = 播放被判无效（「650未结算」，连续 3 天以上才查）；650 是 0% 的先把「实时复核」结果看完再动手。
   </div></details>
-  <p id="kjP" style="font-size:12px;color:#888;margin:10px 0 0" data-page-node-id="nuPz7pgE09pleT3HoAKpAo">数据口径：<b data-page-node-id="R5hS7ujyNIcxFp81aBcoVL">650进度</b>=音乐人后台 650 任务完成度（近30日滚动，会回吐，100%=达标）；<b data-page-node-id="vfeaQyYyTHRPniLyNu5jW0">近30日播放量</b>=工作台播放次数（≠有效播放，≠650进度；30 天滚动，今天补的量可能被 30 天前的老量退出抵掉 → 标「净增≤0」）；<b data-page-node-id="pi2BCqxfG67icaTPQE4P8z">650 实时复核</b>=对「快照 0% 但近30日播放≥650」的号直接查一次工作台当前进度（KV 缓存 30 分钟，不写回 rate、不动任何其它列）：实时有进度标灰「实时已恢复」，实时仍 0% 才继续标「有播放·650为0」；<b data-page-node-id="XNVZ0abW9yDOpkt3Fyv2n7">较昨日</b>=今天快照-昨天快照，前一日无快照显示 —（数据断层，非故障；<b data-page-node-id="ZhWT2Vr26sLWLLf2VmsKiG">今晚听歌</b>=按当前号池回放的今晚计划（每号本群歌单首数，已配平；加速档每天每首歌要几个听众，被稀释时标红）；顶部每个统计名的用词与标记列完全一致，搜索框直接搜那个词就能筛出对应行）；昨日≥80% 今日 0% 且播放量没塌的显示为灰色「周期归零」= 650 换新周期不是掉量（已从「今日下跌」剔除）；<b data-page-node-id="ER4mEcRjYh9kFk6S35ao62">笔记任务</b>=与 650 无关的同组小任务（发布图文笔记，按「已发x/4」显示：30 天内发布图文笔记天数≥4，4/4 即完成），显示 — 表示只有 650 一个任务；<b data-page-node-id="0fVFyu9LY09DfZ9WzGyC8X">时长</b>=登记歌曲长度（红=短歌&lt;2:12、黄=长歌&gt;5:36，仅提示，10-22 修完后都能正常计入）；<b data-page-node-id="tcyk6N8QngCUFYABBf28dc">今日进度下的小字</b>=该行快照采集时间（北京时间；凌晨轮次边跑边采，不代表当天最终值，11:40 主采后的数才准）；各标记含义见上方「标记看不懂」对照表。<b data-page-node-id="OWn1Q3fxAHV1GiWCJktqqn">运行状态横条</b>：作业=两仓库最近一次定时轮次（GitHub API，5 分钟缓存）；应跑/实跑=按当前号池对所选日期回放的轮转计划与 runs 表核对（历史日期为近似值）；快照更新=该日快照最后写入时间（北京时间）；今日删号/待复核来自 D1。</p>
 </div>
 <div class="modal" id="modal" hidden data-page-node-id="HrNaAIFT1KILEXBoLc7f06"><div class="mbox" data-page-node-id="WOex3wAhapNmyUDkOVY0xj">
   <h3 id="mTitle" data-page-node-id="hsdKqBm7YiKHZAcLQoTSTz">编辑账号</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="mSub" data-page-node-id="tlhtfU3BjD9FMhhgv4IMTc"></p>
@@ -1180,8 +1179,17 @@ function render(){
   // 其他 2 行的卡被 flex 拉伸后底下空一截。字号档位按内宽最窄 ~66px、数字宽≈0.6×字号推算。
   var capHtml='';
   if(DATA.cap){
-    var cu=(DATA.cap.totalUsed==null)?'?':DATA.cap.totalUsed;
-    var capVal=cu+'/'+(DATA.cap.totalCap||0);
+    var cu,cc;
+    // 2026-11-17：号池容量卡跟随顶部 全部/主群/定制群 标签——切到主群/定制群时显示该池的实际 used/cap
+    // （数据来自服务端 cap.pools，poolUsageSummary 逐池结构化；上限改了/加了新池自动跟随，前端不用再动）。
+    // 「全部」仍是各池合计；旧缓存里没有 pools 字段时回退为全项目合计，宁显示合计也不显示错数。
+    if(POOLF!=='all'&&DATA.cap.pools&&DATA.cap.pools[POOLF]){
+      cu=DATA.cap.pools[POOLF].used;cc=DATA.cap.pools[POOLF].cap;
+      if(cu==null)cu='?';
+    }else{
+      cu=(DATA.cap.totalUsed==null)?'?':DATA.cap.totalUsed;cc=DATA.cap.totalCap||0;
+    }
+    var capVal=cu+'/'+cc;
     var fs=capVal.length>=12?9:(capVal.length>=8?11:16);
     capHtml='<div class="stat" title="号池容量 = 已登记人数/登记上限（公益号、过期号不占名额）。明细：'+esc(String((DATA.cap.list||[]).join('，')||'暂无'))+'"><b style="font-size:'+fs+'px;line-height:21.6px;white-space:nowrap">'+capVal+'</b><span>号池容量</span></div>';
   }
@@ -1601,7 +1609,9 @@ function openInfo(i){
     +kv('UID',esc(e.uid))
     +kv('客服',e.agent?esc(e.agent):'—')
     +kv('邮箱',e.email?esc(e.email):'未绑')
-    +kv('入池',esc(String(e.added||'').slice(0,10)))
+    /* 2026-11-17：入池细化到秒 —— added 入库本来就是完整 YYYY-MM-DD HH:MM:SS（worker beijingDateTime），
+       详情弹窗此前 slice(0,10) 截掉了时间。老数据只有日期（length 10），slice(0,19) 兜底原样显示。 */
+    +kv('入池',esc(String(e.added||'').slice(0,19)))
     +kv('登记方式',esc(methodTxt))
     +kv('实际出口',esc(exitTxt))
     +kv('有效期',_expTxt)
