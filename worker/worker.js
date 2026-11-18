@@ -10670,9 +10670,8 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <select id="fplan" title="按套餐筛选" data-page-node-id="7lbtLCqkdoXnFx2elLEPh7"><option value="" data-page-node-id="KKD1lGOAHrsUfypnmcVICv">套餐：全部</option></select>
     <span class="dr" id="dr" title="入池日期范围：只看这段时间登记进池的号。只填一端也行（只填左边=这天及以后，只填右边=这天及以前），两边都空=全部。清空点右边的 ×" data-page-node-id="51HnUGAktl3MFaTSEsiVgg"><input type="date" id="date" title="入池起始日（含）" data-page-node-id="hT6obr4wl7H9KkVKKPtOHn"><em data-page-node-id="aRF6HwXs74KJlhOHqesG6m">~</em><input type="date" id="dateTo" title="入池结束日（含）" data-page-node-id="sdbGDGBakfbAVJVvEKmEpR"><i class="dn" id="dn" data-page-node-id="9MXwZzxueGJTpTF6MLi2rR"></i><span class="dx" id="dClear" title="清除入池日期范围" data-page-node-id="7IXbtdwLZbGsEqyiEV1TvD">×</span></span>
     <input id="q" placeholder="搜索：账号 / 邮箱 / UID / 歌曲ID / 客服" data-page-node-id="HiY9izWnIWEZm0rKYqM076">
-    <select id="sort" data-page-node-id="wfp1M22iElG3PcguLgWXMo"><option value="default" data-page-node-id="56UTQFF8rFJAn7DXfloPbt">排序：默认</option><option value="delta" data-page-node-id="UymcGjBMywhhG1NIuf0KEu">排序：日涨幅↓</option><option value="rate" data-page-node-id="WUzlj2zRfKlG1YWKGta3t4">排序：今日进度↓</option></select>
-    <!-- 2026-11-15 方案④：手机专属入口（桌面 .mOnly 隐藏）。筛选面板/工具抽屉里的控件由 JS 从本栏搬过去，事件不变 -->
-    <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期/排序）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
+    <!-- 2026-11-18：删掉「排序」下拉（用户拍板没用）。行内「较昨日」列本身可点表头排序的话另行处理，这里先直接移除 -->
+    <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
     <button class="mini mOnly" id="btnMore" title="工具箱（导出CSV/月度结算/客服名单/设备授权/登记链接/历史登记/退出）" data-page-node-id="Z0TBa6mm2C5i5J4wMmUIVm">工具</button>
     <button class="mini" id="btnCsv" data-page-node-id="1wGeER1qQC3pXjLZx52lK2">导出CSV</button>
     <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
@@ -11028,7 +11027,7 @@ $('btnRefresh').onclick=function(){loadData(true);};   // 2026-11-09：点刷新
 // 2026-10-27 21:05：入池筛选是纯前端，改日期直接 render，不再重新请求接口（秒出）
 $('date').onchange=render;$('dateTo').onchange=render;
 $('dClear').onclick=function(){$('date').value='';$('dateTo').value='';render();};
-$('q').oninput=render;$('sort').onchange=render;
+$('q').oninput=render;   // 2026-11-18：#sort 下拉已删（用户拍板），只剩搜索框
 $('fagent').onchange=function(){AGENTF=this.value;render();};
 $('fplan').onchange=function(){PLANF=this.value;render();};
 // 2026-11-05：顶部统计卡点击 = 按这一项筛选（再点一次取消）。用 data-sv + 事件委托，
@@ -11525,9 +11524,6 @@ function render(){
   }
   var rows=STATF?baseRows.filter(function(r){return statHit(r,STATF);}):baseRows;
   var dnEl=$('dn');if(dnEl)dnEl.textContent=(rOn||STATF)?('筛出 '+rows.length+' 个'):'';
-  var s=$('sort').value;
-  if(s==='delta')rows.sort(function(x,y){return (y.delta==null?-999:y.delta)-(x.delta==null?-999:x.delta);});
-  else if(s==='rate')rows.sort(function(x,y){return ((y.a&&y.a.rate)||-1)-((x.a&&x.a.rate)||-1);});
   var withData=baseRows.filter(function(r){return r.a;});
   // 2026-10-26：顶部只保留「看了要知道该不该动手」的字段。
   // 已删：平均650进度（一个池的均值没有行动意义）、次日才入池 / 新号未开刷（新号正常爬坡，行内也不打标记了）。
@@ -11598,6 +11594,7 @@ function render(){
    +statCard('__up',ups,'今日上涨',{color:'#c0392b',title:'650 进度比昨天高的号'})
    +statCard('__down',downs,'今日下跌',{color:'#1e8449',title:'650 进度比昨天低、且不是周期归零的号'})
    +statCard('今日入池',newIn,'今日入池',{color:'#255ea6',title:'added 日期就是今天的号：明天才进轮转开始被听，今天没有快照/进度是正常的。点「入池」列排序可以看各自登记日'})
+   +statCard('采集缺失',cntTxt('采集缺失'),'采集缺失',{color:'#888',title:'今天没采到快照、号还在池且无失效标记（新入池号不计）。采集跟着播放轮走：没跑到的号当天就没快照，所以这个数基本就是「漏跑」名单；偶尔单独出现=快照接口超时。连续几天出现要查'})
    +statCard('周期归零',resets,'周期归零',{color:'#888',title:'昨日 650 已接近满、今天突然 0% 的号（31 天周期到点，不是掉量）'})
    +statCard('今日零增长',zeroGrow,'今日零增长',{warn:true,title:'650 进度和昨天完全一样，且近30日播放量也没涨（=不多不少刚好持平）'})
    +statCard('近30日净增≤0',netLoss,'净增≤0',{warn:true,title:'近30日播放量今天没涨或略降、650 进度也没涨：今天补的播放被 30 天前的老播放到期退出抵掉了（30 天滚动窗口的正常现象），不是播放没算进去。只统计两边快照采集时刻相差 3 小时以内的号，避免拿今早的数和昨晚的数硬比'})
@@ -11833,13 +11830,22 @@ function renderRunbar(){
     var cls=mn?'bad':'good';
     var tip='漏=当轮计划里真没跑到、且号还活着的（判死/失效号已拆去「未补登」）。系统自动补跑，不是丢了。';
     var missTxt='';
+    var fullShow=false;
     if(mn){
       if(poolLive(p))missTxt=' <span class="bad">漏'+mn+' · 补跑中</span>';
       else if(bjHnow()<13)missTxt=' <span class="bad">漏'+mn+'</span><span class="muted"> · 9:30/12:00 补漏轮自动补</span>';
-      else missTxt=' <span class="bad">漏'+mn+'</span><span class="muted"> · 补漏轮已过，今晚 0:10 主轮会再跑</span>';
+      else{
+        // 2026-11-18（用户口径）：白天补漏轮都跑完、只剩今晚 0:10 主轮兜底时，
+        // 不再挂红字漏数 —— 漏的号今晚主轮自动补跑/判死，这里直接显示满额，悬停看明细。
+        fullShow=true;
+        cls='good';
+        tip='有 '+mn+' 个号今晚 0:10 主轮会自动补跑（真失效的号当晚判死、转「未补登」并直邮号主），不丢号。';
+      }
     }
+    var num=c.ran;
+    if(fullShow)num=(eff!=null?eff:c.expected);
     covH+='<span class="'+cls+'" title="'+tip+'">'
-      +(p==='hz'?'主群':'定制群')+' '+c.ran+'/'+(eff!=null?eff:c.expected)+'</span>'
+      +(p==='hz'?'主群':'定制群')+' '+num+'/'+(eff!=null?eff:c.expected)+'</span>'
       +missTxt+' '
       +(rn?'<span class="muted">未补登'+rn+'</span> ':'');
   });
@@ -13252,7 +13258,7 @@ function mRestoreAll(){
 }
 function mDeployMobile(){
   if(MOV.length)return;
-  var fids=['fagent','fplan','dr','sort'],fs=$('fpSlot');
+  var fids=['fagent','fplan','dr'],fs=$('fpSlot');   // 2026-11-18：'sort' 已删
   if(fs){fids.forEach(function(id){var el=mGrab(id);if(el)fs.appendChild(el);});}
   var tids=['btnCsv','btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnMailTrace','btnOut'],ts=$('tdSlot');
   if(ts){tids.forEach(function(id){var el=mGrab(id);if(el)ts.appendChild(el);});}
