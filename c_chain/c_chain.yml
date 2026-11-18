@@ -1,0 +1,40 @@
+name: c-chain
+
+# 2026-11-18：C 组 38~42s 下探自动链路（用户预授权「自动跑，不要让我来记这些事」）。
+# 每日北京 10:30（UTC 02:30）：AB 判定 → 成立则自动启动 C 组 → 3 夜后自动判定并切换/回退。
+# 状态与报告提交回仓库 c_chain/（state.json + last_report.md），幂等可重跑。
+# 铁律：本 workflow 只读 D1、只动 AB/C/POOL_PLAY_SECONDS 三个实验 Secret，不碰业务链路。
+# 文档：文档/01-AB实验与口径/C组38秒下探-自动化运行手册-20261118.md（本地）
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -q pynacl
+      - name: run c-chain
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          C_CHAIN_TOKEN: ${{ secrets.C_CHAIN_TOKEN }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: python c_chain/chain.py
+      - name: commit state
+        run: |
+          git config user.name "c-chain"
+          git config user.email "c-chain@users.noreply.github.com"
+          git add c_chain/state.json c_chain/last_report.md
+          git diff --cached --quiet || git commit -m "C组链路状态 $(date -u +%F)"
+          git push https://x-access-token:${{ secrets.C_CHAIN_TOKEN }}@github.com/xm921016/cron-relay.git HEAD:main || echo "push skipped/failed (state kept in log)"

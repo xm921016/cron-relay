@@ -1,0 +1,29 @@
+{
+ "ab": {
+  "acted": null,
+  "nights": [
+   "2026-11-17",
+   "2026-11-18",
+   "2026-11-19"
+  ],
+  "results": {
+   "2026-11-17": {
+    "exp_sum": 247,
+    "ctrl_sum": 331,
+    "exp_pos": 14,
+    "ctrl_pos": 14,
+    "missing": [],
+    "suspect": false
+   },
+   "2026-11-18": {
+    "exp_sum": 247,
+    "ctrl_sum": 719,
+    "exp_pos": 13,
+    "ctrl_pos": 14,
+    "missing": [],
+    "suspect": false
+   }
+  }
+ },
+ "c": null
+}
