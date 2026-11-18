@@ -10379,7 +10379,9 @@ button.gray{background:#888}button.warn{background:#a32d2d}button:disabled{opaci
    数字 19→18px，标签 11→10.5px），13 张卡在 1400px 以上宽度就能排成一行。
    每张卡现在还是「按钮」：点一下按这一项筛表格（见 pickStat），所以加了 cursor/hover/on 态。 */
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:7px;margin:0 0 12px}
-.stat{background:#f2f7ea;border:1px solid transparent;border-radius:10px;padding:7px 6px;text-align:center;min-width:0;cursor:pointer}
+.stat{background:#f2f7ea;border:1px solid transparent;border-radius:10px;padding:7px 6px;text-align:center;min-width:0;cursor:pointer;display:flex;flex-direction:column;justify-content:center}
+/* 2026-11-18：加 flex 纵向居中 —— grid 同行卡会被最高的那张（标签折两行的）拉伸，
+   单行卡的文字原来顶在上面（用户反馈「居上」），现在无论行高多少都垂直居中 */
 .stat b{display:block;font-size:18px;line-height:1.2;color:#3b6d11}
 .stat span{display:block;font-size:10.5px;line-height:1.3;color:#666;overflow-wrap:break-word}
 .stat:hover{background:#e9f3dc;border-color:#d5e5bd}
