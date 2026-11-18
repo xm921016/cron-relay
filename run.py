@@ -69,6 +69,23 @@ PLAY_RATIO_MIN, PLAY_RATIO_MAX = 0.55, 0.70
 AB_EXP_SONGS = {s.strip() for s in os.environ.get("AB_EXP_SONGS", "").replace("，", ",").split(",") if s.strip()}
 AB_EXP_SECONDS = (55, 60)   # 实验口径：随机 55~60 秒
 
+# ---- 2026-11-18：C 组时长下探（38~42s 档，L2，前置=50s A/B 判定完成后才配 Secret）----
+# 依据：竞品私有版实测 38s 打卡成功（看板 8.2 节），拟验证有效播放口径能否再下探省运行时。
+# 机制与 AB 完全同款：Secret C_EXP_SONGS = 15 首实验歌 id 逗号清单（号主与 A/B 两组不重叠）。
+#   命中 C 组歌的播放按 38~42s 上报。判定与名单见 看板-20261116.md 8.2 节。
+# 安全性：Secret 为空 → C_EXP_SONGS 空集 → 分支永远走不到（默认关）；清 Secret 即回退。
+# ⚠ 判定完成前不配置此 Secret，避免归因污染（看板第六节 6.4）。
+C_EXP_SONGS = {s.strip() for s in os.environ.get("C_EXP_SONGS", "").replace("，", ",").split(",") if s.strip()}
+C_EXP_SECONDS = (38, 42)    # C 组口径：随机 38~42 秒
+
+# ---- 2026-11-18：全池上报口径总开关（C 组判定成立后的终态切换用，默认关）----
+# 机制：环境变量/Secret POOL_PLAY_SECONDS = "下限,上限"（如 "38,42"）。非空时：所有非实验/非下探
+#   名单歌的上报时长改为该区间随机（取代 55%~70% 过半口径）；AB/C 名单分支仍优先。
+# 安全性：为空 → 与现网逐字节一致（默认关）。C 组判定后全池切换=配这个 Secret；回退=清空。
+POOL_PLAY_SECONDS = tuple(
+    int(x) for x in os.environ.get("POOL_PLAY_SECONDS", "").replace("，", ",").replace(" ", "").split(",") if x.strip()
+) or None
+
 # 跨群（2026-10-20）：只向对端群拉「歌曲 id 列表」，双方的 KV 账号池、人数、上限完全独立。
 # 鉴权复用本群已有的群口令 NB_PASS：对端 worker 的 PEER_PASS 键里存的就是本群口令（管理员写成对穿的），
 # 所以不需要新建任何 GitHub Secret。PEER_PASS 环境变量留作以后手工覆盖用。
@@ -896,6 +913,7 @@ def main():
 
         cnt, secs = 0, []
         exp_cnt = 0   # 2026-11-16 A/B：本号命中实验歌的次数（55~60s 口径）
+        c_cnt = 0     # 2026-11-18 C 组：本号命中下探歌的次数（38~42s 口径）
         for sid, dur, pid in tasks:
             if random.random() < skip_prob:
                 continue  # 模拟切歌（切歌即不计有效播放，和真实用户行为一致）
@@ -907,18 +925,32 @@ def main():
                 t = random.randint(*AB_EXP_SECONDS)
                 t = min(t, base - 3)
                 t = max(t, min(MIN_PLAY_SECONDS, base - 3))
+            elif str(sid) in C_EXP_SONGS:
+                # 2026-11-18 C 组下探分支：38~42s 档（默认关=名单空永远走不到这里；前置=AB 判定后配 Secret）
+                t = random.randint(*C_EXP_SECONDS)
+                t = min(t, base - 3)
+                t = max(t, min(MIN_PLAY_SECONDS, base - 3))
             else:
-                t = int(base * random.uniform(PLAY_RATIO_MIN, PLAY_RATIO_MAX))
-                t = min(t, base - 3)                              # 绝不报超过歌曲自身时长
-                t = max(t, min(MIN_PLAY_SECONDS, base - 3))       # 保底 35s，短歌以歌长为界
+                if POOL_PLAY_SECONDS:
+                    # 2026-11-18 全池口径总开关（默认关；C 组判定成立后配 POOL_PLAY_SECONDS 启用）
+                    t = random.randint(*POOL_PLAY_SECONDS)
+                    t = min(t, base - 3)
+                    t = max(t, min(MIN_PLAY_SECONDS, base - 3))
+                else:
+                    t = int(base * random.uniform(PLAY_RATIO_MIN, PLAY_RATIO_MAX))
+                    t = min(t, base - 3)                              # 绝不报超过歌曲自身时长
+                    t = max(t, min(MIN_PLAY_SECONDS, base - 3))       # 保底 35s，短歌以歌长为界
             if client.scrobble(sid, t, pid=pid, page="playlist"):
                 cnt += 1
                 secs.append(t)
                 if str(sid) in AB_EXP_SONGS:
                     exp_cnt += 1
+                elif str(sid) in C_EXP_SONGS:
+                    c_cnt += 1
             time.sleep(random.uniform(1, 3))
         _ab_tag = f"（[AB] 实验口径 {exp_cnt} 次）" if exp_cnt else ""
-        print(f"  [{name}] 完成 {cnt} 次播放{_ab_tag}" + (f"，平均 {sum(secs)//len(secs)}s/首" if secs else ""))
+        _c_tag = f"（[C] 下探口径 {c_cnt} 次）" if c_cnt else ""
+        print(f"  [{name}] 完成 {cnt} 次播放{_ab_tag}{_c_tag}" + (f"，平均 {sum(secs)//len(secs)}s/首" if secs else ""))
         if cnt:
             _uid_done = str(acc.get("uid") or name)
             ran_uids.append(_uid_done)

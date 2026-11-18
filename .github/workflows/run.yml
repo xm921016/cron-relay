@@ -486,6 +486,11 @@ jobs:
       # Secret AB_EXP_SONGS=实验歌曲 id 逗号清单；不存在/为空时 run.py 行为与现网逐字节一致。
       # 实验结束清空 Secret 即回退。补跑（backfill/dispatch）共用本 env，实验歌口径自动延续。
       AB_EXP_SONGS: ${{ secrets.AB_EXP_SONGS }}
+      # 2026-11-18：C 组 38~42s 下探（看板 8.2/C组看板-20261118）。Secret C_EXP_SONGS=C 组歌曲 id
+      # 逗号清单；为空时分支永远走不到（默认关）。前置=AB 判定完成后才配。
+      # POOL_PLAY_SECONDS="下限,上限"=全池口径总开关（C 组判定成立后的终态切换用，为空=现网口径）。
+      C_EXP_SONGS: ${{ secrets.C_EXP_SONGS }}
+      POOL_PLAY_SECONDS: ${{ secrets.POOL_PLAY_SECONDS }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
