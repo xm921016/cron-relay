@@ -8976,6 +8976,64 @@ async function handle(request) {
       } catch (e) {}
       return json(Object.assign({ ok: true, mode: 'anom', cached: false }, dataN), 200, CORS);
     }
+    /* ---- 2026-11-18：Phase 4 第一步「只算不派」/api/console/relay_plan（只读 + 一次 KV 落盘）----
+       目的：把 run.yml plan job 的 python 分片算法移植成 worker 内只读接口，输出今晚 plan 的
+       完整计算结果，并写一份到 KV（qgt:relay_plan:<day>）供逐晚与 GitHub plan job 日志比对；
+       Phase 4 真正把 plan 触发源切到 CF 之前，先并跑 3 晚以上，两边输出逐项一致才切换。
+       红线：只算不派 —— 不 dispatch、不写 D1、不动 buildPlan/任何既有函数与口径；
+       唯一副作用是一次 await 的 KV put（fire-and-forget 在 Workers 里不落盘，必须 await）。
+       算法与 cron-relay/.github/workflows/run.yml plan 段逐字同源
+       （TARGET_WAVES=3、ACCOUNTS_PER_SLICE=auto、ACCOUNT_PARALLEL=空、MIN_SLICES=4、MAX_SLICES=250）：
+         per0 = max(8, ceil(n / (3*20)))
+         par  = clamp(ceil(per0*2.0), 24, 48)
+         per  = max(8, min(per0, floor(par/2)))
+         ns   = clamp(ceil(n/per), 4, 250)
+         fanout = ns//2 >= 3（正常轮口径；带 ns_override/only_slices 的补跑不经过本接口）
+         fs_lo  = ns//2；m2_slices=0..fs_lo-1（派 N2b 016）、fs_slices=fs_lo..ns-1（派 N2 015）
+       查池口径与 plan job 完全一致：buildPlan(day) → plans.filter(pool===POOL_NAME).length
+       （= /api/pool_stat 回的 m_pool，plan job 正是用它当 n）。body.m 传正整数则跳过查池、
+       按给定人数重算 —— 回归对照（近 3 晚 GitHub plan 输出 vs 本接口同输入重算）专用。 ---- */
+    if (url.pathname === '/api/console/relay_plan' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let bodyP;
+      try { bodyP = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(bodyP))) {
+        const whoP = await consoleRole(bodyP);
+        return json({ message: whoP === 'ro' ? '当前是只读口令：relay_plan 只对群主开放' : '账号或密码错误' }, 403, CORS);
+      }
+      const dayP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(String(bodyP.day || '')) ? String(bodyP.day) : beijingDate();
+      const t0P = Date.now();
+      let nP = parseInt(bodyP.m, 10), srcP = 'm_override';
+      if (!(nP > 0)) {
+        // 与 run.yml plan job 同一条查池路径：buildPlan（D1 失败自动 KV 兜底），取本池可播数
+        const planP = await buildPlan(dayP);
+        if (!planP || !planP.ok) return json({ ok: false, message: '查池失败：' + ((planP && planP.msg) || 'buildPlan 无结果') }, 503, CORS);
+        nP = planP.plans.filter(x => x.pool === POOL_NAME).length;
+        srcP = planP.src || 'd1';
+      }
+      // —— 以下与 run.yml plan 段逐字同源（2026-11-17 Phase 2 版：master 0 片、双 follower 对半分）——
+      const per0P = Math.max(8, Math.ceil(nP / 60));                                 // TARGET_WAVES=3 × JOB_CONC=20
+      const parP = Math.max(24, Math.min(48, Math.ceil(per0P * 2.0)));
+      const perP = Math.max(8, Math.min(per0P, Math.floor(parP / 2)));
+      const nsP = Math.max(4, Math.min(250, Math.ceil(nP / perP)));                  // MIN_SLICES=4 / MAX_SLICES=250
+      const fanoutP = Math.floor(nsP / 2) >= 3 ? 1 : 0;
+      const fsLoP = fanoutP ? Math.floor(nsP / 2) : 0;
+      const m2P = [], fsP = [];
+      for (let iP = 0; iP < fsLoP; iP++) m2P.push(iP);
+      for (let iP = fsLoP; iP < nsP; iP++) fsP.push(iP);
+      const recP = { day: dayP, m: nP, per0: per0P, par: parP, per: perP, ns: nsP,
+        fanout: fanoutP, fs_lo: fsLoP, m2_slices: m2P, fs_slices: fsP, src: srcP, at: bjStamp() };
+      const kvKeyP = 'qgt:relay_plan:' + dayP;
+      let kvWroteP = 0;
+      if (bodyP.kv !== false) {
+        try {
+          // 必须 await：响应返回后 Workers 会取消未完成的 promise，挂空写不落盘（mt:cache 同款教训）
+          await POOL.put(kvKeyP, JSON.stringify(recP));
+          kvWroteP = 1;
+        } catch (e) {}
+      }
+      return json(Object.assign({ ok: true, kvKey: kvKeyP, kv: kvWroteP, ms: Date.now() - t0P }, recP), 200, CORS);
+    }
     /* ---- 2026-11-17：CK 实时验证 /api/console/cktest（只读）----
        回答「换绑 / 改 CK 之后，到底生效没」：拿号池里当前存的这条 CK 实时调网易
        登录校验（validateCookie，与登记/换绑落库前是同一个函数），返回活死 + uid
