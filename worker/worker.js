@@ -9410,7 +9410,7 @@ async function fetchActionsStatus() {
       const _runs = rd.workflow_runs || [];
       const run = _runs.filter(x => x.status !== 'completed')[0] || _runs[0];
       if (!run) return { pool: r.pool, ok: false, note: '无运行记录' };
-      let jobsOk = 0, jobsTotal = 0, jobsDone = 0;
+      let jobsOk = 0, jobsTotal = 0, jobsDone = 0, jobsSkip = 0;
       try {
         const jr = await T(fetch(base + '/actions/runs/' + run.id + '/jobs?per_page=100', { headers: H }));
         if (jr.ok) {
@@ -9434,11 +9434,18 @@ async function fetchActionsStatus() {
           jobsTotal = Math.max(_tc, list.length);
           jobsOk = list.filter(j => j.conclusion === 'success').length;
           jobsDone = list.filter(j => j.status === 'completed').length;
+          // 2026-11-18：skipped 的 job 从分母/已完成里剔除，跳过数单独透出给前端。
+          // 背景：Phase 2「master 0 片」后 hz 正常轮 brush 是哨兵片 [-1] 整 job 跳过，
+          // GitHub 照样把它计入 job 总数，控制台显示「成功 · 1/2 job」像丢了任务（实际
+          // 播放都在 015/016 节点仓）。剔除后 hz 显示 1/1 job · 跳过 1，dz 32/32 不变。
+          jobsSkip = list.filter(j => j.conclusion === 'skipped').length;
+          jobsTotal = Math.max(0, jobsTotal - jobsSkip);
+          jobsDone = Math.max(0, jobsDone - jobsSkip);
         }
       } catch (e) { /* job 明细拉失败不影响概览展示 */ }
       return { pool: r.pool, ok: true, conclusion: run.conclusion || '', status: run.status || '',
                created: run.created_at || '', run_id: run.id, jobs_ok: jobsOk, jobs_done: jobsDone,
-               jobs_total: jobsTotal, url: run.html_url || '' };
+               jobs_total: jobsTotal, jobs_skip: jobsSkip, url: run.html_url || '' };
     } catch (e) {
       return { pool: r.pool, ok: false, note: String((e && e.message) || e).slice(0, 60) };
     }
@@ -11598,6 +11605,10 @@ function renderRunbar(){
       // conclusion 为空 → 要么显示成失败、要么根本不出现，进度看不见。
       var live=!!a.status&&a.status!=='completed';
       var jobTxt=a.jobs_total?(' · '+a.jobs_ok+'/'+a.jobs_total+' job'):'';
+      // 2026-11-18：skipped job 已被服务端从分母剔除，这里补一个「跳过N」提示。
+      // Phase 2 后 hz master 正常轮必有一个哨兵 skipped（brush 0 片，播放外移 015/016），
+      // 不提示会显示成「1/1 job」像少了东西；dz 无 skipped 时完全不变。
+      var skipTxt=a.jobs_skip?(' · 跳过 '+a.jobs_skip+'（播放外移节点仓）'):'';
       var head;
       if(live){
         var dn=(a.jobs_done==null?a.jobs_ok:a.jobs_done);
@@ -11605,9 +11616,9 @@ function renderRunbar(){
         head='<span style="color:#185FA5">● 进行中 '+(tot?(dn+'/'+tot+' job'):'（排队中）')+'</span>';
         if(a.jobs_ok&&dn>a.jobs_ok)head+='<span class="muted"> · 成功 '+a.jobs_ok+'</span>';
       }else if(a.conclusion==='success'){
-        head='<span class="good">✓ 成功'+esc(jobTxt)+'</span>';
+        head='<span class="good">✓ 成功'+esc(jobTxt+skipTxt)+'</span>';
       }else{
-        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(jobTxt)+'</span>';
+        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(jobTxt+skipTxt)+'</span>';
       }
       // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，
       // 这里再按 ROLE 兜一层（缓存里的旧数据 / 将来字段改名时不至于漏出链接）。
