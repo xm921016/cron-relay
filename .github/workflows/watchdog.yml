@@ -26,6 +26,13 @@ on:
     - cron: '10 18 * * *'      # UTC 18:10 ≈ 北京 2:10
   workflow_dispatch: {}
 
+# 2026-11-18 修复：仓库默认 GITHUB_TOKEN 只有 Contents/Metadata/Packages 读权限，
+#   连「读 run 列表」（需 actions: read）都 403，看门狗瘫痪（11-18 07:38 实例）。
+#   显式声明：dispatch run.yml 补开 + dispatch alert-relay 告警 都需要 actions: write。
+permissions:
+  actions: write
+  contents: read
+
 concurrency:
   group: relay-watchdog
   cancel-in-progress: false
