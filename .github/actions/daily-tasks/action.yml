@@ -1,0 +1,59 @@
+name: 'daily tasks (mkacc/signin/notes/mark)'
+description: 'follower 日常四步的唯一定义处。改口径只改本文件；follower run.yml 用 uses: ./src/.github/actions/daily-tasks 引用（2026-11-18 收敛：此前主仓 11-15 改签到口径，follower 各仓 run.yml 漏跟 → 全量签到多跑 3 天）。主仓自身 run.yml 的 brush 步骤暂保留内联（同仓同提交可见）。'
+runs:
+  using: composite
+  steps:
+    - id: mkacc
+      name: build accounts for signin/notes
+      shell: bash
+      continue-on-error: true
+      run: cd "${SRC_DIR:-src}" && python make_accounts.py
+    - id: signin
+      name: daily signin (只保留大号 17316702006)
+      shell: bash
+      continue-on-error: true
+      run: |
+        # 2026-11-15 用户指示（2026-11-18 全池收敛）：只保留大号 17316702006 签到，
+        # 其余号只有 刷播放量+发笔记（核心=播放量）。
+        # 实现：把大号从 accounts.json 过滤到 accounts_signin.json（不动原文件，
+        # notes.py 仍用全量名单），经 SIGNIN_CONFIG 传给 signin.py（主仓 11-15 已支持）。
+        # 大号强制 roles=signin；source 标 Secrets = 只签到、不判死不删号
+        # （大号的验活/判死由 run.py 播放链路负责，不在这里重复）。
+        cd "${SRC_DIR:-src}"
+        python - <<'PY'
+        import json
+        cfg = json.load(open('accounts.json', encoding='utf-8'))
+        keep = [a for a in cfg.get('accounts', []) if str(a.get('name')) == '17316702006']
+        for a in keep:
+            a['roles'] = 'signin'
+        cfg['accounts'] = keep
+        cfg['source'] = 'Secrets'
+        json.dump(cfg, open('accounts_signin.json', 'w', encoding='utf-8'), ensure_ascii=False)
+        print('signin 大号命中:', len(keep))
+        PY
+        N=$(python -c "import json;print(len(json.load(open('accounts_signin.json'))['accounts']))")
+        if [ "$N" -gt 0 ]; then
+          SIGNIN_CONFIG=accounts_signin.json python signin.py
+        else
+          echo "本片无大号 17316702006，跳过签到（只保留大号签到）"
+        fi
+    - id: notes
+      name: notes publish (per-account every day)
+      shell: bash
+      continue-on-error: true
+      run: |
+        cd "${SRC_DIR:-src}"
+        N=$(python -c "import json;print(len(json.load(open('accounts.json'))['accounts']))")
+        if [ "$N" -gt 0 ]; then python notes.py; else echo "本片无账号，跳过笔记"; fi
+    - id: mark
+      name: mark failures (不重跑本片)
+      shell: bash
+      env:
+        MKACC: ${{ steps.mkacc.outcome }}
+        SIGNIN: ${{ steps.signin.outcome }}
+        NOTES: ${{ steps.notes.outcome }}
+      run: |
+        echo "取号=$MKACC 签到=$SIGNIN 笔记=$NOTES"
+        if [ "$MKACC" != "success" ] || [ "$SIGNIN" != "success" ] || [ "$NOTES" != "success" ]; then
+          echo "::error::本片签到/笔记/取号未全部成功（播放已完成，故意不让 job 失败，避免 guard 整片重播）"
+        fi
