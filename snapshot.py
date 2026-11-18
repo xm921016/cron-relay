@@ -372,6 +372,17 @@ def main():
     elif already_collected_today():
         return
 
+    # 2026-11-18 错峰启动（用户拍板方案①）：原来 40 个 runner 同时开查，约 1330 个
+    # 工作台请求在 21 秒内瞬间打出（09:30:26~09:31:17），网易把一批请求限流成
+    # 「工作台无数据」，snapshot.py 重试一次仍空就跳过 —— 当天固定缺 20~30 个号、
+    # 次日随机换一批。按片号 × SNAP_STAGGER 秒错峰，把洪峰摊平；
+    # 总时长最多增加 39×20s≈13 分钟，远小于单 job 6h 上限。SNAP_STAGGER=0 可关闭回滚。
+    _stagger = _env_int("SNAP_STAGGER", 20, 0, 300)
+    if SNAP_JOBS > 1 and _stagger > 0 and SNAP_JOB > 0:
+        _delay = SNAP_JOB * _stagger
+        print(f"[650补采] 错峰启动：片 {SNAP_JOB}/{SNAP_JOBS}，延迟 {_delay}s 后开始（摊平请求防网易限流）。")
+        time.sleep(_delay)
+
     accs = load_pool()
     if accs is None:
         raise SystemExit(1)

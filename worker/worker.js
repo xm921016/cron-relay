@@ -1338,25 +1338,87 @@ async function live650Batch(list) {
   return out;
 }
 
-// 校验一个 MUSIC_U 是否还活着（手动登记即时反馈）
-// 策略：重试 2 次；若网易接口不可达（网络/非 JSON 响应）且 cookie 形状合法，降级放行（provisional），
-// 交由次日 Actions 的 login_by_cookie 复验，失效号会被 /api/report_dead 自动清理。
+// ===== 2026-11-18：CK 校验对齐夜轮（run.py login_by_cookie）口径 =====
+// 根因（11-18 实锤，15532422838）：旧实现只用普通 GET /api/nuser/account/get 单通道，
+// 部分号在该通道被网易当未登录（code=200 但 profile=None），而 weapi 通道认、
+// 650 还在涨、夜轮任务照常跑 —— 控制台「CK验证」误报失效。现在与 run.py 逐字同口径：
+//   ① weapi POST /weapi/w/nuser/account/get 拿 profile；
+//   ② 没拿到 uid 时用每日推荐二次验证（api v1 明文接口：活号 30+ 首、死号/匿名 0 首；
+//      weapi v3 对匿名也回歌单无区分度，run.py 2026-10-11 实测口径）。
+// weapi 加密与 run.py weapi_encrypt 完全一致：固定 key 两轮 AES-CBC + 固定 encSecKey（无 RSA）。
+const WEAPI_NONCE = '0CoJUm6Qyw8W8jud';
+const WEAPI_KEY = 'TA3YiYCfY2dDJQgg';
+const WEAPI_IV = '0102030405060708';
+const WEAPI_ENCSECKEY = '84ca47bca10bad09a6b04c5c927ef077d9b9f1e37098aa3eac6ea70eb59df0aa28b691b7e75e4f1f9831754919ea784c8f74fbfadf2898b0be17849fd656060162857830e241aba44991601f137624094c114ea8d17bce815b0cd4e5b8e2fbaba978c6d1d14dc3d1faf852bdd28818031ccdaaa13a6018e1024e2aae98844210';
+const PC_UA_V = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+async function weapiEncB64(text, key) {
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(key), { name: 'AES-CBC' }, false, ['encrypt']);
+  const buf = await crypto.subtle.encrypt({ name: 'AES-CBC', iv: new TextEncoder().encode(WEAPI_IV) }, km, new TextEncoder().encode(text));
+  const b = new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+  return btoa(s);
+}
+async function weapiBody(data) {
+  let p = JSON.stringify(data);
+  p = await weapiEncB64(p, WEAPI_NONCE);
+  p = await weapiEncB64(p, WEAPI_KEY);
+  return 'params=' + encodeURIComponent(p) + '&encSecKey=' + WEAPI_ENCSECKEY;
+}
+// 设备身份必须跨次稳定（run.py Client 2026-11 口径：同账号每天换新设备是风控最易命中的
+// 特征）。run.py 用 md5(ck)，worker 的 WebCrypto 没有 MD5 —— 用 SHA-256 派生，同样
+// 按 cookie 派生、永久不变，用途一致。
+async function deviceIdOf(mu) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(mu));
+  return 'YD-' + [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('').slice(0, 32);
+}
+// 校验一个 MUSIC_U 是否还活着（手动登记即时反馈 / 控制台 CK 验证）。
+// 返回：{ok:true,uid} 正常活号；
+//   {ok:true,restricted:true,diag} 受限会话（登录校验没过但每日推荐有歌=号活着，
+//     但拿不到 uid —— 登记类入口必须拦下，避免污染 uid 去重）；
+//   {ok:false,msg} 明确失效（登录校验 + 每日推荐 0 首双重确认）；
+//   {ok:true,provisional:true,diag} 网易接口不可达降级放行（provisional），
+//     交由次日 Actions 的 login_by_cookie 复验，失效号会被 /api/report_dead 自动清理。
 async function validateCookie(musicU) {
   const ck = 'MUSIC_U=' + musicU;
   let lastDiag = '';
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      // 普通接口（非 weapi）：带 cookie 直接查账号，2026-10-10 实测返回 JSON
-      const r = await fetch(`${BASE}/api/nuser/account/get`, {
-        method: 'GET',
-        headers: { 'User-Agent': UA, Referer: BASE + '/', 'Cookie': ck },
+      // cookie 增强 + Origin 头与 run.py Client 逐字同口径（11-18 实测：裸 MUSIC_U 在
+      // weapi 上对受限号也会回 profile=None，带上 deviceId/os=pc 等后正常返回 uid）。
+      const body = await weapiBody({});
+      const did = await deviceIdOf(musicU);
+      const r = await fetch(BASE + '/weapi/w/nuser/account/get', {
+        method: 'POST',
+        headers: { 'User-Agent': PC_UA_V, Referer: BASE, Origin: BASE, Cookie: ck + '; deviceId=' + did
+          + '; os=pc; appver=2.10.11.200601; osver=Microsoft-Windows-10-Professional-build-19045-64bit'
+          + '; channel=netease; MUSIC_A_T=1',
+          'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body,
       });
       const txt = await r.text();
       let j = null;
       try { j = JSON.parse(txt); } catch (e) {}
       if (j && j.code === 200 && (j.profile || {}).userId) return { ok: true, uid: j.profile.userId };
-      if (j) return { ok: false, msg: '网络波动了一下，没有识别成功：请稍等几秒再重试一次；如果反复出现这个提示，请联系客服处理' };
-      lastDiag = 'HTTP ' + r.status + '，响应非 JSON：' + txt.slice(0, 60);
+      if (j) {
+        // 与 run.py 同口径：任何业务码都不直接判死（301 只代表「这次会话不被认」，
+        // 风控/限流时也回 301），用每日推荐二次验证做最终裁决。
+        let dailyN = -1;
+        try {
+          const r1 = await fetch(BASE + '/api/v1/discovery/recommend/songs', {
+            headers: { 'User-Agent': PC_UA_V, Referer: BASE, Origin: BASE, Cookie: ck + '; deviceId=' + did
+              + '; os=pc; appver=2.10.11.200601; osver=Microsoft-Windows-10-Professional-build-19045-64bit'
+              + '; channel=netease; MUSIC_A_T=1' },
+          });
+          const j1 = await r1.json();
+          dailyN = (((j1 || {}).data || {}).dailySongs || []).length;
+        } catch (e) { dailyN = -1; }
+        if (dailyN > 0) return { ok: true, uid: null, restricted: true, diag: '每日推荐返回 ' + dailyN + ' 首' };
+        if (dailyN === 0) return { ok: false, msg: 'CK 已失效（网易登录校验 + 每日推荐双重确认，与夜轮口径一致）' };
+        lastDiag = '登录校验返回 code=' + (j.code || '?') + '，每日推荐二次验证请求失败';
+      } else {
+        lastDiag = 'HTTP ' + r.status + '，响应非 JSON：' + txt.slice(0, 60);
+      }
     } catch (e) {
       lastDiag = '网络异常：' + ((e && e.message) || e);
     }
@@ -5788,6 +5850,10 @@ async function handle(request) {
           return json({ message: '网易校验接口暂时不可达（' + (v.diag || '网络异常') + '），为避免登记出错号，请稍后重试。' }, 503);
         }
       }
+      /* 2026-11-18：受限会话=号活着但这次拿不到 uid，登记会污染 uid 去重，一律拦下重试。 */
+      if (v.restricted) {
+        return json({ message: '网易这次没认这个号的登录校验（受限会话，号本身可能还活着）。为避免登记出错，请等几分钟重试一次；反复出现请联系客服核对 CK' }, 503);
+      }
       const song = _mkPre === 'ckswap'
         ? { ok: true, name: '', arts: [], song: '' }   // 换绑不读歌链，占位放行（后面走 ckswap 分支）
         : await resolveSong(body.link);
@@ -6028,6 +6094,10 @@ async function handle(request) {
         return json({ ok: false, message: '网易校验接口暂时不可达（' + (vS.diag || '网络异常')
           + '），没法核对账号，请稍后重试' }, 503, CORS);
       }
+      /* 2026-11-18：受限会话拿不到 uid，没法核对池内账号，拦截重试。 */
+      if (vS.restricted) {
+        return json({ ok: false, message: '网易这次没认这个号的登录校验（受限会话，号本身可能还活着），请等几分钟重试一次' }, 503, CORS);
+      }
       const sMaster = await mergePool();
       const sTgt = sMaster.find(e => e && e.uid != null && String(e.uid) === String(vS.uid)) || null;
       if (!sTgt) {
@@ -6224,6 +6294,10 @@ async function handle(request) {
           return json({ ok: false, message: '网易校验接口暂时不可达（' + (csV.diag || '网络异常')
             + '），没法核对账号，请稍后重试' }, 503);
         }
+        /* 2026-11-18：受限会话拿不到 uid，没法核对池内账号，拦截重试。 */
+        if (csV.restricted) {
+          return json({ ok: false, message: '网易这次没认这个号的登录校验（受限会话，号本身可能还活着），请等几分钟重试一次' }, 503);
+        }
         const csMaster = await mergePool();
         const csTgt = csMaster.find(e => e && e.uid != null && String(e.uid) === String(csV.uid)) || null;
         if (!csTgt) {
@@ -6284,6 +6358,10 @@ async function handle(request) {
       if (!v.ok) return json({ ok: false, message: v.msg || '登录凭证已失效，请重新扫码' }, 400);
       if (v.provisional) {
         return json({ ok: false, message: '网易校验接口暂时不可达（' + (v.diag || '网络异常') + '），请稍后重试' }, 503);
+      }
+      /* 2026-11-18：受限会话拿不到 uid，登记/换绑会污染 uid 去重，拦截重试。 */
+      if (v.restricted) {
+        return json({ ok: false, message: '网易这次没认这个号的登录校验（受限会话，号本身可能还活着）。请等几分钟重试一次；反复出现请联系客服核对 CK' }, 503);
       }
       const song = await resolveSong(b0.link);
       if (!song.ok) return json({ ok: false, message: song.msg }, 400);
@@ -6722,6 +6800,8 @@ async function handle(request) {
       if (mu) {
         const v = await validateCookie(mu);
         if (!v.ok) return json({ message: v.msg }, 400);
+        /* 2026-11-18：受限会话拿不到 uid，没法按 uid 认回原单，拦截重试。 */
+        if (v.restricted) return json({ message: '网易这次没认这个号的登录校验（受限会话，号本身可能还活着），请等几分钟重试一次' }, 503);
         target = master.find(e => e.uid != null && String(e.uid) === String(v.uid)) || null;
       } else {
         target = master.find(e => e.name === phone) || null;
@@ -8874,7 +8954,11 @@ async function handle(request) {
       const missN = [];
       for (const a of accN) {
         if (nrmN(a.relogin_at) || nrmN(a.suspect_at)) continue;
-        if (nrmN(a.added).slice(0, 10) > dayD) continue;   // 基准日之后入池的不算缺采
+        // 2026-11-18 改（用户拍板「新号当天不算缺采」）：buildPlanFrom 口径是「当天新登记的
+        // 次日才跑」，所以 added=基准日 的号当天必然没有快照 —— 原来只排除 added>基准日，
+        // 当天入池的号全被虚报成缺采（11-17 缺 103、11-18 缺 41 里 16 个都是这种）。
+        // 现在排除 added>=基准日，登记次日起才算进缺采口径。
+        if (nrmN(a.added).slice(0, 10) >= dayD) continue;
         if (!seenN[nrmN(a.uid)]) missN.push({ uid: nrmN(a.uid), name: nrmN(a.name), agent: nrmN(a.agent), added: nrmN(a.added), exp: nrmN(a.exp) });
       }
       const dataN = { ok: true, mode: 'anom', dayD: dayD, dayP: dayP,
@@ -8921,6 +9005,12 @@ async function handle(request) {
       if (vK.provisional) {
         return json({ ok: true, verdict: 'unknown', uid: String(targetK.uid || ''), name: String(targetK.name || ''),
           message: '网易校验接口暂时不可达（' + (vK.diag || '网络异常') + '），这次判断不了，稍后再点一次' }, 200, CORS);
+      }
+      /* 2026-11-18：受限会话=号活着但这次拿不到 uid（登录校验没过、日推有歌）。
+         判活不判死（与夜轮口径一致），只是 uid 对不上核对这一项。 */
+      if (vK.restricted) {
+        return json({ ok: true, verdict: 'alive', uid: String(targetK.uid || ''), name: String(targetK.name || ''), realUid: '',
+          message: '受限会话：网易登录校验这次没认这个会话，但每日推荐返回了歌（' + (vK.diag || '') + '）——号是活的，与夜轮验活口径一致。uid 本次无法核对' }, 200, CORS);
       }
       if (!vK.ok) {
         return json({ ok: true, verdict: 'dead', uid: String(targetK.uid || ''), name: String(targetK.name || ''),
@@ -12547,7 +12637,7 @@ function mtRenderAnom(d){
   h+=mtSec('播放量停滞（近30日播放与前一天持平）','#8a6d1a',d.flatRpc||[],[
     ['账号',mtAcc],['UID',mtUid],['代理',function(r){return esc(r.agent||'—');}],['近30日播放',mtRpc],['连续',mtStreak]
   ]);
-  h+=mtSec('缺采（基准日没采到且无失效标记）','#555',d.missing||[],[
+  h+=mtSec('缺采（基准日没采到且无失效标记；当天新登记的号次日才首采，不计入）','#555',d.missing||[],[
     ['账号',mtAcc],['UID',mtUid],['代理',function(r){return esc(r.agent||'—');}],
     ['入池',function(r){return esc(String(r.added||'—').slice(0,10));}],['到期',function(r){return esc(r.exp||'—');}]
   ]);
