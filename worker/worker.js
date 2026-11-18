@@ -11605,20 +11605,41 @@ function renderRunbar(){
       // conclusion 为空 → 要么显示成失败、要么根本不出现，进度看不见。
       var live=!!a.status&&a.status!=='completed';
       var jobTxt=a.jobs_total?(' · '+a.jobs_ok+'/'+a.jobs_total+' job'):'';
-      // 2026-11-18：skipped job 已被服务端从分母剔除，这里补一个「跳过N」提示。
-      // Phase 2 后 hz master 正常轮必有一个哨兵 skipped（brush 0 片，播放外移 015/016），
-      // 不提示会显示成「1/1 job」像少了东西；dz 无 skipped 时完全不变。
-      var skipTxt=a.jobs_skip?(' · 跳过 '+a.jobs_skip+'（播放外移节点仓）'):'';
+      // 2026-11-18（用户口径二改）：hz 主仓 Phase 2 后只剩排片 job，「1/1 job」没意义——
+      // 改按「仓库」口径：24h 内有过 run 的节点仓（015/016）算活跃仓，全绿显示「仓库 2/2」；
+      // 有仓在跑显示「播放中/补跑中 仓号」（节点 run 的北京 0~6 点=主轮播放，其余时段=补漏轮）。
+      // 节点仓数据服务端 nodes[] 已带 status/conclusion/created（RO 只抹 url），前端纯本地计算。
+      var repoTxt='',nodeTxt='';
+      if(a.pool==='hz'&&Array.isArray(a.nodes)){
+        var act=a.nodes.filter(function(n){return n&&n.created&&(Date.now()-new Date(n.created).getTime())<86400000;});
+        var okN=0,lvMain=[],lvBack=[],flNames=[];
+        act.forEach(function(n){
+          if(n.status&&n.status!=='completed'){
+            var bh=new Date(new Date(n.created).getTime()+8*3600*1000).getUTCHours();
+            if(bh<6)lvMain.push(n.name);else lvBack.push(n.name);
+          }
+          else if(n.conclusion==='success')okN++;
+          else flNames.push(n.name);
+        });
+        if(act.length)repoTxt=' · 仓库 '+okN+'/'+act.length;
+        if(lvMain.length)nodeTxt+='<span style="color:#185FA5"> · 播放中 '+lvMain.join(',')+'</span>';
+        if(lvBack.length)nodeTxt+='<span style="color:#185FA5"> · 补跑中 '+lvBack.join(',')+'</span>';
+        if(flNames.length)nodeTxt+='<span class="bad"> · '+flNames.join(',')+'仓失败</span>';
+      }
       var head;
       if(live){
-        var dn=(a.jobs_done==null?a.jobs_ok:a.jobs_done);
-        var tot=(a.jobs_total||0);
-        head='<span style="color:#185FA5">● 进行中 '+(tot?(dn+'/'+tot+' job'):'（排队中）')+'</span>';
-        if(a.jobs_ok&&dn>a.jobs_ok)head+='<span class="muted"> · 成功 '+a.jobs_ok+'</span>';
+        if(a.pool==='hz'){
+          head='<span style="color:#185FA5">● 进行中（排片/派发）</span>'+nodeTxt;
+        }else{
+          var dn=(a.jobs_done==null?a.jobs_ok:a.jobs_done);
+          var tot=(a.jobs_total||0);
+          head='<span style="color:#185FA5">● 进行中 '+(tot?(dn+'/'+tot+' job'):'（排队中）')+'</span>';
+          if(a.jobs_ok&&dn>a.jobs_ok)head+='<span class="muted"> · 成功 '+a.jobs_ok+'</span>';
+        }
       }else if(a.conclusion==='success'){
-        head='<span class="good">✓ 成功'+esc(jobTxt+skipTxt)+'</span>';
+        head='<span class="good">✓ 成功'+esc(a.pool==='hz'?repoTxt:jobTxt)+'</span>'+nodeTxt;
       }else{
-        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(jobTxt+skipTxt)+'</span>';
+        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(a.pool==='hz'?repoTxt:jobTxt)+'</span>'+nodeTxt;
       }
       // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，
       // 这里再按 ROLE 兜一层（缓存里的旧数据 / 将来字段改名时不至于漏出链接）。
@@ -11642,18 +11663,36 @@ function renderRunbar(){
     }
   });
   var covH='';
+  // 2026-11-18（用户口径二改）：不写「缺N」——漏跑写「漏N」并说明什么时候补；
+  // 已通知重登的号单独「未补登N」。补跑是否正在进行 = 主仓 run 在跑 或 任一节点仓 run 在跑。
+  function bjHnow(){var d=new Date(Date.now()+8*3600*1000);return d.getUTCHours()+d.getUTCMinutes()/60;}
+  function poolLive(p){
+    var a=null;
+    A.forEach(function(x){if(x&&x.pool===p&&x.ok)a=x;});
+    if(!a)return false;
+    if(a.status&&a.status!=='completed')return true;
+    if(Array.isArray(a.nodes))return a.nodes.some(function(n){return n&&n.status&&n.status!=='completed';});
+    return false;
+  }
   ['hz','dz'].forEach(function(p){
     var c=C[p];
     if(!c){covH+='<span class="muted">'+(p==='hz'?'主群':'定制群')+':无计划</span> ';return;}
     var mn=(c.missing_n==null?c.missing.length:c.missing_n);
-    // 2026-11-16（用户口径）：已通知重登的号不算「缺」，单独显示「未补登N」；
+    // 2026-11-16（用户口径）：已通知重登的号不算「漏」，单独显示「未补登N」；
     // 分母也去掉它们 —— 正常号跑满就显示 ran/eff = 满额，不再常年挂着「缺36」。
     var rn=(c.relogin_n==null)?((c.relogin&&c.relogin.length)||0):(c.relogin_n||0);
     var eff=(c.expected!=null)?Math.max(0,c.expected-rn):null;
     var cls=mn?'bad':'good';
-    covH+='<span class="'+cls+'" title="分母已去掉「未补登」的号：CK 失效、已给号主发重登邮件、还没补登的号不参与播放，等号主处理（超 7 天不补登自动删号），不算缺口。缺=真没跑到的号。">'
-      +(p==='hz'?'主群':'定制群')+' '+c.ran+'/'+(eff!=null?eff:c.expected)
-      +(mn?' 缺'+mn:'')+'</span> '
+    var tip='漏=当轮计划里真没跑到、且号还活着的（判死/失效号已拆去「未补登」）。系统自动补跑，不是丢了。';
+    var missTxt='';
+    if(mn){
+      if(poolLive(p))missTxt=' <span class="bad">漏'+mn+' · 补跑中</span>';
+      else if(bjHnow()<13)missTxt=' <span class="bad">漏'+mn+'</span><span class="muted"> · 9:30/12:00 补漏轮自动补</span>';
+      else missTxt=' <span class="bad">漏'+mn+'</span><span class="muted"> · 补漏轮已过，今晚 0:10 主轮会再跑</span>';
+    }
+    covH+='<span class="'+cls+'" title="'+tip+'">'
+      +(p==='hz'?'主群':'定制群')+' '+c.ran+'/'+(eff!=null?eff:c.expected)+'</span>'
+      +missTxt+' '
       +(rn?'<span class="muted">未补登'+rn+'</span> ':'');
   });
   h+='<div class="rb"><b>应跑/实跑</b><br>'+covH+'</div>';
