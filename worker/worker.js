@@ -8118,6 +8118,50 @@ async function handle(request) {
                      pct: effExp > 0 ? Math.round((exp.length - missing.length) * 1000 / effExp) / 10 : 100 };
         }
       }
+      /* ---- 2026-11-18（用户要求）：漏跑号死活分类，控制台只认「有效播放」口径 ----
+         用户口径：实跑=真的播了的号；漏跑的号必须区分「失效」（CK 已死，今晚判死+直邮，
+         不会有有效播放）和「漏跑」（号还活着，补漏轮/今晚主轮会自动补上）。
+         实现：对漏跑名单实时跑 validateCookie（与夜轮判活完全同口径，双重确认），
+         结果按 天+池+缺口名单指纹 缓存 KV —— 缺口名单没变就不重复验证（省网易请求）。
+         ⚠ 只读：这里不改 accounts/relogin/dead —— 判死与发信仍只走播放轮既有链路，
+         本接口验证失败/超时一律归入「漏跑」，绝不因为显示层误判死号。 */
+      for (const p of ['hz', 'dz']) {
+        const cpC = cov[p];
+        if (!cpC || !cpC.missing_n || !Array.isArray(cpC.missing) || !cpC.missing.length) continue;
+        const missC = cpC.missing.slice(0, 40);
+        let hvC = 0;
+        const hashSrcC = missC.join(',');
+        for (let i = 0; i < hashSrcC.length; i++) hvC = (hvC * 31 + hashSrcC.charCodeAt(i)) >>> 0;
+        const ckKeyC = 'cov_class:' + beijingDate() + ':' + p;
+        let cachedC = null;
+        try { cachedC = JSON.parse(await POOL.get(ckKeyC) || 'null'); } catch (e) { cachedC = null; }
+        if (cachedC && cachedC.hash === String(hvC) && Array.isArray(cachedC.dead)) {
+          cpC.dead_n = cachedC.dead_n; cpC.dead = cachedC.dead; cpC.dead_at = cachedC.at || '';
+          continue;
+        }
+        const ckRowsC = await d1All('SELECT uid, ck FROM accounts WHERE pool=? AND uid IN (' +
+          missC.map(() => '?').join(',') + ')', [p, ...missC]);
+        const ckMapC = {};
+        for (const r of (ckRowsC || [])) ckMapC[String(r.uid)] = String(r.ck || '');
+        const deadC = [], unkC = [];
+        await Promise.all(missC.map(async (uC) => {
+          const rawC = ckMapC[uC] || '';
+          const mmC = rawC.match(/MUSIC_U=([^;\s"']+)/);
+          const muC = mmC ? mmC[1] : rawC.trim();
+          let isDeadC = false;
+          try {
+            const vC = await Promise.race([validateCookie(muC),
+              new Promise(res => setTimeout(() => res({ ok: true, provisional: true, diag: 'verify-timeout' }), 15000))]);
+            isDeadC = vC.ok === false && !vC.provisional;
+          } catch (e) { isDeadC = false; }
+          (isDeadC ? deadC : unkC).push(uC);
+        }));
+        cpC.dead_n = deadC.length; cpC.dead = deadC; cpC.dead_at = bjStamp();
+        try {
+          await POOL.put(ckKeyC, JSON.stringify({ hash: String(hvC), dead_n: deadC.length, dead: deadC, at: bjStamp() }),
+            { expirationTtl: 172800 });
+        } catch (e) { /* 缓存写失败下次重验，不影响显示 */ }
+      }
       // 2026-10-26：通知状态索引（按「池|uid」取最近一条判定）。只覆盖手动删号；
       // cookie_invalid 的号由 run.py 当场发信，不进这张表。
       const noticeMap = {};
@@ -11830,24 +11874,24 @@ function renderRunbar(){
     var rn=(c.relogin_n==null)?((c.relogin&&c.relogin.length)||0):(c.relogin_n||0);
     var eff=(c.expected!=null)?Math.max(0,c.expected-rn):null;
     var cls=mn?'bad':'good';
-    var tip='漏=当轮计划里真没跑到、且号还活着的（判死/失效号已拆去「未补登」）。系统自动补跑，不是丢了。';
+    // 2026-11-18（用户口径二改）：分子=真播了的号（有效播放口径），不再把没跑的算成满额。
+    // 服务端已对漏跑名单实时验证 CK（结果缓存）：失效=CK 已死，今晚判死+直邮；漏跑=号活着会自动补。
+    var tip='实跑=真的播了的号（有效播放口径）。失效=CK 已失效（实时验证、与夜轮同口径），今晚主轮判死并直邮号主，不会有有效播放；漏跑=号还活着没跑到，系统自动补跑。';
     var missTxt='';
-    var fullShow=false;
     if(mn){
-      if(poolLive(p))missTxt=' <span class="bad">漏'+mn+' · 补跑中</span>';
-      else if(bjHnow()<13)missTxt=' <span class="bad">漏'+mn+'</span><span class="muted"> · 9:30/12:00 补漏轮自动补</span>';
-      else{
-        // 2026-11-18（用户口径）：白天补漏轮都跑完、只剩今晚 0:10 主轮兜底时，
-        // 不再挂红字漏数 —— 漏的号今晚主轮自动补跑/判死，这里直接显示满额，悬停看明细。
-        fullShow=true;
-        cls='good';
-        tip='有 '+mn+' 个号今晚 0:10 主轮会自动补跑（真失效的号当晚判死、转「未补登」并直邮号主），不丢号。';
+      var ddead=c.dead_n||0;
+      var dmiss=mn-ddead;
+      var parts=[];
+      if(dmiss){
+        if(poolLive(p))parts.push('<span class="bad">漏跑'+dmiss+' · 补跑中</span>');
+        else if(bjHnow()<13)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 9:30/12:00 补漏轮自动补</span>');
+        else parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 今晚 0:10 主轮补跑</span>');
       }
+      if(ddead)parts.push('<span class="bad">失效'+ddead+'</span><span class="muted"> · 今晚判死+直邮，之后转「未补登」</span>');
+      if(parts.length)missTxt=' '+parts.join(' ');
     }
-    var num=c.ran;
-    if(fullShow)num=(eff!=null?eff:c.expected);
     covH+='<span class="'+cls+'" title="'+tip+'">'
-      +(p==='hz'?'主群':'定制群')+' '+num+'/'+(eff!=null?eff:c.expected)+'</span>'
+      +(p==='hz'?'主群':'定制群')+' '+c.ran+'/'+(eff!=null?eff:c.expected)+'</span>'
       +missTxt+' '
       +(rn?'<span class="muted">未补登'+rn+'</span> ':'');
   });
