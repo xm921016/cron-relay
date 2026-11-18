@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Worker CPU 临近上限预警（2026-10-22 新增）。
+"""Worker CPU 异常预警（2026-10-22 新增，2026-11-18 改 Paid 口径）。
 
-背景：Cloudflare Workers 免费版每个请求 10ms CPU，超了直接 1102 报错（页面打不开 / 接口 500）。
-这个脚本每天跑一次，用 Cloudflare GraphQL Analytics 拉最近 24 小时的 CPU 分位；
-一旦 p50（中位请求 CPU）≥ 阈值（默认 9.5ms），就给号主邮箱发一封提醒，好提前扩容/优化，
-而不是等某天整站 1102 之后才发现。
+历史背景：免费版每请求 10ms CPU，超了直接 1102 报错，当年阈值 9.5ms。
+2026-11-16 起账号已升 Workers Paid：单请求 CPU 上限 30 秒（月包含 3000 万 CPU ms），
+10ms 级阈值已无意义（p50 十几 ms 属正常），照旧口径会天天误报。
+
+Paid 口径（2026-11-18 定）：
+  ① 24h 错误数 ≥ ERR_TRIP → 告警（真的在挂，最重要）；
+  ② p50 ≥ 阈值（默认 100ms）且比前 7 天均值恶化 50% 以上 → 告警（真的在变坏）。
+本脚本每天跑一次，用 Cloudflare GraphQL Analytics 拉最近 24 小时的 CPU 分位，
+提前发现劣化，而不是等某天接口大面积报错之后才发现。
 
 数据来源：
   https://api.cloudflare.com/client/v4/graphql  → workersInvocationsAdaptive
@@ -30,8 +35,8 @@ from datetime import datetime, timedelta, timezone
 API = "https://api.cloudflare.com/client/v4/graphql"
 SCRIPTS = ("cron-relay", "dingzhi")
 ALERT_TO = (os.environ.get("ALERT_TO") or "").strip()
-THRESH_MS = float(os.environ.get("CPU_THRESH_MS") or 9.5)
-LIMIT_MS = 10.0  # 免费版每请求 CPU 上限
+THRESH_MS = float(os.environ.get("CPU_THRESH_MS") or 100)  # Paid 口径：p50 达 100ms 才算异常
+LIMIT_MS = 30000.0  # Paid 单请求 CPU 上限 30 秒
 ERR_TRIP = int(os.environ.get("CPU_ERR_TRIP") or 3)   # 24h 错误数达到这个值就告警
 STRICT = (os.environ.get("CPU_ALERT_MODE") or "").strip().lower() == "strict"
 
@@ -174,7 +179,7 @@ def main():
 
     body += ["最近 24 小时："] + lines + [""]
     if trend:
-        body.append("最近 7 天 p50 走势（免费版上限 10ms；持续抬升才需要处理）：")
+        body.append("最近 7 天 p50 走势（Paid 单请求上限 30 秒；持续抬升才需要处理）：")
         for d, v in trend:
             body.append(f"  {d}  " + "  ".join(f"{k}={us(x)}" for k, x in v.items()))
         body.append("")
@@ -189,14 +194,13 @@ def main():
 
     body += [
         "怎么处理（按性价比排序）：",
-        "  1. 停掉不必要的 Secrets 全量推送（登记时 12 次加密 PUT 是最大 CPU 消耗）；",
-        "  2. 控制台/接口减少全表 SELECT，改成按需分页；",
-        "  3. 仍不够再考虑 Workers 付费版（$5/月，CPU 上限提到 30 秒）。",
+        "  1. 控制台/接口减少全表 SELECT，改成按需分页；",
+        "  2. 停掉不必要的 Secrets 全量推送（登记时多次加密 PUT 是最大 CPU 消耗）；",
         "",
         "——网易音乐人650任务",
     ]
 
-    subj = ("【网易音乐人650任务】Worker CPU 临近上限" if alerts
+    subj = ("【网易音乐人650任务】Worker CPU 异常预警" if alerts
             else "【网易音乐人650任务】CPU 预警通道测试")
     try:
         if not ALERT_TO:

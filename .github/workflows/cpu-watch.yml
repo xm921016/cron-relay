@@ -1,9 +1,9 @@
 name: cpu-watch
 
-# Worker CPU 预警（2026-10-22 新增）。
-# 每天北京时间 10:10 查一次 cron-relay / dingzhi 两个 Worker 最近 24 小时的 CPU 分位，
-# 中位请求 CPU 超过阈值（默认 9.5ms，免费版上限 10ms）就给号主邮箱发一封提醒，
-# 免得等哪天整站 1102 了才发现。
+# Worker CPU 异常预警（2026-10-22 新增，2026-11-18 改 Paid 口径）。
+# 每天北京时间 10:10 查一次 cron-relay / dingzhi 两个 Worker 最近 24 小时的 CPU 分位。
+# 账号 2026-11-16 起为 Workers Paid（单请求 CPU 上限 30 秒），旧 9.5ms 阈值天天误报已废；
+# 现告警条件：①24h 错误数 ≥3（真在挂）②p50 ≥100ms 且比前 7 天均值恶化 50%（真在变坏）。
 # 手动触发可勾选 force：不看阈值强制发一封，用来验证通道。
 
 on:
@@ -29,7 +29,7 @@ jobs:
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           ALERT_TO: ${{ secrets.ALERT_TO }}
-          CPU_THRESH_MS: '9.5'
+          CPU_THRESH_MS: '100'
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
         run: |
