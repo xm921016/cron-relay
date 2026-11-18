@@ -12046,7 +12046,7 @@ function openInfo(i){
         var col=d.verdict==='alive'?'#1a7f37':(d.verdict==='dead'?'#a32d2d':'#b06a00');
         var icon=d.verdict==='alive'?'✅':(d.verdict==='dead'?'❌':'⚠️');
         if(res)res.innerHTML='<i>CK验证</i><span style="color:'+col+';font-weight:600">'+icon+' '+esc(d.message||'验证失败')+'</span>'
-          +(d.realUid?(' <span style="color:#888;font-size:11px">（网易返回 uid '+esc(d.realUid)+'，校验时刻 '+bjTime(new Date(Date.now()+8*3600*1000).toISOString())+'）</span>'):'');
+          +(d.realUid?(' <span style="color:#888;font-size:11px">（网易返回 uid '+esc(d.realUid)+'，校验时刻 '+bjTime(new Date().toISOString())+'）</span>'):'');
       }).catch(function(){cb2.disabled=false;var r2=$('infoCkRes');if(r2)r2.innerHTML='<i>CK验证</i><span style="color:#a32d2d">网络错误，稍后再试</span>';});
     };
     $('infoClose').parentNode.insertBefore(cb2,$('infoClose'));
