@@ -11601,7 +11601,7 @@ function regSearchFetch(code){
       REGLOOK.at=Date.now();REGLOOK.retry=0;
       if(r.ok&&r.d&&r.d.ok){REGLOOK.rows=r.d.rows||[];}
       else{REGLOOK.rows=[];REGLOOK.err=(r.d&&r.d.message)||'登记链接查询失败';}
-      REGLOOK.done=true;render();
+      REGLOOK.done=true;setTimeout(render,0);   /* 12:35：异步调 render，render 里若抛异常不再污染 promise 链被误判成网络错误 */
     }).catch(function(){
       if(REGLOOK.code!==code)return;
       REGLOOK.at=Date.now();
@@ -11610,7 +11610,7 @@ function regSearchFetch(code){
       /* 2026-11-19 12:30：瞬时抖动实测存在（部署窗口/边缘抖动，轮询接口失败是静默的，
          搜索栏是主动单发才被看见）—— fetch 失败自动重试最多 2 次，1.5 秒间隔，用户基本无感 */
       REGLOOK.retry=(REGLOOK.retry||0)+1;
-      render();
+      setTimeout(render,0);
       if(REGLOOK.retry<=2){
         setTimeout(function(){
           if(REGLOOK.code!==code)return;
@@ -11698,7 +11698,12 @@ function render(){
     }
     if(regRows&&regRows.length){
       // 2026-11-19：链接命中时按 reg_tokens 的 uid/手机号过滤（原始编码串在号池字段里搜不到）
-      return !!(regUid[String(e.uid||'')]||regPh[String(e.name||'')]);
+      // ⚠ 12:35 修复：原写法引用 e，但 var e=r.e 在下面 if(!q) 之后才声明 ——
+      //    命中 ≥1 条记录时这里读 e.uid 直接 TypeError，异常又沿 promise 链掉进
+      //    regSearchFetch 的 catch，被误报成「网络错误」+ 无限重试（网络其实全是 200）。
+      //    node --check 和未命中路径都发现不了，只有命中记录才炸 —— 血泪教训：引用前先声明。
+      var re=r.e||{};
+      return !!(regUid[String(re.uid||'')]||regPh[String(re.name||'')]);
     }
     if(!q)return true;
     var e=r.e;
