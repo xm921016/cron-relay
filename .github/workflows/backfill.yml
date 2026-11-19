@@ -304,6 +304,9 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE010_TOKEN: ${{ secrets.NODE010_TOKEN }}
+          NODE011_TOKEN: ${{ secrets.NODE011_TOKEN }}
+          NODE013_TOKEN: ${{ secrets.NODE013_TOKEN }}
           NODE014_TOKEN: ${{ secrets.NODE014_TOKEN }}
           NODE016_TOKEN: ${{ secrets.NODE016_TOKEN }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
@@ -312,18 +315,34 @@ jobs:
           import json, os, re, urllib.error, urllib.request
           from datetime import datetime, timezone, timedelta
 
-          # 2026-11-19：N2 从 xm921015 换成 xm921014 —— xm921015 被 GitHub 封禁（suspended，
-          # run 永远 queued 跑不了），换预建备胎 N3=xm921014/relay-node 顶替（secrets 已备好）。
-          # 2026-11-17：node-016（N2b=xm921016/relay-node，同账号）灰度接线，一并纳入自动补跑
+          # 2026-11-19 多节点分摊：follower 清单扩到 5 个（013/014/011/010 各 ≤10 片/天、016 收剩余）。
+          # 逐号健康检查：403=账号被 GitHub 封禁 / 404=仓不存在 → 跳过（份额由 master 下一轮 plan
+          # 自动改派给 016，见 run.yml plan 多节点分摊注释）；其余异常按原有 per-follower 容错处理。
+          # 历史：N2 曾是 xm921015（2026-11-19 被封），先换 xm921014，再升级为多点分摊。
+          _SPEC = [("013", "xm921013"), ("014", "xm921014"), ("011", "xm921011"),
+                   ("010", "xm921010"), ("016", "xm921016")]
           FOLLOWERS = []
-          if (os.environ.get("NODE014_TOKEN") or "").strip():
-              FOLLOWERS.append({"name": "014", "owner": "xm921014", "repo": "relay-node",
-                                "tok": os.environ["NODE014_TOKEN"].strip()})
-          if (os.environ.get("NODE016_TOKEN") or "").strip():
-              FOLLOWERS.append({"name": "016", "owner": "xm921016", "repo": "relay-node",
-                                "tok": os.environ["NODE016_TOKEN"].strip()})
+          for _name, _owner in _SPEC:
+              _tok = (os.environ.get("NODE%s_TOKEN" % _name) or "").strip()
+              if not _tok:
+                  print("::warning::[%s] 缺 NODE%s_TOKEN，跳过（其片由 watchdog 补漏轮追）" % (_name, _name))
+                  continue
+              try:
+                  _req = urllib.request.Request(
+                      "https://api.github.com/repos/%s/relay-node" % _owner,
+                      headers={"Authorization": "Bearer " + _tok,
+                               "Accept": "application/vnd.github+json",
+                               "User-Agent": "relay-backfill-follower"})
+                  with urllib.request.urlopen(_req, timeout=30) as _r:
+                      pass
+              except urllib.error.HTTPError as _e:
+                  if _e.code in (403, 404):
+                      print("::warning::[%s] %s relay-node HTTP %d（疑似封禁/无仓），本轮跳过" % (_name, _owner, _e.code))
+                      continue
+                  raise
+              FOLLOWERS.append({"name": _name, "owner": _owner, "repo": "relay-node", "tok": _tok})
           if not FOLLOWERS:
-              print("没有已接线的 follower（NODE014_TOKEN 未配置），跳过")
+              print("没有存活的 follower，跳过")
               raise SystemExit(0)
 
           DRY = (os.environ.get("DRY_RUN") or "").strip() in ("1", "true", "True")

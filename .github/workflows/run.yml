@@ -47,12 +47,10 @@ jobs:
       ns: ${{ steps.plan.outputs.ns }}
       par: ${{ steps.plan.outputs.par }}
       day: ${{ steps.plan.outputs.day }}
-      # 2026-11-15 fanout 扩片（阶段二，按比例对半分）：后一半片派 follower N2，
-      # follower 片数 = ns - ns//2，随每晚总片数动态（阶段一 2 片灰度 11-14 全绿后扩）
+      # 2026-11-19 多节点分摊：follower 派发清单（紧凑 JSON：name/owner/slices），
+      # 013/014/011/010 各 ≤10 片、016 收剩余；plan 时健康检查，封号节点自动跳过、份额落给 016。
       fanout: ${{ steps.plan.outputs.fanout }}
-      fs_lo: ${{ steps.plan.outputs.fs_lo }}
-      fs_hi: ${{ steps.plan.outputs.fs_hi }}
-      fs_slices: ${{ steps.plan.outputs.fs_slices }}
+      follower_plan: ${{ steps.plan.outputs.follower_plan }}
     steps:
       # 2026-11-13 新增：0 点闸门（只对 schedule 定时触发生效）。
       # 作用：把每晚真正开跑钉死在北京时间 0:00~0:30 的随机点，播放全部落在 0 点后的新窗口。
@@ -124,6 +122,8 @@ jobs:
           ONLY_SLICES: ${{ github.event.inputs.only_slices }}
           NS_OVERRIDE: ${{ github.event.inputs.ns_override }}
           DAY_OVERRIDE: ${{ github.event.inputs.day_override }}
+          # 2026-11-19 多节点分摊：plan 时逐 follower 健康检查用（GET /repos/<acc>/relay-node）
+          GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 2026-11-01：不再固定 12 片。manifest 最多 40 片，worker 写了几片这里就透出几片；
           # 不存在的 secret 在 Actions 里会解析成空串，读取端自动跳过，无需改这里。
           NB_POOL_1: ${{ secrets.NB_POOL_1 }}
@@ -205,7 +205,7 @@ jobs:
           ASSIGN_PASS: ${{ secrets.ASSIGN_PASS }}
         run: |
           python3 - <<'EOF'
-          import base64, gzip, json, os, math, urllib.parse, urllib.request
+          import base64, gzip, json, os, math, urllib.parse, urllib.request, urllib.error
           n = 0
           url = (os.environ.get("WORKER_URL") or "").rstrip("/")
           pw = os.environ.get("ASSIGN_PASS") or os.environ.get("NB_PASS") or ""
@@ -276,35 +276,65 @@ jobs:
           if _nsov.isdigit() and int(_nsov) > 0:
               ns = int(_nsov)
           _only = [int(x) for x in (os.environ.get("ONLY_SLICES") or "").replace(" ", "").split(",") if x.isdigit()]
-          # 2026-11-15 fanout 扩片（阶段二对半分）→ 2026-11-17 Phase 2 升级为「master 0 片」：
-          # 正常轮（无 ns_override 且无 only_slices）master 不再自跑任何片（brush 0 job），
-          # 前一半 0..fs_lo-1 派 follower N2b（xm921016/relay-node，m2_slices）、
-          # 后一半 fs_lo..ns-1 派 N2（fs_slices），两者带同轮 ns/day/par，分片键与原 master 完全一致。
-          # ns 为奇数时 N2 多 1 片（如 ns=61 → N2b 0..29 共 30 片、N2 30..60 共 31 片）。
-          # 兜底：fs_lo < 3（总片数太少，follower 分不到有意义的量）时 fanout 关闭，
-          # 回退 master 0..ns-1 全跑原语义，fs_lo/fs_hi 输出 0/-1 哨兵，dispatch 被 if fanout==1 拦住。
-          # 带 ns_override / only_slices 的补跑/排查保持原语义：master 全跑、不派 follower
-          # （补跑片号不能变，且 follower 不该掺和定向补跑）。
-          # follower dispatch 失败只告警不拦 master：漏播片由 warning 显式暴露人工补。
-          # 2026-11-17 Phase 2（「主仓转私密+播放外移」，N2b 灰度通过前提，见
-          # 文档\主仓转私密与播放外移实施清单-20261117.md）：master 降 0 片——
-          # 正常轮前一半 0..fs_lo-1 派 N2b（xm921016/relay-node，m2_slices 输出），
-          # 后一半 fs_lo..ns-1 派 N2（fs_slices，不变）；master 矩阵清空（brush 0 job，仅剩 plan）。
-          # ns/par/per/fanout 触发条件与分片键一个字都不动；带 ns_override/only_slices 的
-          # 补跑/排查保持原语义：master 全跑/定向跑、不派 follower。回退：_slices=list(range(_fs_lo))。
-          _fanout = (not _nsov) and (not _only) and (ns // 2) >= 3
+          # 2026-11-19 多节点分摊（015 被封后负载摊薄改造，用户拍板「新号低强度+016 收剩余」）：
+          #   follower 清单与每日片数上限：
+          #     013=xm921013 ≤10 片 / 014=xm921014 ≤10 片 / 011=xm921011 ≤10 片 / 010=xm921010 ≤10 片
+          #     016=xm921016 收全部剩余（无上限，同时是兜底海绵：任何 follower 死掉其份额自动落给它）
+          #   plan 时逐号健康检查（GET /repos/<acc>/relay-node，public 仓无需特权）：
+          #     200=存活参与分配；403=账号被封（suspended）/404=仓不存在 → 本轮跳过（::warning 显式暴露）；
+          #     网络/5xx 异常 → 保守当存活（dispatch 侧失败另有 warning，双保险不静默丢片）。
+          #   分配算法：存活 follower 按 013→014→011→010 顺序各领 ≤cap 片（连续块），016 收全部剩余；
+          #     全部片并集恒等于 0..ns-1，分片键与旧对半分完全一致（sliceBucket 未动）。
+          #   输出 follower_plan=紧凑 JSON（alive 且非空的派发清单），由「派 follower 片」单步循环 dispatch。
+          #   兜底：ns < 6 时 fanout 关闭（片太少分摊无意义），回退 master 全跑原语义。
+          #   带 ns_override / only_slices 的补跑/排查保持原语义：master 全跑/定向跑、不派 follower。
+          #   历史：2026-11-15 阶段二对半分（N2=015）→ 2026-11-17 Phase 2 master 0 片（016=N2b 前一半）
+          #   → 2026-11-19 015 被 GitHub 封禁，N2 换 014 并升级为多点分摊。
+          _FOLLOWS = [("013", "xm921013", 10), ("014", "xm921014", 10),
+                      ("011", "xm921011", 10), ("010", "xm921010", 10),
+                      ("016", "xm921016", None)]
+          def _node_alive(_owner):
+              try:
+                  _req = urllib.request.Request(
+                      "https://api.github.com/repos/%s/relay-node" % _owner,
+                      headers={"Accept": "application/vnd.github+json",
+                               "User-Agent": "relay-plan-health",
+                               "Authorization": "Bearer " + (os.environ.get("GH_API_TOKEN") or "")})
+                  with urllib.request.urlopen(_req, timeout=30) as _r:
+                      return _r.status
+              except urllib.error.HTTPError as _e:
+                  return _e.code
+              except Exception:
+                  return 0   # 网络异常：按存活处理（宁多试一次 dispatch，不静默丢片）
+          _fanout = (not _nsov) and (not _only) and ns >= 6
+          _alloc = []       # [(name, owner, [slices])]，仅 alive 且分到片的
+          _dead = []        # [name] 显式告警用
           if _fanout:
-              _fs_lo = ns // 2
-              _fs_slices = list(range(_fs_lo, ns))
-              _m2_slices = list(range(_fs_lo))
+              _cursor = 0
+              for _name, _owner, _cap in _FOLLOWS:
+                  _st = _node_alive(_owner)
+                  if _st == 403:
+                      _dead.append(_name)
+                      print("::warning::follower %s(%s) 疑似被 GitHub 封禁（HTTP 403），本轮跳过，份额由后续 follower/016 承接" % (_name, _owner))
+                      continue
+                  if _st == 404:
+                      _dead.append(_name)
+                      print("::warning::follower %s(%s) relay-node 仓不存在（HTTP 404），本轮跳过" % (_name, _owner))
+                      continue
+                  if _cap is None:
+                      _take = list(range(_cursor, ns))          # 016：收全部剩余
+                  else:
+                      _take = list(range(_cursor, min(_cursor + _cap, ns)))
+                  _cursor += len(_take)
+                  if _take:
+                      _alloc.append({"name": _name, "owner": _owner, "slices": _take})
               _slices = []
           else:
-              _fs_lo = 0
-              _fs_slices = []
-              _m2_slices = []
               _slices = [x for x in _only if 0 <= x < ns] if _only else list(range(ns))
               if not _slices:
                   _slices = list(range(ns))
+          _covered = sorted(x for a in _alloc for x in a["slices"])
+          assert (_fanout and _covered == list(range(ns))) or (not _fanout), "follower 分配必须恰好覆盖 0..ns-1"
           _dayov = (os.environ.get("DAY_OVERRIDE") or "").strip()
           if len(_dayov) == 10 and _dayov[4] == "-" and _dayov[7] == "-":
               day = _dayov
@@ -318,75 +348,61 @@ jobs:
               # 避免 GitHub 把「矩阵为空」的 run 判 failure 发失败邮件；brush 侧按矩阵值整 job 跳过。
               f.write(f"matrix={json.dumps({'slice': _slices if _slices else [-1]})}\n")
               f.write("fanout=%d\n" % (1 if _fanout else 0))
-              f.write(f"fs_lo={_fs_lo}\n")
-              f.write(f"fs_hi={ns - 1 if _fs_slices else -1}\n")
-              f.write("fs_slices=%s\n" % ",".join(str(x) for x in _fs_slices))
-              f.write("m2_slices=%s\n" % ",".join(str(x) for x in _m2_slices))
-          print(f"pool_size={n} ns={ns} master_slices={len(_slices)} day={day} fanout={'on' if _fanout else 'off'} m2={(_m2_slices[0] if _m2_slices else 'none')}..{(_m2_slices[-1] if _m2_slices else 'none')} n2={(_fs_slices[0] if _fs_slices else 'none')}..{(_fs_slices[-1] if _fs_slices else 'none')}")
+              f.write("follower_plan=%s\n" % json.dumps(_alloc, separators=(",", ":")))
+          _alloc_desc = " ".join("%s=%d片(%s..%s)" % (a["name"], len(a["slices"]), a["slices"][0], a["slices"][-1]) for a in _alloc) or "无"
+          print(f"pool_size={n} ns={ns} master_slices={len(_slices)} day={day} fanout={'on' if _fanout else 'off'} 分配: {_alloc_desc}"
+                + (" 跳过(封禁/无仓): " + ",".join(_dead) if _dead else ""))
           EOF
 
-      # 2026-11-15 fanout 扩片（阶段二）：把本轮后一半片（fs_slices，由 plan 动态生成）
-      # 一次 dispatch 派给 follower N2。
-      # 2026-11-19：N2 从 xm921015 换成 xm921014 —— xm921015 账号被 GitHub 封禁（suspended，
-      # runs API 403，run 永远 queued 跑不了），换预建备胎 N3=xm921014/relay-node 顶替，
-      # 仓内 run.yml/secrets 已于 11-18 备好（composite daily-tasks 版）。016=N2b 前一半不变。
-      # 只在正常轮（fanout=1，即无 ns_override / only_slices 且 fs_lo>=3）派发；入参 ns/day/par 与
-      # master 完全一致保证分片键相同，only_slices=fs_slices 与 master 矩阵互斥且并集=0..ns-1。
-      # continue-on-error：dispatch 失败只打 warning（含响应体），不拦 master 后续矩阵。
-      - name: 派 follower N2 后一半片（fanout 阶段二 对半分）
+      # 2026-11-19 多节点分摊派发：单步循环 plan 产出的 follower_plan（013/014/011/010 各 ≤10 片、
+      # 016 收剩余；plan 已对封号节点做过健康检查跳过）。每个 follower 一次 dispatch 带自己的
+      # only_slices；入参 ns/day/par 与 master 完全一致保证分片键相同，各 follower 的
+      # only_slices 互斥且并集=0..ns-1。continue-on-error：单节点 dispatch 失败只打 warning
+      # （封号节点的 dispatch 也会 204 但 run 永远 queued —— 由 watchdog 两轮补漏 + 判定兜底）。
+      - name: 派 follower 片（多节点分摊，plan 产出 follower_plan）
         if: steps.plan.outputs.fanout == '1'
         continue-on-error: true
         env:
+          NODE010_TOKEN: ${{ secrets.NODE010_TOKEN }}
+          NODE011_TOKEN: ${{ secrets.NODE011_TOKEN }}
+          NODE013_TOKEN: ${{ secrets.NODE013_TOKEN }}
           NODE014_TOKEN: ${{ secrets.NODE014_TOKEN }}
-          NS: ${{ steps.plan.outputs.ns }}
-          DAY: ${{ steps.plan.outputs.day }}
-          PAR: ${{ steps.plan.outputs.par }}
-          FS_SLICES: ${{ steps.plan.outputs.fs_slices }}
-        run: |
-          body=$(printf '{"ref":"main","inputs":{"ns_override":"%s","day_override":"%s","par_override":"%s","only_slices":"%s"}}' "$NS" "$DAY" "$PAR" "$FS_SLICES")
-          resp=$(mktemp)
-          code=$(curl -s -o "$resp" -w '%{http_code}' -X POST \
-            -H "Authorization: Bearer $NODE014_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/xm921014/relay-node/actions/workflows/run.yml/dispatches \
-            -d "$body")
-          if [ "$code" = "204" ]; then
-            echo "follower N2(xm921014) 已派片 $FS_SLICES（ns=$NS day=$DAY par=$PAR，共 $(echo "$FS_SLICES" | tr ',' '\n' | wc -l) 片）"
-          else
-            echo "::warning::follower N2 dispatch 失败 http=$code：master 矩阵本片已缩为 0..fs_lo-1，片 $FS_SLICES 今晚无人播，需人工补派。响应：$(cat "$resp")"
-          fi
-          rm -f "$resp"
-
-      # 2026-11-17 Phase 2（「主仓转私密+播放外移」）：master 降 0 片后，前一半片（0..fs_lo-1）
-      # 正式派给同账号 follower N2b（xm921016/relay-node）；N2 保持后一半 fs_lo..ns-1 不变。
-      # 原 Phase 1 灰度 step（fs_lo-2,fs_lo-1 双播）随本接线移除，避免与 N2b 正式片重复 dispatch。
-      # 同账号 20 并发由 N2b 独占（master brush 已 0 job）。dispatch 失败只告警：
-      # 前一半片当晚无人播，backfill（FOLLOWERS 已含 016）在轮次结束/14:30 自动补。
-      - name: 派 node-016 前一半片（Phase 2：master 0 片）
-        if: steps.plan.outputs.fanout == '1'
-        continue-on-error: true
-        env:
           NODE016_TOKEN: ${{ secrets.NODE016_TOKEN }}
+          FOLLOWER_PLAN: ${{ steps.plan.outputs.follower_plan }}
           NS: ${{ steps.plan.outputs.ns }}
           DAY: ${{ steps.plan.outputs.day }}
           PAR: ${{ steps.plan.outputs.par }}
-          M2_SLICES: ${{ steps.plan.outputs.m2_slices }}
         run: |
-          body=$(printf '{"ref":"main","inputs":{"ns_override":"%s","day_override":"%s","par_override":"%s","only_slices":"%s"}}' "$NS" "$DAY" "$PAR" "$M2_SLICES")
-          resp=$(mktemp)
-          code=$(curl -s -o "$resp" -w '%{http_code}' -X POST \
-            -H "Authorization: Bearer $NODE016_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/xm921016/relay-node/actions/workflows/run.yml/dispatches \
-            -d "$body")
-          if [ "$code" = "204" ]; then
-            echo "node-016 已派片 $M2_SLICES（ns=$NS day=$DAY par=$PAR，共 $(echo "$M2_SLICES" | tr ',' '\n' | wc -l) 片）"
-          else
-            echo "::warning::node-016 dispatch 失败 http=$code：片 $M2_SLICES 今晚无人播（backfill 会自动补），响应：$(cat "$resp")"
-          fi
-          rm -f "$resp"
+          python3 - <<'PYEOF'
+          import json, os, urllib.request, urllib.error
+          plan = json.loads(os.environ["FOLLOWER_PLAN"] or "[]")
+          ns, day, par = os.environ["NS"], os.environ["DAY"], os.environ["PAR"]
+          for a in plan:
+              tok = os.environ.get("NODE%s_TOKEN" % a["name"], "").strip()
+              if not tok:
+                  print("::warning::%s 缺 NODE%s_TOKEN，片 %s 今晚无人播（backfill 会自动补）"
+                        % (a["name"], a["name"], ",".join(map(str, a["slices"]))))
+                  continue
+              body = json.dumps({"ref": "main", "inputs": {
+                  "ns_override": ns, "day_override": day, "par_override": par,
+                  "only_slices": ",".join(map(str, a["slices"]))}}).encode()
+              req = urllib.request.Request(
+                  "https://api.github.com/repos/%s/relay-node/actions/workflows/run.yml/dispatches" % a["owner"],
+                  data=body, method="POST",
+                  headers={"Authorization": "Bearer " + tok,
+                           "Accept": "application/vnd.github+json",
+                           "X-GitHub-Api-Version": "2022-11-28",
+                           "Content-Type": "application/json",
+                           "User-Agent": "relay-master-dispatch"})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      code = r.status
+                  print("follower %s(%s) 已派 %d 片 %s..%s（ns=%s day=%s par=%s）HTTP %s"
+                        % (a["name"], a["owner"], len(a["slices"]), a["slices"][0], a["slices"][-1], ns, day, par, code))
+              except urllib.error.HTTPError as e:
+                  print("::warning::follower %s dispatch 失败 http=%d：片 %s 今晚无人播（watchdog 补漏轮会自动追）。响应：%s"
+                        % (a["name"], e.code, ",".join(map(str, a["slices"])), e.read().decode("utf-8", "ignore")[:200]))
+          PYEOF
 
   brush:
     needs: plan

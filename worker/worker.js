@@ -5528,6 +5528,21 @@ async function handle(request) {
       if ((url.searchParams.get('pass') || '') !== c0.assignPass) return json({ message: '口令错误' }, 403);
       return json(await dispatchSnap650(url.searchParams.get('pool') || 'all'));
     }
+    // ---- 快照哨兵（2026-11-19）：给 relay-watchdog snapGuard 查「今天快照采了没」----
+    // 背景：10:10 CF cron 静默失败曾致 hz 全库采集缺失一整天。watchdog 每天 11:00 后查一次，
+    // hz 0 行就补派 /api/cron_snap 并告警（大者胜去重，重复采集无害）。
+    if (url.pathname === '/api/snap_stat') {
+      const c0 = await cfg();
+      if (!c0.assignPass) return json({ message: '尚未配置 ASSIGN_PASS，该接口不开放' }, 503);
+      if ((url.searchParams.get('pass') || '') !== c0.assignPass) return json({ message: '口令错误' }, 403);
+      if (!d1ok()) return json({ ok: false, message: 'D1 不可用' }, 503);
+      const dayS = beijingDate();
+      const rows = await d1All('SELECT pool, COUNT(*) AS n FROM snapshots WHERE day=? GROUP BY pool', [dayS]).catch(() => null);
+      if (!rows) return json({ ok: false, message: '快照查询失败' }, 503);
+      const m = {};
+      for (const r of rows) m[r.pool] = r.n;
+      return json({ ok: true, day: dayS, hz: m.hz || 0, dz: m.dz || 0 });
+    }
     // ---- D1 额度水位（2026-11-09）----
     // 闸门读的是 KV qgt:d1（{p:百分比, t:探测时间}）。平时由 scheduled / /api/assign 的探针刷新；
     // 这个入口用于：①本地跑完 tmp/cf_quota.py 后立刻把水位写进去 ②怀疑探针哑了时手工核对。
@@ -9033,7 +9048,7 @@ async function handle(request) {
          per  = max(8, min(per0, floor(par/2)))
          ns   = clamp(ceil(n/per), 4, 250)
          fanout = ns//2 >= 3（正常轮口径；带 ns_override/only_slices 的补跑不经过本接口）
-         fs_lo  = ns//2；m2_slices=0..fs_lo-1（派 N2b 016）、fs_slices=fs_lo..ns-1（派 N2；2026-11-19 起 N2=xm921014，015 已被 GitHub 封禁下线）
+         多节点分摊（2026-11-19）：013/014/011/010 各 ≤10 片连续块、016 收全部剩余；fanout 条件 ns>=6
        查池口径与 plan job 完全一致：buildPlan(day) → plans.filter(pool===POOL_NAME).length
        （= /api/pool_stat 回的 m_pool，plan job 正是用它当 n）。body.m 传正整数则跳过查池、
        按给定人数重算 —— 回归对照（近 3 晚 GitHub plan 输出 vs 本接口同输入重算）专用。 ---- */
@@ -9055,18 +9070,30 @@ async function handle(request) {
         nP = planP.plans.filter(x => x.pool === POOL_NAME).length;
         srcP = planP.src || 'd1';
       }
-      // —— 以下与 run.yml plan 段逐字同源（2026-11-17 Phase 2 版：master 0 片、双 follower 对半分）——
+      // —— 以下与 run.yml plan 段逐字同源（2026-11-19 多节点分摊版）——
+      // 013/014/011/010 各 ≤10 片（连续块）、016 收全部剩余；本镜像不做健康检查
+      //（run.yml plan 端运行时会对封号节点跳过，其份额自然落给 016）。
       const per0P = Math.max(8, Math.ceil(nP / 60));                                 // TARGET_WAVES=3 × JOB_CONC=20
       const parP = Math.max(24, Math.min(48, Math.ceil(per0P * 2.0)));
       const perP = Math.max(8, Math.min(per0P, Math.floor(parP / 2)));
       const nsP = Math.max(4, Math.min(250, Math.ceil(nP / perP)));                  // MIN_SLICES=4 / MAX_SLICES=250
-      const fanoutP = Math.floor(nsP / 2) >= 3 ? 1 : 0;
-      const fsLoP = fanoutP ? Math.floor(nsP / 2) : 0;
-      const m2P = [], fsP = [];
-      for (let iP = 0; iP < fsLoP; iP++) m2P.push(iP);
-      for (let iP = fsLoP; iP < nsP; iP++) fsP.push(iP);
+      const fanoutP = nsP >= 6 ? 1 : 0;
+      const _FOLLOWS = [["013", "xm921013", 10], ["014", "xm921014", 10],
+                        ["011", "xm921011", 10], ["010", "xm921010", 10],
+                        ["016", "xm921016", null]];
+      const _alloc = [];
+      if (fanoutP) {
+        let _cursor = 0;
+        for (const [_name, _owner, _cap] of _FOLLOWS) {
+          const _take = _cap === null
+            ? Array.from({ length: Math.max(0, nsP - _cursor) }, (_, i) => _cursor + i)
+            : Array.from({ length: Math.max(0, Math.min(_cap, nsP - _cursor)) }, (_, i) => _cursor + i);
+          _cursor += _take.length;
+          if (_take.length) _alloc.push({ name: _name, owner: _owner, slices: _take });
+        }
+      }
       const recP = { day: dayP, m: nP, per0: per0P, par: parP, per: perP, ns: nsP,
-        fanout: fanoutP, fs_lo: fsLoP, m2_slices: m2P, fs_slices: fsP, src: srcP, at: bjStamp() };
+        fanout: fanoutP, follower_plan: _alloc, src: srcP, at: bjStamp() };
       const kvKeyP = 'qgt:relay_plan:' + dayP;
       let kvWroteP = 0;
       if (bodyP.kv !== false) {
@@ -9650,10 +9677,12 @@ async function fetchActionsStatus() {
   // 点日志必 404，且 Phase 2 后主仓不跑片、前一半片（0..fs_lo-1）归 N2b，其日志链接替代原
   // 「016日志」（前端已移除主仓链接，见 console.html 同日注释）。
   const NODE_REPOS = [
-    // 2026-11-19：015（xm921015）被 GitHub 封禁下线，从展示列表移除；N2 换 xm921014（已有 run 后自然出现）
+    // 2026-11-19 多节点分摊：013/014/011/010 各 ≤10 片/天、016 收剩余；015 已被 GitHub 封禁移除
     { name: '016', owner: 'xm921016', repo: 'relay-node' },
     { name: '014', owner: 'xm921014', repo: 'relay-node' },
     { name: '013', owner: 'xm921013', repo: 'relay-node' },
+    { name: '011', owner: 'xm921011', repo: 'relay-node' },
+    { name: '010', owner: 'xm921010', repo: 'relay-node' },
   ];
   const hzOut = out.find(x => x && x.pool === 'hz');
   if (hzOut && hzOut.ok) {
