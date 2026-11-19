@@ -1131,7 +1131,7 @@ function rangeLabels(){
    识别口径：含 /r/ 直接取后面编码（≥3 位）；否则整串纯字母数字 ≥4 位才算链接查询
    （纯数字也放行：后端按手机号+编码双 LIKE，搜 uid/手机号时顺带把该号登记过的链接也带出来）。
    结果按编码缓存 + 400ms 去抖防连击；查询失败只影响横幅，表格回退普通搜索。 */
-var REGLOOK={code:'',rows:null,done:false,err:'',at:0,timer:null};
+var REGLOOK={code:'',rows:null,done:false,err:'',at:0,retry:0,timer:null};
 function regSearchCode(raw){
   if(!raw)return '';
   var s=String(raw),i=s.indexOf('/r/');
@@ -1154,15 +1154,26 @@ function regSearchFetch(code){
     REGLOOK.code=code;REGLOOK.rows=null;REGLOOK.done=false;REGLOOK.err='';
     api('/api/regtoken_list',{user:t.user,pass:t.pass,q:code,limit:20}).then(function(r){
       if(REGLOOK.code!==code)return;   // 响应回来时搜索词已经变了，丢弃
-      REGLOOK.at=Date.now();
+      REGLOOK.at=Date.now();REGLOOK.retry=0;
       if(r.ok&&r.d&&r.d.ok){REGLOOK.rows=r.d.rows||[];}
       else{REGLOOK.rows=[];REGLOOK.err=(r.d&&r.d.message)||'登记链接查询失败';}
       REGLOOK.done=true;render();
     }).catch(function(){
       if(REGLOOK.code!==code)return;
       REGLOOK.at=Date.now();
-      REGLOOK.rows=[];REGLOOK.done=true;REGLOOK.err='查询请求没通（网络或网关抖动），几秒后再输一次会自动重试';
+      REGLOOK.rows=[];REGLOOK.done=true;
+      REGLOOK.err=REGLOOK.retry<2?'查询请求没通（网络抖动），正在自动重试…':'查询请求没通（网络抖动），已自动重试 2 次仍失败 —— 稍等几秒再输一次会重试';
+      /* 2026-11-19 12:30：瞬时抖动实测存在（部署窗口/边缘抖动，轮询接口失败是静默的，
+         搜索栏是主动单发才被看见）—— fetch 失败自动重试最多 2 次，1.5 秒间隔，用户基本无感 */
+      REGLOOK.retry=(REGLOOK.retry||0)+1;
       render();
+      if(REGLOOK.retry<=2){
+        setTimeout(function(){
+          if(REGLOOK.code!==code)return;
+          REGLOOK.done=false;REGLOOK.rows=null;REGLOOK.err='';
+          regSearchFetch(code);
+        },1500);
+      }
     });
   },400);
 }
