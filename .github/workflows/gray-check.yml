@@ -1,0 +1,95 @@
+name: gray-check
+
+# 2026-11-19 新增：本机（办公室台式）+ 笔记本（家宽）灰度播放核验。
+# 背景：GitHub 封号危机下，播放算力迁往本机+笔记本（slice 0-7，每天北京时间 00:10 起
+# 预播「明天」的名单，跑完远早于 GitHub 对该名单的次日 0:25 快照，零双播）。
+# 本 workflow 每天早上（北京 07:40，GitHub cron 常延迟 0.5~1.5h）自动核验：
+#   1) 昨天(=今天视角的 tomorrow 名单) slice 0-7 是否全部落库（灰度机的活）
+#   2) 今天名单全池落库进度（GitHub 昨夜 + 前夜灰度机合计）
+# 结果每天发一封邮件到 ALERT_TO，无需人工查。
+on:
+  schedule:
+    - cron: '40 23 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: gray-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: verify gray slices and mail report
+        env:
+          ASSIGN_PASS: ${{ secrets.ASSIGN_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_AUTH_CODE: ${{ secrets.EMAIL_AUTH_CODE }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, smtplib, urllib.parse, urllib.request
+          from datetime import datetime, timedelta
+
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+          BASE = "https://xx1031.xyz"
+          NS = 59
+          GRAY_SLICES = list(range(8))
+
+          def bjdate(offset):
+              return (datetime.utcnow() + timedelta(hours=8 + offset)).date().isoformat()
+
+          def get(path, **params):
+              params["pass"] = os.environ["ASSIGN_PASS"]
+              url = BASE + path + "?" + urllib.parse.urlencode(params)
+              req = urllib.request.Request(url, headers={"User-Agent": UA})
+              return json.loads(urllib.request.urlopen(req, timeout=60).read().decode())
+
+          gray_day = bjdate(1)   # 昨夜 00:10 灰度机预播的「明天」名单
+          main_day = bjdate(0)   # GitHub 昨夜跑的当天名单
+
+          done_gray = {str(u) for u in (get("/api/run_done", pool="hz", day=gray_day).get("uids") or [])}
+          done_main = {str(u) for u in (get("/api/run_done", pool="hz", day=main_day).get("uids") or [])}
+
+          lines = []
+          missing_total = 0
+          gray_total = 0
+          for job in GRAY_SLICES:
+              a = get("/api/assign", job=job, jobs=NS, day=gray_day) or {}
+              accs = a.get("accounts") or []
+              uids = [str(x.get("uid")) for x in accs]
+              miss = [u for u in uids if u not in done_gray]
+              missing_total += len(miss)
+              gray_total += len(uids)
+              tag = "OK" if not miss else "MISS %s" % ",".join(miss[:6])
+              lines.append("  slice %d: %d/%d 已播 %s" % (job, len(uids) - len(miss), len(uids), tag))
+
+          all_ok = missing_total == 0 and gray_total > 0
+          subject = "[gray-check] %s 灰度核验: slice0-7 %s (%d/%d) | 全池昨日 %d" % (
+              gray_day, "全齐" if all_ok else "有缺", gray_total - missing_total,
+              gray_total, len(done_main))
+          body = (
+              "灰度机(本机+笔记本)昨夜预播名单 %s 核验：\n%s\n\n"
+              "主名单 %s 全池已播 %d 个（GitHub 昨夜 0:25 班 + 前夜灰度机合计）。\n"
+              "如有 MISS：查 D:\\netease-play-runner\\logs\\ 与笔记本同名目录，"
+              "漏片由 watchdog 补漏兜底（run_done 记账防双播）。"
+              % (gray_day, "\n".join(lines), main_day, len(done_main)))
+          print(subject)
+          print(body)
+
+          frm = (os.environ.get("EMAIL_FROM") or "").strip()
+          code = (os.environ.get("EMAIL_AUTH_CODE") or "").strip()
+          to = (os.environ.get("ALERT_TO") or frm).strip()
+          if not (frm and code and to):
+              print("::error::hz 未配置 EMAIL_FROM/EMAIL_AUTH_CODE/ALERT_TO")
+              raise SystemExit(1)
+          from email.mime.text import MIMEText
+          msg = MIMEText(body, "plain", "utf-8")
+          msg["Subject"] = subject
+          msg["From"] = frm
+          msg["To"] = to
+          with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=30) as s:
+              s.login(frm, code)
+              s.sendmail(frm, [x.strip() for x in to.split(",") if x.strip()], msg.as_string())
+          print("已发送:", subject)
+          EOF
