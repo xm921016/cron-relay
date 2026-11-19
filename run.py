@@ -76,7 +76,7 @@ AB_EXP_SECONDS = (55, 60)   # 实验口径：随机 55~60 秒
 # 安全性：Secret 为空 → C_EXP_SONGS 空集 → 分支永远走不到（默认关）；清 Secret 即回退。
 # ⚠ 判定完成前不配置此 Secret，避免归因污染（看板第六节 6.4）。
 C_EXP_SONGS = {s.strip() for s in os.environ.get("C_EXP_SONGS", "").replace("，", ",").split(",") if s.strip()}
-C_EXP_SECONDS = (38, 42)    # C 组口径：随机 38~42 秒
+C_EXP_SECONDS = (40, 42)    # C 组口径：随机 40~42 秒（2026-11-19 用户拍板 38→40 起步更稳，38 留作后续下探档）
 
 # ---- 2026-11-18：全池上报口径总开关（C 组判定成立后的终态切换用，默认关）----
 # 机制：环境变量/Secret POOL_PLAY_SECONDS = "下限,上限"（如 "38,42"）。非空时：所有非实验/非下探
