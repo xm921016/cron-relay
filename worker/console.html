@@ -13,7 +13,9 @@ button.gray{background:#888}button.warn{background:#a32d2d}button:disabled{opaci
    数字 19→18px，标签 11→10.5px），13 张卡在 1400px 以上宽度就能排成一行。
    每张卡现在还是「按钮」：点一下按这一项筛表格（见 pickStat），所以加了 cursor/hover/on 态。 */
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:7px;margin:0 0 12px}
-.stat{background:#f2f7ea;border:1px solid transparent;border-radius:10px;padding:7px 6px;text-align:center;min-width:0;cursor:pointer}
+.stat{background:#f2f7ea;border:1px solid transparent;border-radius:10px;padding:7px 6px;text-align:center;min-width:0;cursor:pointer;display:flex;flex-direction:column;justify-content:center}
+/* 2026-11-18：加 flex 纵向居中 —— grid 同行卡会被最高的那张（标签折两行的）拉伸，
+   单行卡的文字原来顶在上面（用户反馈「居上」），现在无论行高多少都垂直居中 */
 .stat b{display:block;font-size:18px;line-height:1.2;color:#3b6d11}
 .stat span{display:block;font-size:10.5px;line-height:1.3;color:#666;overflow-wrap:break-word}
 .stat:hover{background:#e9f3dc;border-color:#d5e5bd}
@@ -63,6 +65,11 @@ th.thin,td.mail,td[data-l="歌曲"],td[data-l="歌手"]{padding-left:5px;padding
 .b-orange{background:#fdeee0;color:#b85c00}
 /* 2026-10-25 售后标签新增两色：绿=已完成不用管，蓝=刚入池正常等待 */
 .b-green{background:#e3f4e3;color:#1e7a1e}.b-blue{background:#e3effa;color:#255ea6}
+/* 2026-11-19 搜索栏登记链接命中横幅：搜 xx1031.xyz/r/编码 或裸编码时查 reg_tokens，把登记信息显示在表格上方 */
+.regbanner{margin:2px 0 8px;padding:8px 12px;background:#f2f7ff;border:1px solid #c9dcf2;border-radius:10px;font-size:12.5px;line-height:2;color:#33506e}
+.regbanner .rgh{padding:2px 0;border-bottom:1px dashed #dbe7f5;word-break:break-all}
+.regbanner .rgh:last-child{border-bottom:0}
+.regbanner .rt{font-family:ui-monospace,Consolas,monospace;color:#255ea6;user-select:all;cursor:text}
 .snap-at{font-size:10px;color:#aaa;font-weight:400;margin-top:1px;line-height:1.2}
 /* 2026-11-15 v4：今日650格微型进度条，只在手机卡片流里显示（桌面隐藏） */
 .pbar6{display:none}
@@ -303,10 +310,9 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <select id="fagent" title="按客服筛选（顶部套餐汇总、所有统计都跟着变）" data-page-node-id="PMHAmUNacAc9JD94w8Kncm"><option value="" data-page-node-id="frD7MCweVB1xbQyhLknV9X">客服：全部</option></select>
     <select id="fplan" title="按套餐筛选" data-page-node-id="7lbtLCqkdoXnFx2elLEPh7"><option value="" data-page-node-id="KKD1lGOAHrsUfypnmcVICv">套餐：全部</option></select>
     <span class="dr" id="dr" title="入池日期范围：只看这段时间登记进池的号。只填一端也行（只填左边=这天及以后，只填右边=这天及以前），两边都空=全部。清空点右边的 ×" data-page-node-id="51HnUGAktl3MFaTSEsiVgg"><input type="date" id="date" title="入池起始日（含）" data-page-node-id="hT6obr4wl7H9KkVKKPtOHn"><em data-page-node-id="aRF6HwXs74KJlhOHqesG6m">~</em><input type="date" id="dateTo" title="入池结束日（含）" data-page-node-id="sdbGDGBakfbAVJVvEKmEpR"><i class="dn" id="dn" data-page-node-id="9MXwZzxueGJTpTF6MLi2rR"></i><span class="dx" id="dClear" title="清除入池日期范围" data-page-node-id="7IXbtdwLZbGsEqyiEV1TvD">×</span></span>
-    <input id="q" placeholder="搜索：账号 / 邮箱 / UID / 歌曲ID / 客服" data-page-node-id="HiY9izWnIWEZm0rKYqM076">
-    <select id="sort" data-page-node-id="wfp1M22iElG3PcguLgWXMo"><option value="default" data-page-node-id="56UTQFF8rFJAn7DXfloPbt">排序：默认</option><option value="delta" data-page-node-id="UymcGjBMywhhG1NIuf0KEu">排序：日涨幅↓</option><option value="rate" data-page-node-id="WUzlj2zRfKlG1YWKGta3t4">排序：今日进度↓</option></select>
-    <!-- 2026-11-15 方案④：手机专属入口（桌面 .mOnly 隐藏）。筛选面板/工具抽屉里的控件由 JS 从本栏搬过去，事件不变 -->
-    <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期/排序）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
+    <input id="q" placeholder="搜索：账号 / 邮箱 / UID / 歌曲ID / 客服 / 登记链接" data-page-node-id="HiY9izWnIWEZm0rKYqM076">
+    <!-- 2026-11-18：删掉「排序」下拉（用户拍板没用）。行内「较昨日」列本身可点表头排序的话另行处理，这里先直接移除 -->
+    <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
     <button class="mini mOnly" id="btnMore" title="工具箱（导出CSV/月度结算/客服名单/设备授权/登记链接/历史登记/退出）" data-page-node-id="Z0TBa6mm2C5i5J4wMmUIVm">工具</button>
     <button class="mini" id="btnCsv" data-page-node-id="1wGeER1qQC3pXjLZx52lK2">导出CSV</button>
     <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
@@ -315,8 +321,11 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini gray" id="btnDev" style="display:none" title="按客服电脑授权：未授权的机器码不能生成登记链接" data-page-node-id="YJHiOvMyZyJGL0BLRrRV4p">设备授权</button>
     <button class="mini gray" id="btnReg" style="display:none" title="生成买家自助登记链接；续费/补登必须选原单，类型定在链接上" data-page-node-id="JqzT5fuKCyCteGDQJKQloy">登记链接</button>
     <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限可见）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
+    <button class="mini gray" id="btnMailTrace" style="display:none" title="失效号邮件提醒查询（满权限可见，实时读 D1）：查某个失效号的重登邮件/删号通知/每日提醒到底发没发、什么时候发的；也可一键列出全部失效号的邮件状态">邮件提醒</button>
     <button class="mini gray" id="btnOut" data-page-node-id="JfDeJt5vbASdRoOMC7tVaS">退出</button>
   </div>
+  <!-- 2026-11-19：搜索栏命中登记链接（xx1031.xyz/r/编码 或裸编码）时显示的登记信息横幅，JS 动态填充 -->
+  <div class="regbanner" id="regBanner" hidden></div>
   <!-- ===== 2026-11-15 方案④：手机端筛选面板 / 遮罩 / 工具抽屉（桌面 display:none）=====
        控件不是复制是搬运：JS 把 #fagent/#fplan/#dr/#sort 搬进面板、七个低频按钮搬进抽屉，
        同一批 DOM 节点，onclick/addEventListener 与 applyRole 的显隐全部照旧生效；>860px 原样搬回。 -->
@@ -528,6 +537,35 @@ body:has(.modal:not([hidden])){overflow:hidden}
   <div class="row2" data-page-node-id="hMTvrMqibZ3wv4Yy3fsCna"><button class="gray" id="rcClose" data-page-node-id="L64GYRerH2zswYgizFwC1K">关闭</button></div>
   <div class="msg" id="rcm" data-page-node-id="qWqgk28EsFSRTjV4zMZLJI"></div>
 </div></div>
+<!-- ===== 2026-11-17：失效号邮件提醒查询（实时读 D1，满权限专属） ===== -->
+<div class="modal" id="mtModal" hidden><div class="mbox" style="width:1040px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
+  <h3>失效号邮件提醒查询（实时 + 缓存）</h3>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），默认返回近 <b>30 天</b>全部类型邮件（切大时间范围才多读，省配额），类型筛选在本机过滤不耗配额；每封队列邮件后有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」。<br><b>失效号清单</b>：列出全部「已通知重登」+「待复核」的号，每行可点「邮件」直达该号明细。<br><b>异常检查</b>：按 2026-11-18 拍板口径「今天播了明天就得有播放量」，列三类异常 —— 播放无效（生效数=0）/ 播放量停滞（近30日播放持平）/ 缺采（当天没采到且无标记）。</p>
+  <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
+    <div style="flex:1;min-width:220px"><label style="margin-top:0">搜索（UID / 手机号片段，可留空）</label><input id="mtQ" placeholder="如 13077105665" style="width:100%"></div>
+    <button class="mini" id="mtGo" style="margin-top:0;padding:9px 14px">查单号</button>
+    <button class="mini" id="mtList" style="margin-top:0;padding:9px 14px">失效号清单</button>
+    <button class="mini" id="mtAnom" style="margin-top:0;padding:9px 14px" title="按「今天播了明天就得有播放量」口径查三类异常：播放无效 / 播放量停滞 / 缺采（2026-11-18 拍板口径）">异常检查</button>
+    <button class="mini gray" id="mtForce" style="margin-top:0;padding:9px 14px" title="忽略缓存，强制重读 D1">强制刷新</button>
+    <div style="min-width:118px"><label style="margin-top:0">类型筛选</label><select id="mtKind" style="width:100%">
+      <option value="">全部类型</option>
+      <option value="relogin2">重登提醒</option>
+      <option value="reg">登记成功</option>
+      <option value="exp">到期提醒</option>
+      <option value="song">换歌类</option>
+      <option value="notice">删号通知</option>
+    </select></div>
+    <div style="min-width:100px"><label style="margin-top:0">时间范围</label><select id="mtDays" style="width:100%">
+      <option value="30">近 30 天</option>
+      <option value="7">近 7 天</option>
+      <option value="90">近 90 天</option>
+      <option value="180">近 180 天</option>
+    </select></div>
+  </div>
+  <div id="mtBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto"></div>
+  <div class="row2"><button class="gray" id="mtClose">关闭</button></div>
+  <div class="msg" id="mtm"></div>
+</div></div>
 <!-- ===== 2026-11-15 方案④：账号详情弹窗（满权限账号表的「详情」按钮）=====
      只读展示该行全部字段（数据源 render 时的 window.ROWS[i]），满权限时给「编辑」按钮走原 openEdit。 -->
 <div class="modal" id="infoModal" hidden data-page-node-id="6HpiU5UmfrPZ8lUIWiN2Kj"><div class="mbox" id="infoBox" data-page-node-id="JPeAYz32g1x6exQUKltOJi">
@@ -632,7 +670,7 @@ $('btnRefresh').onclick=function(){loadData(true);};   // 2026-11-09：点刷新
 // 2026-10-27 21:05：入池筛选是纯前端，改日期直接 render，不再重新请求接口（秒出）
 $('date').onchange=render;$('dateTo').onchange=render;
 $('dClear').onclick=function(){$('date').value='';$('dateTo').value='';render();};
-$('q').oninput=render;$('sort').onchange=render;
+$('q').oninput=render;   // 2026-11-18：#sort 下拉已删（用户拍板），只剩搜索框
 $('fagent').onchange=function(){AGENTF=this.value;render();};
 $('fplan').onchange=function(){PLANF=this.value;render();};
 // 2026-11-05：顶部统计卡点击 = 按这一项筛选（再点一次取消）。用 data-sv + 事件委托，
@@ -706,6 +744,8 @@ function applyRole(role){
   // 2026-11-05：结算涉及金额，只有满权限能看到入口（服务端也拦）
   var bl=$('btnLedger');if(bl)bl.style.display=full?'':'none';
   var brs=$('btnRescue');if(brs)brs.style.display=full?'':'none';
+  // 2026-11-17：邮件提醒查询（涉及买家邮箱，满权限专属，服务端同拦）
+  var bmt=$('btnMailTrace');if(bmt)bmt.style.display=full?'':'none';
   var t=$('ptitle');
   if(t){
     var old=document.getElementById('roTag');
@@ -1082,6 +1122,76 @@ function rangeLabels(){
   if(thD){thD.title=(a&&b?(a+' → '+b+'，'):'')+'今日650进度 - 昨日650进度；红色=涨，绿色=跌，0=今天没动，灰色「周期归零」=换新周期导致的 100→0（不是掉量）';}
   return true;
 }
+/* ===== 2026-11-19：搜索栏支持登记链接 =====
+   搜索框输入整条链接（xx1031.xyz/r/F8DVYKEE）或裸编码（F8DVYKEE）时：
+   ① 异步查 reg_tokens —— 复用 /api/regtoken_list 现成的 q 模糊口径（整条链接/编码片段/手机号片段都认，
+      后端已做 ≥3 位与规范化，控制台满权限直接调，后端零改动）；
+   ② 命中后表格上方出「登记信息」横幅：编码/状态/类型/套餐/客服/uid/手机号/使用时间/备注；
+   ③ 号池表格改按命中的 uid + 手机号过滤 —— 原始编码串在号池字段里搜不到，不替换就是空表。
+   识别口径：含 /r/ 直接取后面编码（≥3 位）；否则整串纯字母数字 ≥4 位才算链接查询
+   （纯数字也放行：后端按手机号+编码双 LIKE，搜 uid/手机号时顺带把该号登记过的链接也带出来）。
+   结果按编码缓存 + 400ms 去抖防连击；查询失败只影响横幅，表格回退普通搜索。 */
+var REGLOOK={code:'',rows:null,done:false,err:'',timer:null};
+function regSearchCode(raw){
+  if(!raw)return '';
+  var s=String(raw),i=s.indexOf('/r/');
+  if(i>=0)s=s.slice(i+3);
+  var fromLink=i>=0;
+  s=s.replace(/[^A-Za-z0-9]/g,'');
+  if(s.length<(fromLink?3:4)||s.length>16)return '';
+  return s;
+}
+function regSearchFetch(code){
+  if(REGLOOK.code===code&&(REGLOOK.done||REGLOOK.timer))return;
+  clearTimeout(REGLOOK.timer);
+  REGLOOK.timer=setTimeout(function(){
+    REGLOOK.timer=null;
+    var t=JSON.parse(TOKEN||'{}');
+    REGLOOK.code=code;REGLOOK.rows=null;REGLOOK.done=false;REGLOOK.err='';
+    api('/api/regtoken_list',{user:t.user,pass:t.pass,q:code,limit:20}).then(function(r){
+      if(REGLOOK.code!==code)return;   // 响应回来时搜索词已经变了，丢弃
+      if(r.ok&&r.d&&r.d.ok){REGLOOK.rows=r.d.rows||[];}
+      else{REGLOOK.rows=[];REGLOOK.err=(r.d&&r.d.message)||'登记链接查询失败';}
+      REGLOOK.done=true;render();
+    }).catch(function(){
+      if(REGLOOK.code!==code)return;
+      REGLOOK.rows=[];REGLOOK.done=true;REGLOOK.err='网络错误，登记链接查询失败';
+      render();
+    });
+  },400);
+}
+function regSearchBanner(code,rows,n){
+  var el=$('regBanner');
+  if(!el)return;
+  if(!code||!rows||(!rows.length&&!REGLOOK.err)){el.hidden=true;el.innerHTML='';return;}
+  if(!rows.length&&REGLOOK.err){
+    el.innerHTML='<b>登记链接查询失败：</b>'+esc(REGLOOK.err);
+    el.hidden=false;return;
+  }
+  var ST={unused:['未使用','b-orange'],used:['已使用','b-green'],void:['已作废','b-gray'],expired:['已过期','b-gray']};
+  var KD={renew:'续费',fix:'补登',ckswap:'换绑'};
+  var h='<b>登记链接命中 '+rows.length+' 条</b>（表格已按对应 uid/手机号筛出 '+n+' 行';
+  if(!n)h+=' —— 号不在池里：可能已删号/到期移除，或链接还没人用';
+  h+='）';
+  rows.forEach(function(x){
+    var st=ST[x.state]||ST.unused;
+    var link=location.origin+'/r/'+x.token;
+    h+='<div class="rgh"><span class="rt">'+esc(link)+'</span> '
+      +'<span class="badge '+st[1]+'">'+st[0]+'</span>'
+      +'<span class="badge b-blue">'+esc(KD[x.kind]||'新登记')+'</span> '
+      +(x.plan?('<b>'+esc(x.plan)+'</b>'+(x.days?('·'+esc(x.days)+'天'):'')+' · '):'')
+      +(x.agent?('客服 '+esc(x.agent)+' · '):'')
+      +(x.uid?('uid '+esc(x.uid)+' · '):'')
+      +(x.phone?('手机 '+esc(x.phone)+' · '):'')
+      +(x.uname&&x.uname!==x.phone?('昵称 '+esc(x.uname)+' · '):'')
+      +(x.used_at?('使用于 '+esc(bjFull(x.used_at))+' · '):('生成于 '+esc(bjFull(x.ctime))+' · '))
+      +'链接有效期 '+esc(bjFull(x.exp_at))
+      +(x.fix_exp?(' · 原单到期 '+esc(x.fix_exp)):'')
+      +(x.note?(' · 备注：'+esc(String(x.note).slice(0,60))):'')
+      +'</div>';
+  });
+  el.innerHTML=h;el.hidden=false;
+}
 function render(){
   if(!DATA)return;
   var susSet={};(DATA.suspects||[]).forEach(function(s){susSet[String(s.uid)]=1;});
@@ -1106,6 +1216,10 @@ function render(){
       if(rg.from&&ad<rg.from)return false;
       if(rg.to&&ad>rg.to)return false;
     }
+    if(regRows&&regRows.length){
+      // 2026-11-19：链接命中时按 reg_tokens 的 uid/手机号过滤（原始编码串在号池字段里搜不到）
+      return !!(regUid[String(e.uid||'')]||regPh[String(e.name||'')]);
+    }
     if(!q)return true;
     var e=r.e;
     // 2026-10-25：搜索也能命中标记文本（如搜「绑错歌」「共创」「未开刷」直接筛出同类号）
@@ -1127,9 +1241,8 @@ function render(){
   }
   var rows=STATF?baseRows.filter(function(r){return statHit(r,STATF);}):baseRows;
   var dnEl=$('dn');if(dnEl)dnEl.textContent=(rOn||STATF)?('筛出 '+rows.length+' 个'):'';
-  var s=$('sort').value;
-  if(s==='delta')rows.sort(function(x,y){return (y.delta==null?-999:y.delta)-(x.delta==null?-999:x.delta);});
-  else if(s==='rate')rows.sort(function(x,y){return ((y.a&&y.a.rate)||-1)-((x.a&&x.a.rate)||-1);});
+  // 2026-11-19：登记链接命中横幅（表格上方；n=按 uid/手机号筛出的行数，用于提示「号不在池里」）
+  regSearchBanner(regCode,regRows,rows.length);
   var withData=baseRows.filter(function(r){return r.a;});
   // 2026-10-26：顶部只保留「看了要知道该不该动手」的字段。
   // 已删：平均650进度（一个池的均值没有行动意义）、次日才入池 / 新号未开刷（新号正常爬坡，行内也不打标记了）。
@@ -1200,6 +1313,7 @@ function render(){
    +statCard('__up',ups,'今日上涨',{color:'#c0392b',title:'650 进度比昨天高的号'})
    +statCard('__down',downs,'今日下跌',{color:'#1e8449',title:'650 进度比昨天低、且不是周期归零的号'})
    +statCard('今日入池',newIn,'今日入池',{color:'#255ea6',title:'added 日期就是今天的号：明天才进轮转开始被听，今天没有快照/进度是正常的。点「入池」列排序可以看各自登记日'})
+   +statCard('采集缺失',cntTxt('采集缺失'),'采集缺失',{color:'#888',title:'今天没采到快照、号还在池且无失效标记（新入池号不计）。采集跟着播放轮走：没跑到的号当天就没快照，所以这个数基本就是「漏跑」名单；偶尔单独出现=快照接口超时。连续几天出现要查'})
    +statCard('周期归零',resets,'周期归零',{color:'#888',title:'昨日 650 已接近满、今天突然 0% 的号（31 天周期到点，不是掉量）'})
    +statCard('今日零增长',zeroGrow,'今日零增长',{warn:true,title:'650 进度和昨天完全一样，且近30日播放量也没涨（=不多不少刚好持平）'})
    +statCard('近30日净增≤0',netLoss,'净增≤0',{warn:true,title:'近30日播放量今天没涨或略降、650 进度也没涨：今天补的播放被 30 天前的老播放到期退出抵掉了（30 天滚动窗口的正常现象），不是播放没算进去。只统计两边快照采集时刻相差 3 小时以内的号，避免拿今早的数和昨晚的数硬比'})
@@ -1355,22 +1469,49 @@ function renderRunbar(){
       // conclusion 为空 → 要么显示成失败、要么根本不出现，进度看不见。
       var live=!!a.status&&a.status!=='completed';
       var jobTxt=a.jobs_total?(' · '+a.jobs_ok+'/'+a.jobs_total+' job'):'';
+      // 2026-11-18（用户口径二改）：hz 主仓 Phase 2 后只剩排片 job，「1/1 job」没意义——
+      // 改按「仓库」口径：24h 内有过 run 的节点仓（015/016）算活跃仓，全绿显示「仓库 2/2」；
+      // 有仓在跑显示「播放中/补跑中 仓号」（节点 run 的北京 0~6 点=主轮播放，其余时段=补漏轮）。
+      // 节点仓数据服务端 nodes[] 已带 status/conclusion/created（RO 只抹 url），前端纯本地计算。
+      var repoTxt='',nodeTxt='';
+      if(a.pool==='hz'&&Array.isArray(a.nodes)){
+        var act=a.nodes.filter(function(n){return n&&n.created&&(Date.now()-new Date(n.created).getTime())<86400000;});
+        var okN=0,lvMain=[],lvBack=[],flNames=[];
+        act.forEach(function(n){
+          if(n.status&&n.status!=='completed'){
+            var bh=new Date(new Date(n.created).getTime()+8*3600*1000).getUTCHours();
+            if(bh<6)lvMain.push(n.name);else lvBack.push(n.name);
+          }
+          else if(n.conclusion==='success')okN++;
+          else flNames.push(n.name);
+        });
+        if(act.length)repoTxt=' · 仓库 '+okN+'/'+act.length;
+        if(lvMain.length)nodeTxt+='<span style="color:#185FA5"> · 播放中 '+lvMain.join(',')+'</span>';
+        if(lvBack.length)nodeTxt+='<span style="color:#185FA5"> · 补跑中 '+lvBack.join(',')+'</span>';
+        if(flNames.length)nodeTxt+='<span class="bad"> · '+flNames.join(',')+'仓失败</span>';
+      }
       var head;
       if(live){
-        var dn=(a.jobs_done==null?a.jobs_ok:a.jobs_done);
-        var tot=(a.jobs_total||0);
-        head='<span style="color:#185FA5">● 进行中 '+(tot?(dn+'/'+tot+' job'):'（排队中）')+'</span>';
-        if(a.jobs_ok&&dn>a.jobs_ok)head+='<span class="muted"> · 成功 '+a.jobs_ok+'</span>';
+        if(a.pool==='hz'){
+          head='<span style="color:#185FA5">● 进行中（排片/派发）</span>'+nodeTxt;
+        }else{
+          var dn=(a.jobs_done==null?a.jobs_ok:a.jobs_done);
+          var tot=(a.jobs_total||0);
+          head='<span style="color:#185FA5">● 进行中 '+(tot?(dn+'/'+tot+' job'):'（排队中）')+'</span>';
+          if(a.jobs_ok&&dn>a.jobs_ok)head+='<span class="muted"> · 成功 '+a.jobs_ok+'</span>';
+        }
       }else if(a.conclusion==='success'){
-        head='<span class="good">✓ 成功'+esc(jobTxt)+'</span>';
+        head='<span class="good">✓ 成功'+esc(a.pool==='hz'?repoTxt:jobTxt)+'</span>'+nodeTxt;
       }else{
-        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(jobTxt)+'</span>';
+        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(a.pool==='hz'?repoTxt:jobTxt)+'</span>'+nodeTxt;
       }
       // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，
       // 这里再按 ROLE 兜一层（缓存里的旧数据 / 将来字段改名时不至于漏出链接）。
-      // 2026-11-15：日志链接带仓库名（016=主群主仓 cron-relay，017=定制群 dingzhi），
-      // 与节点仓「015日志/014日志/013日志」对齐，一眼分清哪条链接是哪个仓。
-      var logLink=((ROLE==='full')&&a.url)?' · <a href="'+esc(a.url)+'" target="_blank">'+(a.pool==='hz'?'016':'017')+'日志</a>':'';
+      // 2026-11-17：hz 主仓 cron-relay 已转私密（「主仓转私密+播放外移」Phase 3），浏览器
+      // 未登录 xm921016 点链接必 404，且 Phase 2 后 master 不再跑片（只剩 plan job）——
+      // hz 的主仓日志链接移除，hz 分片日志统一走下方节点仓链接（016=公开薄壳 N2b 接前一半片）。
+      // dz 仓（017）仍公开，链接保留。
+      var logLink=((ROLE==='full')&&a.url&&a.pool==='dz')?' · <a href="'+esc(a.url)+'" target="_blank">017日志</a>':'';
       // 2026-11-14：follower 节点仓日志入口（015/014/013，服务端已附 nodes[]，只读无 url 不渲染）。
       // 主群分片现在由主仓+节点仓一起跑，只看主仓日志会漏掉节点那几片的成败。
       var nodeLinks='';
@@ -1386,18 +1527,45 @@ function renderRunbar(){
     }
   });
   var covH='';
+  // 2026-11-18（用户口径二改）：不写「缺N」——漏跑写「漏N」并说明什么时候补；
+  // 已通知重登的号单独「未补登N」。补跑是否正在进行 = 主仓 run 在跑 或 任一节点仓 run 在跑。
+  function bjHnow(){var d=new Date(Date.now()+8*3600*1000);return d.getUTCHours()+d.getUTCMinutes()/60;}
+  function poolLive(p){
+    var a=null;
+    A.forEach(function(x){if(x&&x.pool===p&&x.ok)a=x;});
+    if(!a)return false;
+    if(a.status&&a.status!=='completed')return true;
+    if(Array.isArray(a.nodes))return a.nodes.some(function(n){return n&&n.status&&n.status!=='completed';});
+    return false;
+  }
   ['hz','dz'].forEach(function(p){
     var c=C[p];
     if(!c){covH+='<span class="muted">'+(p==='hz'?'主群':'定制群')+':无计划</span> ';return;}
     var mn=(c.missing_n==null?c.missing.length:c.missing_n);
-    // 2026-11-16（用户口径）：已通知重登的号不算「缺」，单独显示「未补登N」；
+    // 2026-11-16（用户口径）：已通知重登的号不算「漏」，单独显示「未补登N」；
     // 分母也去掉它们 —— 正常号跑满就显示 ran/eff = 满额，不再常年挂着「缺36」。
     var rn=(c.relogin_n==null)?((c.relogin&&c.relogin.length)||0):(c.relogin_n||0);
     var eff=(c.expected!=null)?Math.max(0,c.expected-rn):null;
     var cls=mn?'bad':'good';
-    covH+='<span class="'+cls+'" title="分母已去掉「未补登」的号：CK 失效、已给号主发重登邮件、还没补登的号不参与播放，等号主处理（超 7 天不补登自动删号），不算缺口。缺=真没跑到的号。">'
-      +(p==='hz'?'主群':'定制群')+' '+c.ran+'/'+(eff!=null?eff:c.expected)
-      +(mn?' 缺'+mn:'')+'</span> '
+    // 2026-11-18（用户口径二改）：分子=真播了的号（有效播放口径），不再把没跑的算成满额。
+    // 服务端已对漏跑名单实时验证 CK（结果缓存）：失效=CK 已死，今晚判死+直邮；漏跑=号活着会自动补。
+    var tip='实跑=真的播了的号（有效播放口径）。失效=CK 已失效（实时验证、与夜轮同口径），今晚主轮判死并直邮号主，不会有有效播放；漏跑=号还活着没跑到，系统自动补跑。';
+    var missTxt='';
+    if(mn){
+      var ddead=c.dead_n||0;
+      var dmiss=mn-ddead;
+      var parts=[];
+      if(dmiss){
+        if(poolLive(p))parts.push('<span class="bad">漏跑'+dmiss+' · 补跑中</span>');
+        else if(bjHnow()<20)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 自动补漏盯补中（播完即查·每10分钟·两轮制）</span>');
+        else parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 今晚 0:10 主轮补跑</span>');
+      }
+      if(ddead)parts.push('<span class="bad">失效'+ddead+'</span><span class="muted"> · 今晚判死+直邮，之后转「未补登」</span>');
+      if(parts.length)missTxt=' '+parts.join(' ');
+    }
+    covH+='<span class="'+cls+'" title="'+tip+'">'
+      +(p==='hz'?'主群':'定制群')+' '+c.ran+'/'+(eff!=null?eff:c.expected)+'</span>'
+      +missTxt+' '
       +(rn?'<span class="muted">未补登'+rn+'</span> ':'');
   });
   h+='<div class="rb"><b>应跑/实跑</b><br>'+covH+'</div>';
@@ -1629,6 +1797,8 @@ function openInfo(i){
     +'</div>'
   +(e.note?('<div class="dsec">'+kv('备注',esc(e.note))+'</div>'):'')
   +'<div class="dsec"><i>标记</i>'+(r.markHtml||'<span style="color:#bbb">正常</span>')+'</div>'
+  /* 2026-11-17：CK 实时验证结果区（点底部「验证CK」按钮触发，只读不改数据）*/
+  +(ROLE==='full'?('<div class="dsec" id="infoCkRes" hidden><i>CK验证</i><span style="color:#888">点下方「验证CK」实时测试当前存的凭证</span></div>'):'')
   /* 2026-11-17（方案 A）：台账购买记录 —— 与「补号查原单」同源（/api/console/findorder，
      满权限专属，只读口令服务端 403 所以直接不渲染这一段）。按 UID 精确过滤后按单展示，
      套餐本来就是按单记的，按单看才是它的本体；总有效期永远以上面「有效期」为准。 */
@@ -1641,6 +1811,28 @@ function openInfo(i){
     eb2.id='infoEdit';eb2.textContent='编辑';
     eb2.onclick=function(){$('infoModal').hidden=true;openEdit(r.pool,e.uid,e.name);};
     $('infoClose').parentNode.insertBefore(eb2,$('infoClose'));
+    /* 2026-11-17：验证CK —— 拿当前存的 CK 实时调网易登录校验（worker /api/console/cktest）。
+       换绑/改 CK 落库时虽然都验过一次，但事后想知道「现在还活着没」此前只能等下一轮采集；
+       这个按钮当场出结果，不等快照。 */
+    var oldCk=$('infoCkTest');if(oldCk&&oldCk.parentNode)oldCk.parentNode.removeChild(oldCk);
+    var cb2=document.createElement('button');
+    cb2.id='infoCkTest';cb2.textContent='验证CK';
+    cb2.title='拿当前存的 CK 实时调网易登录校验（只读，不改任何数据）';
+    cb2.onclick=function(){
+      var res=$('infoCkRes');if(res)res.hidden=false;
+      var _tC=JSON.parse(TOKEN||'{}');
+      cb2.disabled=true;
+      if(res)res.innerHTML='<i>CK验证</i><span style="color:#888">实时校验中…（约 1~3 秒）</span>';
+      api('/api/console/cktest',{user:_tC.user,pass:_tC.pass,uid:e.uid,name:e.name}).then(function(o){
+        cb2.disabled=false;
+        var d=(o&&o.d)||{};
+        var col=d.verdict==='alive'?'#1a7f37':(d.verdict==='dead'?'#a32d2d':'#b06a00');
+        var icon=d.verdict==='alive'?'✅':(d.verdict==='dead'?'❌':'⚠️');
+        if(res)res.innerHTML='<i>CK验证</i><span style="color:'+col+';font-weight:600">'+icon+' '+esc(d.message||'验证失败')+'</span>'
+          +(d.realUid?(' <span style="color:#888;font-size:11px">（网易返回 uid '+esc(d.realUid)+'，校验时刻 '+bjTime(new Date().toISOString())+'）</span>'):'');
+      }).catch(function(){cb2.disabled=false;var r2=$('infoCkRes');if(r2)r2.innerHTML='<i>CK验证</i><span style="color:#a32d2d">网络错误，稍后再试</span>';});
+    };
+    $('infoClose').parentNode.insertBefore(cb2,$('infoClose'));
   }
   $('infoTitle').textContent='账号详情';
   $('infoSub').textContent='该号全部字段；完整标记说明见「标记对照表」';
@@ -2052,6 +2244,248 @@ $('btnRescue').onclick=function(){
   $('rcm').textContent='';$('rcBody').innerHTML='';
   $('rcModal').hidden=false;
   rcRescue();   // 打开先看待挽回清单（最常用）；上方搜索框随时可切「查登记记录」
+};
+
+// ===== 2026-11-17：失效号邮件提醒查询（实时读 D1，满权限专属） =====
+// 三条邮件链路的记录位置（口径与 /api/console/mailtrace 注释一致）：
+//   relogin_at = 重登邮件（run.py 直邮成功回调写入）—— 有值=第一封重登邮件已发出
+//   dead_notice = 删号通知（手动删号入队）—— state sent/claimed/pending + sent_at
+//   mail_queue = 队列邮件（relogin2=每日重登提醒、reg、exp*、songchange、feenote）
+function mtMailState(s){
+  var v=String(s||'');
+  if(v==='sent')return '<span class="good">已发出</span>';
+  if(v==='claimed')return '<span class="muted" title="已领取正在发送，2 小时超时自动回退">发送中</span>';
+  if(v==='pending')return '<span class="muted">排队中</span>';
+  if(v==='dropped')return '<span style="color:#a32d2d">已放弃（连败3次）</span>';
+  if(v==='skipped')return '<span class="muted">已跳过</span>';
+  if(v==='skip_returned')return '<span class="good">已回池·不发</span>';
+  if(v==='skip_noemail')return '<span class="muted">无邮箱·不发</span>';
+  return esc(v||'—');
+}
+function mtTime(v){
+  var s=String(v||'');
+  return s?esc(s.slice(5,16)):'—';   // MM-DD HH:MM
+}
+function mtRenderOne(o){
+  var accs=(o&&o.accs)||[];
+  if(!accs.length)return '<p style="color:#888">没查到这个号（accounts 里没有，邮件队列里也没有）。</p>';
+  var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;border-bottom:1px solid #e6e8ec;text-align:left';
+  var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;vertical-align:top;white-space:nowrap';
+  var h='';
+  for(var i=0;i<accs.length;i++){var a=accs[i];
+    h+='<div style="margin:0 0 6px;font-size:13px"><b>'+esc(String(a.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</b>'
+      +'（'+(a.pool==='hz'?'主群':'定制')+' · uid '+esc(a.uid)+' · '+(Number(a.pub)===1?'公益':'套餐 '+esc(a.plan||'—')+' · 到期 '+esc(a.exp||'—')+'）')
+      +' · 邮箱 '+esc(a.email||'（未留）')+'</div>'
+      +'<p style="margin:4px 0 8px;font-size:12.5px">'
+      +'重登邮件：<b>'+(a.relogin_at?'<span class="good">已发出 '+mtTime(a.relogin_at)+'</span>':'<span class="muted">从未发出</span>')+'</b>'
+      +(a.relogin_at?'':' <button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="relogin2" data-ref="" style="padding:2px 10px;font-size:11px" title="这个号还没发过重登邮件，手动补一封每日重登提醒（走原发信链路，约 30 分钟内发出）">补发重登提醒</button>')
+      +' ｜ 待复核标记：'+(a.suspect_at?esc(String(a.suspect_at).slice(5,16)):'无')
+      +(a.dead&&a.dead.length?(' ｜ 删号流水：<b style="color:#a32d2d">'+esc(String(a.dead[0].reason||''))+' '+mtTime(a.dead[0].at)+'</b>'):'')
+      +'</p>';
+    // 2026-11-17 二期：类型/时间筛选（本机过滤，不耗 D1 配额）—— 服务端一次拉回近 200 条
+    var selK=($('mtKind')?$('mtKind').value:'')||'';
+    var daysN=($('mtDays')?parseInt($('mtDays').value,10):30)||30;
+    var cutD=new Date(Date.now()-daysN*86400000).toISOString().slice(0,10);
+    var mails=[];
+    for(var k2=0;k2<(a.mails||[]).length;k2++){var mm2=a.mails[k2];mm2.__mq=1;mails.push(mm2);}
+    if(a.notices&&a.notices.length){
+      for(var j=0;j<a.notices.length;j++){
+        mails.push({__mq:0,kind:'删号通知('+(a.notices[j].kind||'dead')+')',ref:'',state:a.notices[j].state,
+          created_at:a.notices[j].removed_at,claimed_at:'',sent_at:a.notices[j].sent_at,skip_reason:a.notices[j].skip_reason});
+      }
+    }
+    mails=mails.filter(function(m){
+      var dd=String(m.created_at||'').slice(0,10);
+      if(dd&&dd<cutD)return false;
+      if(!selK)return true;
+      if(selK==='notice')return !m.__mq;
+      if(!m.__mq)return false;
+      var kk=String(m.kind||'');
+      if(selK==='exp')return kk.indexOf('exp')===0;
+      if(selK==='song')return /^(songfix|songchange|feenote|nomus|songok)/.test(kk);
+      return kk===selK;
+    });
+    if(!mails.length){
+      h+='<p style="color:#888;font-size:12.5px;margin:0 0 14px">'+(selK||daysN<180?'当前筛选条件下没有邮件记录（可放宽类型/时间范围）。':'邮件队列为空：这个号从未进过任何邮件队列'+(a.relogin_at?'':'，也从未发过重登邮件')+'。')+'</p>';
+      continue;
+    }
+    h+='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px;margin:0 0 14px"><thead><tr>'
+      +'<th style="'+TH+'">邮件类型</th><th style="'+TH+'">关联单号/日期</th><th style="'+TH+'">状态</th>'
+      +'<th style="'+TH+'">入队时间</th><th style="'+TH+'">发出时间</th><th style="'+TH+'">备注</th><th style="'+TH+'">操作</th></tr></thead><tbody>';
+    for(var k=0;k<mails.length;k++){var m=mails[k];
+      h+='<tr'+(k%2?' style="background:#fafbfc"':'')+'>'
+        +'<td style="'+TD+'">'+esc(m.kind||'—')+'</td>'
+        +'<td style="'+TD+'">'+esc(m.ref||'—')+'</td>'
+        +'<td style="'+TD+'">'+mtMailState(m.state)+'</td>'
+        +'<td style="'+TD+'">'+mtTime(m.created_at)+'</td>'
+        +'<td style="'+TD+'">'+(m.sent_at?('<span class="good">'+mtTime(m.sent_at)+'</span>'):'—')+'</td>'
+        +'<td style="'+TD+';color:#777;max-width:220px;overflow:hidden;text-overflow:ellipsis">'+esc(m.skip_reason||'')+'</td>'
+        +(m.__mq?('<td style="'+TD+'"><button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="'+esc(m.kind||'')+'" data-ref="'+esc(m.ref||'')+'" style="padding:2px 10px;font-size:11px" title="把这封邮件重新入队，走原发信链路（约 30 分钟内）发出">补发</button></td>'):'<td style="'+TD+'"></td>')
+      +'</tr>';
+    }
+    h+='</tbody></table>';
+  }
+  return h;
+}
+function mtRenderList(d){
+  var rs=(d&&d.rows)||[];
+  // 2026-11-18 四期：清单模式也接类型/时间筛选（本机过滤）——按每号窗口内出现过的邮件 kind 匹配
+  var selK=($('mtKind')?$('mtKind').value:'')||'';
+  var daysN=($('mtDays')?parseInt($('mtDays').value,10):30)||30;
+  var cutD=new Date(Date.now()-daysN*86400000).toISOString().slice(0,10);
+  var totalAll=rs.length;
+  if(selK){
+    rs=rs.filter(function(r){
+      if(selK==='notice')return !!r.notice;
+      if(selK==='relogin2')return (r.kinds||[]).indexOf('relogin2')>=0||(r.relogin_at&&String(r.relogin_at).slice(0,10)>=cutD);
+      var ks=r.kinds||[];
+      for(var i=0;i<ks.length;i++){
+        var k=String(ks[i]);
+        if(selK==='exp'&&k.indexOf('exp')===0)return true;
+        if(selK==='song'&&/^(songfix|songchange|feenote|nomus|songok)/.test(k))return true;
+        if(k===selK)return true;
+      }
+      return false;
+    });
+  }
+  if(!rs.length)return '<p style="color:#888">'+(selK?'当前筛选条件下没有匹配的号（'+totalAll+' 个失效相关号里没有窗口内发过该类型邮件的）——把类型/时间范围放宽一点试试。':'当前没有任何「已通知重登」或「待复核」的号 —— 失效邮件体系空转中。')+'</p>';
+  var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;position:sticky;top:0;border-bottom:1px solid #e6e8ec;text-align:left';
+  var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
+  var h='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px"><thead><tr>'
+    +'<th style="'+TH+'">群</th><th style="'+TH+'">账号</th><th style="'+TH+'">UID</th><th style="'+TH+'">邮箱</th>'
+    +'<th style="'+TH+'" title="重登邮件已发时间（run.py 直邮成功后写入 relogin_at）">重登邮件</th>'
+    +'<th style="'+TH+'" title="每天一封的 relogin2 提醒，取最新一条">每日提醒</th>'
+    +'<th style="'+TH+'" title="手动删号通知状态">删号通知</th><th style="'+TH+'">待复核</th><th style="'+TH+'">到期</th><th style="'+TH+'">邮件</th></tr></thead><tbody>';
+  for(var i=0;i<rs.length;i++){var r=rs[i];
+    var rel2=r.rel2,nt=r.notice;
+    var rel2Txt='—';
+    if(rel2){
+      rel2Txt=mtMailState(rel2.state)+(rel2.sent_at?(' '+mtTime(rel2.sent_at)):(rel2.created_at?(' 入队 '+mtTime(rel2.created_at)):''))
+        +(rel2.skip_reason?(' <span class="muted">'+esc(rel2.skip_reason)+'</span>'):'');
+    }
+    h+='<tr'+(i%2?' style="background:#fafbfc"':'')+'>'
+      +'<td style="'+TD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
+      +'<td style="'+TD+'">'+esc(String(r.name||'—').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</td>'
+      +'<td style="'+TD+'" class="num">'+esc(r.uid)+'</td>'
+      +'<td style="'+TD+';max-width:150px;overflow:hidden;text-overflow:ellipsis">'+esc(r.email||'（未留）')+'</td>'
+      +'<td style="'+TD+'">'+(r.relogin_at?'<span class="good">'+mtTime(r.relogin_at)+'</span>':'<span class="muted">未发</span>')+'</td>'
+      +'<td style="'+TD+'">'+rel2Txt+'</td>'
+      +'<td style="'+TD+'">'+(nt?(mtMailState(nt.state)+(nt.sent_at?(' '+mtTime(nt.sent_at)):'')):'—')+'</td>'
+      +'<td style="'+TD+'">'+(r.suspect_at?esc(String(r.suspect_at).slice(5,16)):'—')+'</td>'
+      +'<td style="'+TD+'">'+esc(r.exp||'—')+'</td>'
+      +'<td style="'+TD+'"><button class="mini" data-act="mtopen" data-uid="'+esc(r.uid)+'" style="padding:2px 10px;font-size:11px" title="跳到这个号的邮件明细（类型筛选/补发都在那里）">邮件</button></td>'
+    +'</tr>';
+  }
+  h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">'+(selK?('筛选后 '+rs.length+' / 共 '+totalAll+' 个失效相关号（类型筛选只在本机过滤已拉回的数据，切换不耗配额）。'):'共 '+rs.length+' 个失效相关号（已通知重登 + 待复核）。')+'每日提醒=最新一封 relogin2 邮件；「未发」重登邮件的号说明判死邮件链路没走到它（还没被采集判死）。</p>';
+  return h;
+}
+var MT_LAST=null;   // 最近一次查询结果（含 mode），筛选切换/补发后在本机重渲染，不重复读库
+function mtApplyFilter(){
+  if(!MT_LAST)return;
+  if(MT_LAST.mode==='anom'){$('mtBody').innerHTML=mtRenderAnom(MT_LAST.data);return;}
+  $('mtBody').innerHTML=MT_LAST.mode==='one'?mtRenderOne(MT_LAST.data):mtRenderList(MT_LAST.data);
+}
+// 2026-11-18 三期：异常检查渲染（口径 = 用户拍板「今天播了明天就得有播放量」）
+function mtRenderAnom(d){
+  if(!d)return '<p style="color:#888">没有数据。</p>';
+  var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;border-bottom:1px solid #e6e8ec;text-align:left';
+  var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;vertical-align:top;white-space:nowrap';
+  var nn=(d.n||{});
+  var h='<p style="margin:0 0 8px;font-size:12.5px">基准日 <b>'+esc(d.dayD)+'</b>（对比 '+esc(d.dayP)+'）· 当日快照 '+esc(String(nn.snap||0))+' 个 · 在池 '+esc(String(nn.accounts||0))+' 个'
+    +' ｜ <b style="color:#a32d2d">播放无效 '+esc(String(nn.noEffect||0))+'</b> ｜ <b style="color:#8a6d1a">播放量停滞 '+esc(String(nn.flatRpc||0))+'</b> ｜ <b>缺采 '+esc(String(nn.missing||0))+'</b></p>'
+    +'<p style="margin:0 0 10px;font-size:12px;color:#777;line-height:1.7">口径（2026-11-18 拍板）：今天播了，明天就得有播放量。<b>播放无效</b>＝播了但「生效数」为 0（全池常态 92% 的号有生效，=0 只占 6.8%）；<b>播放量停滞</b>＝近30日播放与前一天完全持平（常态 84% 在涨、14% 自然回落、持平仅 1.4%，持平才可疑）；<b>缺采</b>＝当天没被采到且无失效标记。「连续」＝连续 N 天生效数为 0，≥2 天为重点嫌疑。</p>';
+  function mtSec(title,color,rows,cols){
+    var s='<h4 style="margin:12px 0 6px;font-size:13px;color:'+color+'">'+title+'（'+rows.length+'）</h4>';
+    if(!rows.length)return s+'<p style="color:#888;font-size:12.5px;margin:0 0 10px">无 ✓</p>';
+    s+='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px;margin:0 0 10px"><thead><tr>';
+    for(var i=0;i<cols.length;i++)s+='<th style="'+TH+'">'+cols[i][0]+'</th>';
+    s+='</tr></thead><tbody>';
+    for(var j=0;j<rows.length&&j<100;j++){
+      s+='<tr'+(j%2?' style="background:#fafbfc"':'')+'>';
+      for(var k=0;k<cols.length;k++)s+='<td style="'+TD+'">'+cols[k][1](rows[j])+'</td>';
+      s+='</tr>';
+    }
+    s+='</tbody></table>';
+    if(rows.length>100)s+='<p style="font-size:11px;color:#999;margin:0 0 10px">只显示前 100 个（共 '+rows.length+'，缺采清单完整数据以接口为准）。</p>';
+    return s;
+  }
+  function mtAcc(r){return esc(String(r.name||'—').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'));}
+  function mtUid(r){return '<span class="num">'+esc(r.uid)+'</span>';}
+  function mtRpc(r){return String(r.rpc30==null?'—':r.rpc30)+(r.rpcDelta==null?'':'（'+(r.rpcDelta>0?'+':'')+r.rpcDelta+'）');}
+  function mtStreak(r){return r.streak>=2?'<b style="color:#a32d2d">'+r.streak+' 天</b>':String(r.streak)+' 天';}
+  h+=mtSec('播放无效（播了但生效数=0）','#a32d2d',d.noEffect||[],[
+    ['账号',mtAcc],['UID',mtUid],['代理',function(r){return esc(r.agent||'—');}],['生效数',function(r){return String(r.effect==null?'—':r.effect);}],
+    ['近30日播放',mtRpc],['连续',mtStreak]
+  ]);
+  h+=mtSec('播放量停滞（近30日播放与前一天持平）','#8a6d1a',d.flatRpc||[],[
+    ['账号',mtAcc],['UID',mtUid],['代理',function(r){return esc(r.agent||'—');}],['近30日播放',mtRpc],['连续',mtStreak]
+  ]);
+  h+=mtSec('缺采（基准日没采到且无失效标记；当天新登记的号次日才首采，不计入）','#555',d.missing||[],[
+    ['账号',mtAcc],['UID',mtUid],['代理',function(r){return esc(r.agent||'—');}],
+    ['入池',function(r){return esc(String(r.added||'—').slice(0,10));}],['到期',function(r){return esc(r.exp||'—');}]
+  ]);
+  h+='<p style="font-size:11px;color:#999;margin:8px 0 0">只读检查，不自动发邮件：播放无效/停滞的号 CK 多半还活着（能被采到），处理动作（换 CK / 联系号主）由人工决定；缺采里真死的号下一轮播放轮会走既有判死+直邮链路。</p>';
+  return h;
+}
+function mtQuery(mode,force){
+  var t=JSON.parse(TOKEN||'{}'),q=($('mtQ').value||'').trim();
+  if(mode==='one'&&q.replace(/[^0-9A-Za-z]/g,'').length<3){$('mtm').textContent='查单号请输至少 3 位（UID / 手机号片段）';$('mtm').className='msg err';return;}
+  $('mtm').textContent=force?'强制刷新中（重读 D1）…':'查询中…';$('mtm').className='msg';
+  $('mtGo').disabled=true;$('mtList').disabled=true;$('mtAnom').disabled=true;$('mtForce').disabled=true;$('mtBody').innerHTML='';
+  // 2026-11-18 三期：时间范围走服务端过滤（默认 30 天，切大窗口才多读，省配额）
+  var days=parseInt(($('mtDays')&&$('mtDays').value)||'30',10)||30;
+  var pay={user:t.user,pass:t.pass,force:!!force,days:days};
+  if(mode==='one')pay.q=q;
+  var ep=mode==='anom'?'/api/console/anomalies':'/api/console/mailtrace';
+  api(ep,pay).then(function(o){
+    $('mtGo').disabled=false;$('mtList').disabled=false;$('mtAnom').disabled=false;$('mtForce').disabled=false;
+    if(!(o.ok&&o.d&&o.d.ok)){$('mtm').textContent=(o.d&&o.d.message)||'查询失败';$('mtm').className='msg err';return;}
+    MT_LAST={mode:mode,data:o.d};
+    $('mtm').textContent=o.d.cached?('缓存命中（生成于 '+esc(String(o.d.gen||'').slice(5,16))+'，期间数据无变化，未读库）'):'已实时读取 D1';
+    $('mtm').className='msg';
+    mtApplyFilter();
+  }).catch(function(){$('mtGo').disabled=false;$('mtList').disabled=false;$('mtAnom').disabled=false;$('mtForce').disabled=false;$('mtm').textContent='网络错误';$('mtm').className='msg err';});
+}
+$('mtGo').onclick=function(){mtQuery('one');};
+$('mtList').onclick=function(){mtQuery('list');};
+$('mtAnom').onclick=function(){mtQuery('anom');};
+$('mtForce').onclick=function(){mtQuery(MT_LAST?MT_LAST.mode:'list',true);};
+$('mtKind').onchange=mtApplyFilter;   // 类型筛选：本机过滤已拉回的数据，切换不耗配额
+$('mtDays').onchange=function(){mtQuery(MT_LAST?MT_LAST.mode:'one');};   // 时间范围走服务端重查（省额度：默认只拉 30 天）
+$('mtQ').onkeydown=function(e){if(e&&(e.key==='Enter'||e.keyCode===13))mtQuery('one');};
+$('mtClose').onclick=function(){$('mtModal').hidden=true;};
+// 弹窗内动态按钮（事件委托）：data-act=resend 补发 / mtopen 跳到该号邮件明细
+$('mtBody').addEventListener('click',function(ev){
+  var el=ev.target;
+  if(!el||!el.getAttribute)return;
+  var act=el.getAttribute('data-act');
+  if(act==='resend')return mtResend(el);
+  if(act==='mtopen'){$('mtQ').value=el.getAttribute('data-uid')||'';mtQuery('one');}
+});
+function mtResend(btn){
+  var t=JSON.parse(TOKEN||'{}');
+  var pool=btn.getAttribute('data-pool'),uid=btn.getAttribute('data-uid'),kind=btn.getAttribute('data-kind'),ref=btn.getAttribute('data-ref');
+  if(btn.getAttribute('data-armed')!=='1'){   // 两段确认：第一下变红，再点一下才真发
+    btn.setAttribute('data-armed','1');btn.textContent='确认补发?';btn.style.background='#a32d2d';btn.style.color='#fff';btn.style.borderColor='#a32d2d';
+    setTimeout(function(){if(btn.parentNode){btn.setAttribute('data-armed','0');btn.textContent='补发';btn.style.background='';btn.style.color='';btn.style.borderColor='';}},4000);
+    return;
+  }
+  btn.disabled=true;btn.textContent='入队中…';
+  api('/api/console/mailresend',{user:t.user,pass:t.pass,pool:pool,uid:uid,kind:kind,ref:ref}).then(function(o){
+    if(o.ok&&o.d&&o.d.ok){
+      $('mtm').textContent=(o.d.message||'已入队')+' —— 查询缓存已自动失效，下次刷新会重新读库';
+      $('mtm').className='msg good';
+      mtQuery(MT_LAST?MT_LAST.mode:'one');   // 补发改变了 mail_queue，指纹变化 → 自动走实时重建
+    }else{
+      btn.disabled=false;btn.textContent='补发';
+      $('mtm').textContent=(o.d&&o.d.message)||'补发失败';$('mtm').className='msg err';
+    }
+  }).catch(function(){btn.disabled=false;btn.textContent='补发';$('mtm').textContent='网络错误';$('mtm').className='msg err';});
+}
+$('btnMailTrace').onclick=function(){
+  $('mtm').textContent='';$('mtBody').innerHTML='';
+  $('mtModal').hidden=false;
+  mtQuery('list');   // 打开先看失效号清单（最常用）；输号回车即查单号
 };
 /* 2026-11-15：一键跳到删号记录区 —— 号池几百行，滚到底太累（用户反馈）。
    展开并平滑滚过去；数据还没回来（hidden）也先摘掉 hidden，loadData 回填列表。 */
@@ -2543,9 +2977,9 @@ function mRestoreAll(){
 }
 function mDeployMobile(){
   if(MOV.length)return;
-  var fids=['fagent','fplan','dr','sort'],fs=$('fpSlot');
+  var fids=['fagent','fplan','dr'],fs=$('fpSlot');   // 2026-11-18：'sort' 已删
   if(fs){fids.forEach(function(id){var el=mGrab(id);if(el)fs.appendChild(el);});}
-  var tids=['btnCsv','btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnOut'],ts=$('tdSlot');
+  var tids=['btnCsv','btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnMailTrace','btnOut'],ts=$('tdSlot');
   if(ts){tids.forEach(function(id){var el=mGrab(id);if(el)ts.appendChild(el);});}
   var kp=$('kjP');
   if(kp&&!$('kjWrap')){
