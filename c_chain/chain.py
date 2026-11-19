@@ -147,7 +147,8 @@ def gh_secret_set(name, value):
     req = urllib.request.Request(f"{REPO_API}/{name}", data=body,
                                  headers={**H, "Content-Type": "application/json"}, method="PUT")
     urllib.request.urlopen(req, timeout=30)
-    r = json.loads(urllib.request.urlopen(urllib.request.Request(REPO_API, headers=H), timeout=30).read())
+    # 回读校验必须 per_page=100：仓内 secret 已 66 个，默认 30 条只显示第一页（铁律同款坑，11-19 实锤误报）
+    r = json.loads(urllib.request.urlopen(urllib.request.Request(REPO_API + "?per_page=100", headers=H), timeout=30).read())
     ok = name in [s["name"] for s in r["secrets"]]
     log(f"  Secret {name} ← '{value or '(空)'}' 回读在列={ok}")
     if not ok:
