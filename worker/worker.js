@@ -12305,9 +12305,10 @@ function openInfo(i){
       }
       el.innerHTML='<i>购买记录</i>'+lh;
     }).catch(function(){var el2=$('infoLedger');if(el2&&INFO_SEQ===_seq)el2.innerHTML='<i>购买记录</i><span style="color:#a32d2d">网络错误</span>';});
-    /* 2026-11-19：登记链接查询（与购买记录同一套 INFO_SEQ 防串）。q 用 uid 查（后端 LIKE 口径
-       覆盖 uid/手机号/编码），回来后客户端精确过滤：uid 全等 或 手机号=账号名。 */
-    api('/api/regtoken_list',{user:_tI.user,pass:_tI.pass,q:(_uid||_nm),limit:50}).then(function(o){
+    /* 2026-11-19：登记链接查询（与购买记录同一套 INFO_SEQ 防串）。
+       ⚠ 后端 q 口径只有 token/phone 双 LIKE、不含 uid —— 所以必须用账号名（手机号）查，
+       12:58 实测按 uid 查永远「无记录」。没有账号名的极端老号才退化为 uid（命中不了就显示无记录）。 */
+    api('/api/regtoken_list',{user:_tI.user,pass:_tI.pass,q:(_nm||_uid),limit:50}).then(function(o){
       var elR=$('infoReg');if(!elR||INFO_SEQ!==_seq)return;
       var rsR=(o.ok&&o.d&&o.d.ok)?(o.d.rows||[]):null;
       if(!rsR){elR.innerHTML='<i>登记链接</i><span style="color:#a32d2d">'+esc((o.d&&o.d.message)||'查询失败')+'</span>';return;}
