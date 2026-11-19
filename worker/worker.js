@@ -10509,11 +10509,8 @@ th.thin,td.mail,td[data-l="歌曲"],td[data-l="歌手"]{padding-left:5px;padding
 .b-orange{background:#fdeee0;color:#b85c00}
 /* 2026-10-25 售后标签新增两色：绿=已完成不用管，蓝=刚入池正常等待 */
 .b-green{background:#e3f4e3;color:#1e7a1e}.b-blue{background:#e3effa;color:#255ea6}
-/* 2026-11-19 搜索栏登记链接命中横幅：搜 xx1031.xyz/r/编码 或裸编码时查 reg_tokens，把登记信息显示在表格上方 */
-.regbanner{margin:2px 0 8px;padding:8px 12px;background:#f2f7ff;border:1px solid #c9dcf2;border-radius:10px;font-size:12.5px;line-height:2;color:#33506e}
-.regbanner .rgh{padding:2px 0;border-bottom:1px dashed #dbe7f5;word-break:break-all}
-.regbanner .rgh:last-child{border-bottom:0}
-.regbanner .rt{font-family:ui-monospace,Consolas,monospace;color:#255ea6;user-select:all;cursor:text}
+/* 2026-11-19 12:45：登记链接查询横幅（.regbanner/#regBanner/regSearchBanner）已按用户要求整体移除
+   —— 搜索栏只做表格过滤，链接详情改在账号「详情」弹窗的「登记链接」字段里看（openInfo）。 */
 .snap-at{font-size:10px;color:#aaa;font-weight:400;margin-top:1px;line-height:1.2}
 /* 2026-11-15 v4：今日650格微型进度条，只在手机卡片流里显示（桌面隐藏） */
 .pbar6{display:none}
@@ -10768,8 +10765,6 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini gray" id="btnMailTrace" style="display:none" title="失效号邮件提醒查询（满权限可见，实时读 D1）：查某个失效号的重登邮件/删号通知/每日提醒到底发没发、什么时候发的；也可一键列出全部失效号的邮件状态">邮件提醒</button>
     <button class="mini gray" id="btnOut" data-page-node-id="JfDeJt5vbASdRoOMC7tVaS">退出</button>
   </div>
-  <!-- 2026-11-19：搜索栏命中登记链接（xx1031.xyz/r/编码 或裸编码）时显示的登记信息横幅，JS 动态填充 -->
-  <div class="regbanner" id="regBanner" hidden></div>
   <!-- ===== 2026-11-15 方案④：手机端筛选面板 / 遮罩 / 工具抽屉（桌面 display:none）=====
        控件不是复制是搬运：JS 把 #fagent/#fplan/#dr/#sort 搬进面板、七个低频按钮搬进抽屉，
        同一批 DOM 节点，onclick/addEventListener 与 applyRole 的显隐全部照旧生效；>860px 原样搬回。 -->
@@ -11621,45 +11616,6 @@ function regSearchFetch(code){
     });
   },400);
 }
-function regSearchBanner(code,rows,n){
-  var el=$('regBanner');
-  if(!el)return;
-  if(!code||!rows||(!rows.length&&!REGLOOK.err&&!/[A-Za-z]/.test(code))){el.hidden=true;el.innerHTML='';return;}
-  if(!rows.length&&!REGLOOK.err){
-    /* 2026-11-19 12:22 改：查到 0 条也明确反馈（原来静默隐藏，客服分不清是查询失败还是没这条链接）。
-       只对含字母的编码显示 —— 纯数字（uid/手机号）搜不到链接记录是常态，不弹横幅打扰 */
-    el.innerHTML='<b>登记链接未查到</b>：库里没有包含「'+esc(code)+'」的登记链接记录 —— 多半是编码抄错了，或这条链接没生成过。'
-      +'（如果刚才是网络抖动导致的失败，几秒后再输一次会自动重试）';
-    el.hidden=false;return;
-  }
-  if(!rows.length&&REGLOOK.err){
-    el.innerHTML='<b>登记链接查询失败：</b>'+esc(REGLOOK.err);
-    el.hidden=false;return;
-  }
-  var ST={unused:['未使用','b-orange'],used:['已使用','b-green'],void:['已作废','b-gray'],expired:['已过期','b-gray']};
-  var KD={renew:'续费',fix:'补登',ckswap:'换绑'};
-  var h='<b>登记链接命中 '+rows.length+' 条</b>（表格已按对应 uid/手机号筛出 '+n+' 行';
-  if(!n)h+=' —— 号不在池里：可能已删号/到期移除，或链接还没人用';
-  h+='）';
-  rows.forEach(function(x){
-    var st=ST[x.state]||ST.unused;
-    var link=location.origin+'/r/'+x.token;
-    h+='<div class="rgh"><span class="rt">'+esc(link)+'</span> '
-      +'<span class="badge '+st[1]+'">'+st[0]+'</span>'
-      +'<span class="badge b-blue">'+esc(KD[x.kind]||'新登记')+'</span> '
-      +(x.plan?('<b>'+esc(x.plan)+'</b>'+(x.days?('·'+esc(x.days)+'天'):'')+' · '):'')
-      +(x.agent?('客服 '+esc(x.agent)+' · '):'')
-      +(x.uid?('uid '+esc(x.uid)+' · '):'')
-      +(x.phone?('手机 '+esc(x.phone)+' · '):'')
-      +(x.uname&&x.uname!==x.phone?('昵称 '+esc(x.uname)+' · '):'')
-      +(x.used_at?('使用于 '+esc(bjFull(x.used_at))+' · '):('生成于 '+esc(bjFull(x.ctime))+' · '))
-      +'链接有效期 '+esc(bjFull(x.exp_at))
-      +(x.fix_exp?(' · 原单到期 '+esc(x.fix_exp)):'')
-      +(x.note?(' · 备注：'+esc(String(x.note).slice(0,60))):'')
-      +'</div>';
-  });
-  el.innerHTML=h;el.hidden=false;
-}
 function render(){
   if(!DATA)return;
   var susSet={};(DATA.suspects||[]).forEach(function(s){susSet[String(s.uid)]=1;});
@@ -11726,8 +11682,7 @@ function render(){
   }
   var rows=STATF?baseRows.filter(function(r){return statHit(r,STATF);}):baseRows;
   var dnEl=$('dn');if(dnEl)dnEl.textContent=(rOn||STATF)?('筛出 '+rows.length+' 个'):'';
-  // 2026-11-19：登记链接命中横幅（表格上方；n=按 uid/手机号筛出的行数，用于提示「号不在池里」）
-  regSearchBanner(regCode,regRows,rows.length);
+  // 2026-11-19 12:45：登记横幅已按用户要求移除（搜索栏只过滤，链接信息在详情弹窗「登记链接」字段）
   var withData=baseRows.filter(function(r){return r.a;});
   // 2026-10-26：顶部只保留「看了要知道该不该动手」的字段。
   // 已删：平均650进度（一个池的均值没有行动意义）、次日才入池 / 新号未开刷（新号正常爬坡，行内也不打标记了）。
@@ -12287,7 +12242,10 @@ function openInfo(i){
   /* 2026-11-17（方案 A）：台账购买记录 —— 与「补号查原单」同源（/api/console/findorder，
      满权限专属，只读口令服务端 403 所以直接不渲染这一段）。按 UID 精确过滤后按单展示，
      套餐本来就是按单记的，按单看才是它的本体；总有效期永远以上面「有效期」为准。 */
-  +(ROLE==='full'?('<div class="dsec" id="infoLedger"><i>购买记录</i><span style="color:#888">查询中…</span></div>'):'');
+  +(ROLE==='full'?('<div class="dsec" id="infoLedger"><i>购买记录</i><span style="color:#888">查询中…</span></div>'):'')
+  /* 2026-11-19：登记链接 —— 该号关联的 xx1031.xyz/r/编码 链接（/api/regtoken_list 按 uid/手机号查）。
+     用户拍板：搜索栏不再弹横幅，链接信息统一收进详情弹窗看。 */
+  +(ROLE==='full'?('<div class="dsec" id="infoReg"><i>登记链接</i><span style="color:#888">查询中…</span></div>'):'');
   /* 2026-11-15：编辑按钮动态插进弹窗底部唯一的 row2（模板自带一个关闭）。
      原来在 infoBody 里再拼一行「编辑+关闭」，和模板底部的关闭重复 —— 弹窗出现两个关闭（买家实测）。 */
   if(ROLE==='full'){
@@ -12347,6 +12305,31 @@ function openInfo(i){
       }
       el.innerHTML='<i>购买记录</i>'+lh;
     }).catch(function(){var el2=$('infoLedger');if(el2&&INFO_SEQ===_seq)el2.innerHTML='<i>购买记录</i><span style="color:#a32d2d">网络错误</span>';});
+    /* 2026-11-19：登记链接查询（与购买记录同一套 INFO_SEQ 防串）。q 用 uid 查（后端 LIKE 口径
+       覆盖 uid/手机号/编码），回来后客户端精确过滤：uid 全等 或 手机号=账号名。 */
+    api('/api/regtoken_list',{user:_tI.user,pass:_tI.pass,q:(_uid||_nm),limit:50}).then(function(o){
+      var elR=$('infoReg');if(!elR||INFO_SEQ!==_seq)return;
+      var rsR=(o.ok&&o.d&&o.d.ok)?(o.d.rows||[]):null;
+      if(!rsR){elR.innerHTML='<i>登记链接</i><span style="color:#a32d2d">'+esc((o.d&&o.d.message)||'查询失败')+'</span>';return;}
+      rsR=rsR.filter(function(x){return (_uid&&String(x.uid||'')===_uid)||(_nm&&String(x.phone||'')===_nm);});
+      if(!rsR.length){elR.innerHTML='<i>登记链接</i><span style="color:#888">无记录（该号不是链接登记，或链接还没生成）</span>';return;}
+      var ST2={unused:['未使用','b-orange'],used:['已使用','b-green'],void:['已作废','b-gray'],expired:['已过期','b-gray']};
+      var KD2={renew:'续费',fix:'补登',ckswap:'换绑'};
+      var rh='';
+      for(var ri=0;ri<rsR.length;ri++){var x2=rsR[ri];
+        var st2=ST2[x2.state]||ST2.unused;
+        rh+='<div style="font-size:12px;color:#444;margin:3px 0;word-break:break-all">'
+          +'<span style="font-family:ui-monospace,Consolas,monospace;color:#255ea6;user-select:all">'+esc(location.origin+'/r/'+x2.token)+'</span> '
+          +'<span class="badge '+st2[1]+'">'+st2[0]+'</span>'
+          +'<span class="badge b-blue">'+esc(KD2[x2.kind]||'新登记')+'</span>'
+          +(x2.plan?(' <b>'+esc(x2.plan)+'</b>'):'')
+          +(x2.agent?(' · 客服 '+esc(x2.agent)):'')
+          +(x2.used_at?(' · 使用于 '+esc(bjFull(x2.used_at))):(' · 生成于 '+esc(bjFull(x2.ctime))))
+          +(x2.note?(' · 备注：'+esc(String(x2.note).slice(0,40))):'')
+          +'</div>';
+      }
+      elR.innerHTML='<i>登记链接</i>'+rh;
+    }).catch(function(){var elR2=$('infoReg');if(elR2&&INFO_SEQ===_seq)elR2.innerHTML='<i>登记链接</i><span style="color:#a32d2d">网络错误</span>';});
   }
 }
 $('infoClose').onclick=function(){$('infoModal').hidden=true;};
