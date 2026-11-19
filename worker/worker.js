@@ -9033,7 +9033,7 @@ async function handle(request) {
          per  = max(8, min(per0, floor(par/2)))
          ns   = clamp(ceil(n/per), 4, 250)
          fanout = ns//2 >= 3（正常轮口径；带 ns_override/only_slices 的补跑不经过本接口）
-         fs_lo  = ns//2；m2_slices=0..fs_lo-1（派 N2b 016）、fs_slices=fs_lo..ns-1（派 N2 015）
+         fs_lo  = ns//2；m2_slices=0..fs_lo-1（派 N2b 016）、fs_slices=fs_lo..ns-1（派 N2；2026-11-19 起 N2=xm921014，015 已被 GitHub 封禁下线）
        查池口径与 plan job 完全一致：buildPlan(day) → plans.filter(pool===POOL_NAME).length
        （= /api/pool_stat 回的 m_pool，plan job 正是用它当 n）。body.m 传正整数则跳过查池、
        按给定人数重算 —— 回归对照（近 3 晚 GitHub plan 输出 vs 本接口同输入重算）专用。 ---- */
@@ -9650,7 +9650,7 @@ async function fetchActionsStatus() {
   // 点日志必 404，且 Phase 2 后主仓不跑片、前一半片（0..fs_lo-1）归 N2b，其日志链接替代原
   // 「016日志」（前端已移除主仓链接，见 console.html 同日注释）。
   const NODE_REPOS = [
-    { name: '015', owner: 'xm921015', repo: 'relay-node' },
+    // 2026-11-19：015（xm921015）被 GitHub 封禁下线，从展示列表移除；N2 换 xm921014（已有 run 后自然出现）
     { name: '016', owner: 'xm921016', repo: 'relay-node' },
     { name: '014', owner: 'xm921014', repo: 'relay-node' },
     { name: '013', owner: 'xm921013', repo: 'relay-node' },
@@ -11889,7 +11889,7 @@ function renderRunbar(){
       var parts=[];
       if(dmiss){
         if(poolLive(p))parts.push('<span class="bad">漏跑'+dmiss+' · 补跑中</span>');
-        else if(bjHnow()<13)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 9:30/12:00 补漏轮自动补</span>');
+        else if(bjHnow()<20)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 自动补漏盯补中（播完即查·每10分钟·两轮制）</span>');
         else parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 今晚 0:10 主轮补跑</span>');
       }
       if(ddead)parts.push('<span class="bad">失效'+ddead+'</span><span class="muted"> · 今晚判死+直邮，之后转「未补登」</span>');

@@ -304,7 +304,7 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE015_TOKEN: ${{ secrets.NODE015_TOKEN }}
+          NODE014_TOKEN: ${{ secrets.NODE014_TOKEN }}
           NODE016_TOKEN: ${{ secrets.NODE016_TOKEN }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
@@ -312,17 +312,18 @@ jobs:
           import json, os, re, urllib.error, urllib.request
           from datetime import datetime, timezone, timedelta
 
-          # N2 已接线；N3/N4（014/013）接线后照抄一行加进来（Secrets：NODE014_TOKEN/NODE013_TOKEN）
+          # 2026-11-19：N2 从 xm921015 换成 xm921014 —— xm921015 被 GitHub 封禁（suspended，
+          # run 永远 queued 跑不了），换预建备胎 N3=xm921014/relay-node 顶替（secrets 已备好）。
           # 2026-11-17：node-016（N2b=xm921016/relay-node，同账号）灰度接线，一并纳入自动补跑
           FOLLOWERS = []
-          if (os.environ.get("NODE015_TOKEN") or "").strip():
-              FOLLOWERS.append({"name": "015", "owner": "xm921015", "repo": "relay-node",
-                                "tok": os.environ["NODE015_TOKEN"].strip()})
+          if (os.environ.get("NODE014_TOKEN") or "").strip():
+              FOLLOWERS.append({"name": "014", "owner": "xm921014", "repo": "relay-node",
+                                "tok": os.environ["NODE014_TOKEN"].strip()})
           if (os.environ.get("NODE016_TOKEN") or "").strip():
               FOLLOWERS.append({"name": "016", "owner": "xm921016", "repo": "relay-node",
                                 "tok": os.environ["NODE016_TOKEN"].strip()})
           if not FOLLOWERS:
-              print("没有已接线的 follower（NODE015_TOKEN 未配置），跳过")
+              print("没有已接线的 follower（NODE014_TOKEN 未配置），跳过")
               raise SystemExit(0)
 
           DRY = (os.environ.get("DRY_RUN") or "").strip() in ("1", "true", "True")

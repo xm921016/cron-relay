@@ -326,7 +326,10 @@ jobs:
           EOF
 
       # 2026-11-15 fanout 扩片（阶段二）：把本轮后一半片（fs_slices，由 plan 动态生成）
-      # 一次 dispatch 派给 follower N2（xm921015/relay-node）。
+      # 一次 dispatch 派给 follower N2。
+      # 2026-11-19：N2 从 xm921015 换成 xm921014 —— xm921015 账号被 GitHub 封禁（suspended，
+      # runs API 403，run 永远 queued 跑不了），换预建备胎 N3=xm921014/relay-node 顶替，
+      # 仓内 run.yml/secrets 已于 11-18 备好（composite daily-tasks 版）。016=N2b 前一半不变。
       # 只在正常轮（fanout=1，即无 ns_override / only_slices 且 fs_lo>=3）派发；入参 ns/day/par 与
       # master 完全一致保证分片键相同，only_slices=fs_slices 与 master 矩阵互斥且并集=0..ns-1。
       # continue-on-error：dispatch 失败只打 warning（含响应体），不拦 master 后续矩阵。
@@ -334,7 +337,7 @@ jobs:
         if: steps.plan.outputs.fanout == '1'
         continue-on-error: true
         env:
-          NODE015_TOKEN: ${{ secrets.NODE015_TOKEN }}
+          NODE014_TOKEN: ${{ secrets.NODE014_TOKEN }}
           NS: ${{ steps.plan.outputs.ns }}
           DAY: ${{ steps.plan.outputs.day }}
           PAR: ${{ steps.plan.outputs.par }}
@@ -343,13 +346,13 @@ jobs:
           body=$(printf '{"ref":"main","inputs":{"ns_override":"%s","day_override":"%s","par_override":"%s","only_slices":"%s"}}' "$NS" "$DAY" "$PAR" "$FS_SLICES")
           resp=$(mktemp)
           code=$(curl -s -o "$resp" -w '%{http_code}' -X POST \
-            -H "Authorization: Bearer $NODE015_TOKEN" \
+            -H "Authorization: Bearer $NODE014_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/xm921015/relay-node/actions/workflows/run.yml/dispatches \
+            https://api.github.com/repos/xm921014/relay-node/actions/workflows/run.yml/dispatches \
             -d "$body")
           if [ "$code" = "204" ]; then
-            echo "follower N2 已派片 $FS_SLICES（ns=$NS day=$DAY par=$PAR，共 $(echo "$FS_SLICES" | tr ',' '\n' | wc -l) 片）"
+            echo "follower N2(xm921014) 已派片 $FS_SLICES（ns=$NS day=$DAY par=$PAR，共 $(echo "$FS_SLICES" | tr ',' '\n' | wc -l) 片）"
           else
             echo "::warning::follower N2 dispatch 失败 http=$code：master 矩阵本片已缩为 0..fs_lo-1，片 $FS_SLICES 今晚无人播，需人工补派。响应：$(cat "$resp")"
           fi
