@@ -1679,7 +1679,7 @@ window.openEdit=function(pool,uid,name){
   $('mSub').textContent=name+(uid?' / uid '+uid:'');
   $('modal').hidden=false;
   $('eSave').onclick=function(){doEdit(pool,{uid:uid,name:name},'update');};
-  $('eDel').onclick=function(){if(confirm('确定从'+(pool==='hz'?'主群':'定制群')+'删除账号 '+(name||uid)+'？删除后不能恢复。12 小时内没有重新登记回来（含迁到另一群），系统会自动给号主发一封「账号信息过期」邮件。'))doEdit(pool,{uid:uid,name:name},'delete');};
+  $('eDel').onclick=function(){if(confirm('确定从'+(pool==='hz'?'主群':'定制群')+'删除账号 '+(name||uid)+'？删除后不能恢复，且不会给号主发送任何邮件。'))doEdit(pool,{uid:uid,name:name},'delete');};
 };
 // 补号：选「是补号」才展开原单查找区（不选就不动，避免误改已标记的号）
 $('eRb').onchange=function(){$('rbBox').hidden=(this.value!=='1');};

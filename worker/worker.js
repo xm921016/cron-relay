@@ -10108,9 +10108,9 @@ async function applyEntryEdit(body) {
     } catch (e) {}
     const kept = master.filter(e => e !== target);
     await d1LogDead([target], 'manual');
-    // 2026-10-26：同时进「通知号主」判定队列（12 小时后判是不是真删，见 /api/dead_pending）。
-    // 这里是纯新增的一行写入，不影响任何既有行为；写失败也只是少一封邮件。
-    try { await d1QueueNotice(target); } catch (e) { console.error('通知队列写入失败:', e && e.message); }
+    // 2026-11-19：手动删号不再进「通知号主」队列 —— 管理员手动删的号（换号/清理/误登记等），
+    //   号主不需要收到「账号信息过期」邮件；只有系统判死的自动删号才走 notify_dead 直邮。
+    //   （原逻辑：d1QueueNotice(target) 进队列，12 小时后 /api/dead_pending 判定发信。）
     // master 缓存不再回写（2026-10-22）：读者全走 D1，entry: 独立键才是权威
     await pushPool(kept);
     try { await refreshPoolSnap(); } catch (e) {}
@@ -12123,7 +12123,7 @@ window.openEdit=function(pool,uid,name){
   $('mSub').textContent=name+(uid?' / uid '+uid:'');
   $('modal').hidden=false;
   $('eSave').onclick=function(){doEdit(pool,{uid:uid,name:name},'update');};
-  $('eDel').onclick=function(){if(confirm('确定从'+(pool==='hz'?'主群':'定制群')+'删除账号 '+(name||uid)+'？删除后不能恢复。12 小时内没有重新登记回来（含迁到另一群），系统会自动给号主发一封「账号信息过期」邮件。'))doEdit(pool,{uid:uid,name:name},'delete');};
+  $('eDel').onclick=function(){if(confirm('确定从'+(pool==='hz'?'主群':'定制群')+'删除账号 '+(name||uid)+'？删除后不能恢复，且不会给号主发送任何邮件。'))doEdit(pool,{uid:uid,name:name},'delete');};
 };
 // 补号：选「是补号」才展开原单查找区（不选就不动，避免误改已标记的号）
 $('eRb').onchange=function(){$('rbBox').hidden=(this.value!=='1');};
