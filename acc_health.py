@@ -229,6 +229,13 @@ def act_desc(act):
             "songfix3": f"{t} 绑错歌/查无此歌处置(songfix3)"}.get(kind, f"{t} {kind}")
 
 
+def cooling_actions(actions, days=3):
+    """冷却期子集：近 days 天内有过处置的记录（口径对齐 worker.js mail_scan v3）。"""
+    cutoff = (datetime.now(BJ) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    return [x for x in (actions or [])
+            if str(x.get("created_at") or "") >= cutoff]
+
+
 
 def live_check(runmod, ck):
     c = runmod.Client(ck)
@@ -374,10 +381,19 @@ def verdict(e, hist_days, a, p, marks, live, owner, rpcD, actions=None):
         lines.append(f"③本周期 650 已达 {rate_t}%：做满了，继续刷也不会有额外收益，等 31 天周期换期自动归零。")
         return " ".join(lines)
 
-    # ④ 周期换期归零 → 已做满/换期不与换歌观察期抢（换歌观察期优先级最高，放在最前）
+    # ④a 冻结处置邮件已发但歌一直没换（号主未响应）→ 别干等，人工催换歌
     acts = actions or []
-    if rate_t is not None and rate_t < 100 and acts:
-        lines.append(f"④b该号近 3 天刚做过冻结歌处置（{act_desc(acts[0])}）：旧歌冻结期间的 650 读数不会回补，"
+    cool = cooling_actions(acts)
+    if rate_t is not None and rate_t < 100 and acts and not cool:
+        last = acts[0]
+        if last.get("kind") != "songchange":
+            lines.append(f"④a该号 {act_desc(last)}，但目标歌至今未换（号主未响应）：冻结歌播多久都不会涨，"
+                         f"继续观察没有意义——需人工跟进催号主换本人原创独唱，或走无候选号的兜底处置。")
+            return " ".join(lines)
+
+    # ④b 换歌观察期（mail_scan 冷却期内刚处置过）
+    if rate_t is not None and rate_t < 100 and cool:
+        lines.append(f"④b该号近 3 天刚做过冻结歌处置（{act_desc(cool[0])}）：旧歌冻结期间的 650 读数不会回补，"
                      f"换歌后网易的有效认定有 1~2 天滞后，播放量在涨说明号本身正常。"
                      f"判断点=后 1~2 天快照：开始爬即结案；若播放量继续涨而 650 连续 2 天仍 0%，"
                      f"冷却期（3 天）过后系统会再次自动判定，期间不用人工重复换歌。")
@@ -512,7 +528,7 @@ def health(key, refresh=False, no_live=False, only_pool=None):
         if marks:
             for name, _, desc in marks:
                 say(f"    ▸ [{name}] {desc}")
-            if actions and any(n.startswith("连续") for n, _, _ in marks):
+            if cooling_actions(actions) and any(n.startswith("连续") for n, _, _ in marks):
                 say("    ℹ 该号近 3 天刚做过换歌/冻结处置（见【2】行尾标注）：按 mail_scan 冷却期口径，"
                     "换歌后 3 天内的「连续未涨」不计入冻结判定，此标记暂不必理会。")
         else:
