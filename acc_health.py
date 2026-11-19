@@ -461,9 +461,18 @@ def verdict(e, hist_days, a, p, marks, live, owner, rpcD, actions=None):
 
 
 # ---------------------------------------------------------------- 主流程
-def health(key, refresh=False, no_live=False, only_pool=None):
+def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
+    """跑一次完整体检。
+
+    quiet=False（默认）：边跑边打印（命令行模式），报告行同时存 rep。
+    quiet=True（网页服务模式）：不打印只采集，返回报告行列表（网页端自行排版）。
+    返回 rep（文本行列表）。"""
     rep = []
-    say = lambda s="": (print(s), rep.append(s))
+    def _say(s=""):
+        rep.append(s)
+        if not quiet:
+            print(s)
+    say = _say
 
     say("=" * 74)
     say(f"号体检报告：{key}    生成时间：{datetime.now(BJ):%Y-%m-%d %H:%M} 北京")
@@ -480,7 +489,7 @@ def health(key, refresh=False, no_live=False, only_pool=None):
     if not accs:
         say(f"\n【账号】没找到手机号/uid 为 {key} 的账号（accounts 全表无匹配）。")
         say("  可能是：手机号记错 / 号已删（删号后 accounts 无行，只剩 dead_log） / 在另一个池。")
-        return
+        return rep
     if only_pool:
         accs = [a for a in accs if a["pool"] == only_pool]
     targets = []
@@ -634,7 +643,9 @@ def health(key, refresh=False, no_live=False, only_pool=None):
     out = os.path.join(OUT_DIR, f"体检_{key}_{datetime.now(BJ):%Y%m%d_%H%M}.txt")
     with open(out, "w", encoding="utf-8") as f:
         f.write("\n".join(rep))
-    print(f"\n报告已存：{out}")
+    if not quiet:
+        print(f"\n报告已存：{out}")
+    return rep
 
 
 if __name__ == "__main__":
