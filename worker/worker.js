@@ -11644,6 +11644,18 @@ function render(){
   var all=buildRows();
   all.forEach(function(r){var m=computeMarks(r,susSet);r.markHtml=m.html;r.markText=m.text;r.ai=artistInfo(r.e);});
   var q=($('q').value||'').trim().toLowerCase();
+  // 2026-11-19：登记链接识别（见 regSearchCode 注释）。q 是小写副本，编码要从原文取。
+  // ⚠ 2026-11-19 12:00 补：首版漏了这段声明（regRows/regUid/regPh/regCode 只有使用没有声明），
+  //    render() 一跑就 ReferenceError，整个账号列表不渲染 —— node --check 只查语法查不出未声明变量。
+  var qRaw=($('q').value||'').trim();
+  var regCode=regSearchCode(qRaw);
+  if(regCode)regSearchFetch(regCode);
+  var regRows=(regCode&&REGLOOK.code===regCode&&REGLOOK.done)?(REGLOOK.rows||[]):null;
+  var regUid={},regPh={};
+  if(regRows)regRows.forEach(function(x){
+    var u=String(x.uid||'');if(u)regUid[u]=1;
+    var p=String(x.phone||'');if(p)regPh[p]=1;
+  });
   // 2026-10-27 21:05：入池日期范围（纯前端过滤，不重新请求接口）。
   // added 形如 2026-10-27，截前 10 位后按字符串比大小（yyyy-mm-dd 正好可比）。
   var rg=drngOf(),rOn=!!(rg.from||rg.to);
