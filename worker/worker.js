@@ -9732,6 +9732,24 @@ async function fetchActionsStatus() {
       } catch (e) { return null; }
     }))).filter(Boolean);
   }
+  // 2026-11-20：灰度机进度透出（本机 slice0-4 + 笔记本 slice5-7）。灰度机每日北京 00:10
+  // 预播 D+1 名单（run.py run_day=ASSIGN_DAY=明天），落账 runs 表 day=明天、slice 0-7；
+  // GitHub 轮落账 day=今天，两者天然错开 → day=明天且 slice 0-7 的行只可能来自灰度机。
+  // 查询极轻：单天单池 GROUP BY slice（≤8 行），走 (day,pool,uid) 主键前缀；
+  // 结果随 actions 缓存（60s/300s），不新增请求面。挂了不影响主卡展示。
+  if (hzOut) {
+    try {
+      const _grayDay = new Date(Date.now() + 8 * 3600 * 1000 + 86400 * 1000).toISOString().slice(0, 10);
+      const _gRows = await DB.prepare(
+        "SELECT slice, COUNT(*) AS n, MAX(at) AS at FROM runs WHERE day=? AND pool='hz' GROUP BY slice")
+        .bind(_grayDay).all();
+      const _gSl = (_gRows.results || [])
+        .map(r => ({ s: Number(r.slice), n: Number(r.n) || 0, at: String(r.at || '') }))
+        .filter(r => Number.isInteger(r.s) && r.s >= 0 && r.s <= 7)
+        .sort((a, b) => a.s - b.s);
+      hzOut.gray = { day: _grayDay, slices: _gSl };
+    } catch (e) { /* 灰度进度查询失败不影响主卡 */ }
+  }
   // 2026-11-04：有 run 在跑时缓存只留 60 秒（进度要看得见在动）；全部结束才用 5 分钟，
   // 避免控制台每刷一次就去打 2 个仓库 x (1 次 runs + 1~3 次 jobs) 的 GitHub 接口。
   // 2026-11-10：落 Cache API（不占 KV 写额度）。跑批时 60 秒刷新依旧保留。
@@ -11960,6 +11978,22 @@ function renderRunbar(){
         if(lvBack.length)nodeTxt+='<span style="color:#185FA5"> · 补跑中 '+lvBack.join(',')+'</span>';
         if(flNames.length)nodeTxt+='<span class="bad"> · '+flNames.join(',')+'仓失败</span>';
       }
+      // 2026-11-20：灰度机进度（本机 slice0-4 + 笔记本 slice5-7，每日 00:10 预播 D+1 名单）。
+      // 服务端 hz 条目已附 gray={day,slices:[{s,n,at}]}（runs 表 day=明天的落账只可能来自灰度机），
+      // 前端纯本地计算。片齐=绿色，部分=蓝色（在跑/未齐），0 片=灰色。
+      var grayTxt='';
+      if(a.pool==='hz'&&a.gray&&Array.isArray(a.gray.slices)&&a.gray.slices.length){
+        var gs=a.gray.slices;
+        var doneOf=function(ids){var d=0;for(var i=0;i<ids.length;i++)for(var j=0;j<gs.length;j++)if(gs[j].s===ids[i]){d++;break;}return d;};
+        var lastOf=function(ids){var t='';for(var i=0;i<ids.length;i++)for(var j=0;j<gs.length;j++)if(gs[j].s===ids[i]&&gs[j].at&&gs[j].at>t)t=gs[j].at;return t;};
+        var dL=doneOf([0,1,2,3,4]),dN=doneOf([5,6,7]);
+        var tMax=lastOf([0,1,2,3,4,5,6,7]);
+        var mSpan=function(d,tot,nm){var c=d>=tot?'good':(d>0?'':'muted');return '<span class="'+c+'"'+(d>0&&d<tot?' style="color:#185FA5"':'')+'>'+nm+' '+d+'/'+tot+'</span>';};
+        var gDay=esc(String(a.gray.day||'').slice(5));
+        grayTxt=' · <span class="muted" title="灰度机（本机 slice0-4 + 笔记本 slice5-7）预播 '+gDay+' 名单的落账进度，来自 runs 表">灰度('+gDay+')</span> '
+          +mSpan(dL,5,'本机')+' '+mSpan(dN,3,'笔记本');
+        if(tMax)grayTxt+=' · 末次 '+esc(bjTime(tMax));
+      }
       var head;
       if(live){
         if(a.pool==='hz'){
@@ -11975,6 +12009,7 @@ function renderRunbar(){
       }else{
         head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(a.pool==='hz'?repoTxt:jobTxt)+'</span>'+nodeTxt;
       }
+      if(a.pool==='hz'&&grayTxt)head+=grayTxt;
       // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，
       // 这里再按 ROLE 兜一层（缓存里的旧数据 / 将来字段改名时不至于漏出链接）。
       // 2026-11-17：hz 主仓 cron-relay 已转私密（「主仓转私密+播放外移」Phase 3），浏览器
