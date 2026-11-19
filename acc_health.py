@@ -14,6 +14,10 @@
   7. 台账记录（登记/续费历史）
   8. 输出明细 + 文字分析结论，并存报告到 tmp\\体检_<号>_<时间戳>.txt
 
+2026-11-19 新增：换歌/冻结处置事件联动 —— 近 3 天 mail_queue 里的 songchange/songfix*
+  ①标注到【2】快照走势对应日期行尾 ②【8】结论新增「换歌观察期」分支（优先于结算延迟口径）
+  ③【3】「连续N天未涨」标记在冷却期内附提示（口径对齐 worker.js mail_scan v3）。
+
 依赖: requests、pycryptodome（系统 Python 3.13.9 已带）。
 注意: 实时复核每次只发 1 条只读 eapi 查询（登录校验+工作台），无写操作。
 """
@@ -188,6 +192,44 @@ def compute_marks(db, pool, uid, today_day, yest_day, hist):
 
 
 # ---------------------------------------------------------------- 第 5 步 实时复核
+def recent_song_actions(db, pool, uid, days=14):
+    """近 N 天的冻结歌自动处置记录（songchange/songfix*），按时间倒序。
+
+    days 默认 14（与【2】快照窗口对齐，用于走势标注）；冷却期判定请另取近 3 天子集。
+    返回每条含 old_song/new_song（songchange 的 ref=旧歌id:新歌id[:B]）。"""
+    cutoff = (datetime.now(BJ) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    tabs = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "mail_queue" not in tabs:
+        return []
+    out = []
+    for r in db.execute(
+            "SELECT kind,ref,state,created_at FROM mail_queue WHERE pool=? AND uid=? "
+            "AND kind IN ('songchange','songfix','songfix2','songfix3') AND created_at>=? "
+            "ORDER BY created_at DESC", (pool, uid, cutoff)):
+        d = dict(r)
+        ref = (d.get("ref") or "").split(":")
+        d["old_song"] = ref[0] if ref else ""
+        d["new_song"] = ref[1] if len(ref) > 1 else ""
+        d["not_mine"] = len(ref) > 2 and "B" in ref[2]
+        out.append(d)
+    return out
+
+
+def act_desc(act):
+    """处置记录 → 一句人话（走势标注与结论共用）。"""
+    kind = act.get("kind")
+    t = str(act.get("created_at") or "")[:16]
+    if kind == "songchange":
+        s = f"{t} 自动换歌：旧歌{act.get('old_song')}→新歌{act.get('new_song')}"
+        if act.get("not_mine"):
+            s += "（旧歌非本人作品）"
+        return s
+    return {"songfix": f"{t} 共创冻结邮件已发(songfix)",
+            "songfix2": f"{t} 独唱冻结邮件已发(songfix2)",
+            "songfix3": f"{t} 绑错歌/查无此歌处置(songfix3)"}.get(kind, f"{t} {kind}")
+
+
+
 def live_check(runmod, ck):
     c = runmod.Client(ck)
     ok = c.login_by_cookie(ck)
@@ -246,7 +288,7 @@ def song_owner(song_id):
 
 
 # ---------------------------------------------------------------- 第 8 步 文字分析
-def verdict(e, hist_days, a, p, marks, live, owner, rpcD):
+def verdict(e, hist_days, a, p, marks, live, owner, rpcD, actions=None):
     """规则引擎：像人工排查一样给一段结论。"""
     name = e["name"]
     now_bj = datetime.now(BJ)
@@ -332,7 +374,16 @@ def verdict(e, hist_days, a, p, marks, live, owner, rpcD):
         lines.append(f"③本周期 650 已达 {rate_t}%：做满了，继续刷也不会有额外收益，等 31 天周期换期自动归零。")
         return " ".join(lines)
 
-    # ④ 归零跳变 → 周期换期
+    # ④ 周期换期归零 → 已做满/换期不与换歌观察期抢（换歌观察期优先级最高，放在最前）
+    acts = actions or []
+    if rate_t is not None and rate_t < 100 and acts:
+        lines.append(f"④b该号近 3 天刚做过冻结歌处置（{act_desc(acts[0])}）：旧歌冻结期间的 650 读数不会回补，"
+                     f"换歌后网易的有效认定有 1~2 天滞后，播放量在涨说明号本身正常。"
+                     f"判断点=后 1~2 天快照：开始爬即结案；若播放量继续涨而 650 连续 2 天仍 0%，"
+                     f"冷却期（3 天）过后系统会再次自动判定，期间不用人工重复换歌。")
+        return " ".join(lines)
+
+    # ④ 周期换期归零
     if rate_t == 0 and rate_y is not None and rate_y >= 10:
         lines.append(f"④昨天还有 {rate_y}%、今天 0%：这是 31 天任务周期换期归零（近期全池批量出现），"
                      f"不是播放失效，换期后从 0 重新爬即可，不用管。")
@@ -430,7 +481,13 @@ def health(key, refresh=False, no_live=False, only_pool=None):
         today_day = datetime.now(BJ).strftime("%Y-%m-%d")
         yest_day = (datetime.now(BJ) - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # 3 快照走势（近 14 天）
+        # 3 快照走势（近 14 天）＋ 近 3 天换歌/冻结处置联动（2026-11-19 新增）
+        actions = recent_song_actions(db, pool, uid)
+        act_by_day = {}
+        for act in actions:
+            d10 = str(act.get("created_at") or "")[:10]
+            if d10:
+                act_by_day.setdefault(d10, []).append(act)
         say(f"\n【2】近 14 天快照走势（pool={pool}）：")
         rows = list(db.execute(
             "SELECT day,rate,rpc30,at,missions FROM snapshots WHERE pool=? AND uid=? "
@@ -441,7 +498,10 @@ def health(key, refresh=False, no_live=False, only_pool=None):
             say(f"    {'日期':<12}{'650进度':>8}{'近30日播放':>12}   快照时刻(北京)")
             for r in rows:
                 hist[r["day"]] = dict(r)
-                say(f"    {r['day']:<12}{str(r['rate']):>8}%{str(r['rpc30']):>12}   {bj_str(r['at'])}")
+                note = ""
+                for act in act_by_day.get(r["day"], []):
+                    note += f"  ←{act_desc(act)}"
+                say(f"    {r['day']:<12}{str(r['rate']):>8}%{str(r['rpc30']):>12}   {bj_str(r['at'])}{note}")
         else:
             say("    （14 天内无任何快照——新号或一直没跑）")
         a, p, marks = compute_marks(db, pool, uid, today_day, yest_day, hist)
@@ -452,6 +512,9 @@ def health(key, refresh=False, no_live=False, only_pool=None):
         if marks:
             for name, _, desc in marks:
                 say(f"    ▸ [{name}] {desc}")
+            if actions and any(n.startswith("连续") for n, _, _ in marks):
+                say("    ℹ 该号近 3 天刚做过换歌/冻结处置（见【2】行尾标注）：按 mail_scan 冷却期口径，"
+                    "换歌后 3 天内的「连续未涨」不计入冻结判定，此标记暂不必理会。")
         else:
             say("    ▸ 无异常标记（650 在涨或已做满）")        # 5 实时复核
         live = None
@@ -547,7 +610,7 @@ def health(key, refresh=False, no_live=False, only_pool=None):
 
         # 8 结论
         say(f"\n【8】结论分析：")
-        say("    " + verdict(e, hist, a, p, marks, live, owner, rpcD))
+        say("    " + verdict(e, hist, a, p, marks, live, owner, rpcD, actions))
         say()
 
     # 存档
