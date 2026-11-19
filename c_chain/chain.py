@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""C 组 38~42s 下探 — 每日链路驱动（GitHub Actions 版，2026-11-18 建）。
+r"""C 组 40~42s 下探 — 每日链路驱动（GitHub Actions 版，2026-11-18 建）。
 
 由 c_chain.yml 每日北京 10:30（UTC 02:30）触发，亦可 workflow_dispatch 手动跑。
 用户预授权（2026-11-18）：整条链自动判定、自动执行、事后邮件汇报，不需用户拍板。
@@ -8,8 +8,8 @@ r"""C 组 38~42s 下探 — 每日链路驱动（GitHub Actions 版，2026-11-18
   AB 阶段（未终态时）：核验 55~60s 实验组 vs 对照组增量（NIGHTS，延长自动续）→
     成立：Secret POOL_PLAY_SECONDS=55,60 + 清 AB_EXP_SONGS → 启动 C 组（存活复核→配 C_EXP_SONGS）
     不成立：清 AB_EXP_SONGS，C 作废；延长：不动；数据无效：冻结+邮件
-  C 阶段（active 时）：核验 38~42s C 组 vs 对照组（3 夜）→
-    成立：POOL_PLAY_SECONDS=38,42 + 清 C_EXP_SONGS → 终态 done
+  C 阶段（active 时）：核验 40~42s C 组 vs 对照组（3 夜）→
+    成立：POOL_PLAY_SECONDS=40,42 + 清 C_EXP_SONGS → 终态 done
     不成立：清 C_EXP_SONGS → 终态 done；延长：不动
 状态：c_chain/state.json（本工作流每次跑完提交回仓库，幂等幂源）。
 报告：c_chain/last_report.md + 判定/异常日邮件（EMAIL_FROM → ALERT_TO）。
@@ -125,7 +125,7 @@ def verdict(res_by_day, nights):
     if cs <= 0:
         return "数据无效", f"对照合计 {cs}<=0，两组同时异常，冻结判定先排障"
     ratio = es / cs if cs else 0
-    tag = "50秒" if nights[0] == AB_NIGHTS0[0] else "38秒"
+    tag = "50秒" if nights[0] == AB_NIGHTS0[0] else "40秒"
     if ratio >= 0.95 and ep >= 12:
         return f"{tag}口径成立", f"合计比 {ratio:.0%}（实验 {es}/对照 {cs}），最差日正增长 {ep}/15"
     if ratio < 0.80 or ep <= 8:
@@ -267,7 +267,7 @@ def main():
     # ===== C =====
     c = st.get("c")
     if c and c.get("status") == "active":
-        log(f"\n## C 阶段（38~42s 下探，启动日 {c.get('launched')}）")
+        log(f"\n## C 阶段（40~42s 下探，启动日 {c.get('launched')}）")
         for d in days:
             m = measure(d, c["uids"], CTRL_UIDS)
             if m:
@@ -279,21 +279,21 @@ def main():
                 log(f"  夜 {d}: 数据未就绪")
         v = verdict(c["results"], c["nights"])
         log(f"  C 判定: {v[0] if v else '待数据'}" + (f" —— {v[1]}" if v else ""))
-        if v and v[0] == "38秒口径成立":
-            gh_secret_set("POOL_PLAY_SECONDS", "38,42")
+        if v and v[0] == "40秒口径成立":
+            gh_secret_set("POOL_PLAY_SECONDS", "40,42")
             gh_secret_set("C_EXP_SONGS", "")
             c["status"] = "done"
             c["verdict"] = v
-            log("  **C 成立：全池已切 38~42s，C 名单已清，链路完成**")
-            mail(f"[C组链路] 38s 判定成立·全池已切 {today}",
-                 ["C 组 3 夜判定成立，全池上报口径已切 38~42s（省约 4 倍运行时）。",
+            log("  **C 成立：全池已切 40~42s，C 名单已清，链路完成**")
+            mail(f"[C组链路] 40s 判定成立·全池已切 {today}",
+                 ["C 组 3 夜判定成立，全池上报口径已切 40~42s（省约 4 倍运行时）。",
                   "C_EXP_SONGS 已清空。链路完成。"])
-        elif v and v[0] == "38秒口径不成立":
+        elif v and v[0] == "40秒口径不成立":
             gh_secret_set("C_EXP_SONGS", "")
             c["status"] = "done"
             c["verdict"] = v
             log("  **C 不成立：已清 C 名单，保留现网口径，链路完成**")
-            mail(f"[C组链路] 38s 判定不成立·已回退 {today}",
+            mail(f"[C组链路] 40s 判定不成立·已回退 {today}",
                  ["C 组判定不成立，已清 C_EXP_SONGS，保留现网口径。链路完成。"])
         elif v and v[0] == "延长实验":
             extra = [(date.fromisoformat(c["nights"][-1]) + timedelta(days=k)).isoformat() for k in (1, 2, 3)]
