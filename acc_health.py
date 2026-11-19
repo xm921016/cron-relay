@@ -59,40 +59,56 @@ def load_runpy():
 
 
 # ---------------------------------------------------------------- 第 1 步 镜像
+def _mirror_ok(dbf):
+    """校验镜像包含体检需要的全部表（防止部分导出文件混进来）。"""
+    try:
+        con = sqlite3.connect(dbf)
+        tabs = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        con.close()
+    except sqlite3.Error:
+        return False
+    return {"accounts", "snapshots", "ledger", "dead_log", "dead_notice", "mail_queue"} <= tabs
+
+
 def ensure_mirror(refresh=False):
     os.makedirs(MIRROR_DIR, exist_ok=True)
     today = datetime.now(BJ).strftime("%Y%m%d")
-    dbs = sorted(glob.glob(os.path.join(MIRROR_DIR, "d1_mirror_*.db")))
+    # 只认 d1_mirror_日期_时间.db 严格格式（跳过 d1_mirror_p0p1_xxx 这类部分导出文件）
+    dbs = []
+    for dbf in glob.glob(os.path.join(MIRROR_DIR, "d1_mirror_*.db")):
+        if re.search(r"d1_mirror_(\d{8})_(\d{4})\.db$", dbf):
+            dbs.append(dbf)
+    dbs.sort()
     # 今天 08:00（北京，=UTC 日重置）之后导的才算新鲜
     floor = datetime.now(BJ).replace(hour=8, minute=0, second=0, microsecond=0)
     for dbf in reversed(dbs):
         m = re.search(r"d1_mirror_(\d{8})_(\d{4})\.db$", dbf)
-        if not m:
-            continue
         dt = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M").replace(tzinfo=BJ)
         if dt < floor:
             continue
-        # 校验必要表都在（有的镜像只导了部分表）
-        try:
-            con = sqlite3.connect(dbf)
-            tabs = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            con.close()
-        except sqlite3.Error:
-            continue
-        if not {"accounts", "snapshots", "ledger"} <= tabs:
+        if not _mirror_ok(dbf):
             continue
         if not refresh:
             return dbf, f"复用镜像（{dt:%m-%d %H:%M} 导出，--refresh 可重导）"
     print("  导出 D1 镜像（/export 通道，不吃读配额）…")
     r = subprocess.run(
         [sys.executable, os.path.join(PROJ, "tmp", "d1_mirror.py"),
-         "--table", "accounts", "--table", "snapshots", "--table", "ledger"],
+         "--table", "accounts", "--table", "snapshots", "--table", "ledger",
+         "--table", "dead_log", "--table", "dead_notice", "--table", "mail_queue"],
         capture_output=True, text=True, cwd=PROJ, timeout=300)
     if r.returncode != 0:
         print(r.stdout[-500:] if r.stdout else "", r.stderr[-500:] if r.stderr else "")
         raise SystemExit("  镜像导出失败")
-    dbs = sorted(glob.glob(os.path.join(MIRROR_DIR, "d1_mirror_*.db")))
-    return dbs[-1], "新导镜像"
+    # 导完从新到旧找第一个格式正确且表齐全的，绝不再盲取 dbs[-1]
+    dbs = []
+    for dbf in glob.glob(os.path.join(MIRROR_DIR, "d1_mirror_*.db")):
+        if re.search(r"d1_mirror_(\d{8})_(\d{4})\.db$", dbf):
+            dbs.append(dbf)
+    dbs.sort()
+    for dbf in reversed(dbs):
+        if _mirror_ok(dbf):
+            return dbf, "新导镜像"
+    raise SystemExit("  导出完成但找不到表齐全的镜像文件")
 
 
 # ---------------------------------------------------------------- 第 2 步 找号
@@ -492,8 +508,45 @@ def health(key, refresh=False, no_live=False, only_pool=None):
             say("    无台账" + ("（可能是免费/公益号或漏登记——漏账可用 tmp\\ledger_backfill_1110.py 补）"
                               if has_ledger else "（镜像里没导 ledger，跑一次不带 --table 的 d1_mirror.py 或删掉旧镜像后重试）"))
 
+        # 7 邮件提醒记录（2026-11-17 新增：失效号发没发过邮件、什么时候发的）
+        say(f"\n【7】邮件提醒记录（mail_queue / dead_notice / dead_log）：")
+        say(f"    重登邮件（relogin_at）：{('已发出 ' + e['relogin_at']) if e['relogin_at'] else '从未发出'}"
+            f"  ｜ 每日重登提醒：{'随 relogin_at 每天一封' if e['relogin_at'] else '不会发（只有 relogin_at 非空的号才进每日提醒）'}")
+        tabs_now = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        mails = list(db.execute(
+            "SELECT kind,ref,state,created_at,claimed_at,sent_at,skip_reason FROM mail_queue "
+            "WHERE pool=? AND uid=? ORDER BY created_at DESC LIMIT 20", (pool, uid))) if "mail_queue" in tabs_now else []
+        notices = list(db.execute(
+            "SELECT kind,state,removed_at,sent_at,skip_reason FROM dead_notice "
+            "WHERE pool=? AND (uid=? OR name=?) ORDER BY removed_at DESC LIMIT 10", (pool, uid, e["name"]))) if "dead_notice" in tabs_now else []
+        deads = list(db.execute(
+            "SELECT reason,at FROM dead_log WHERE pool=? AND (uid=? OR name=?) ORDER BY at DESC LIMIT 5",
+            (pool, uid, e["name"]))) if "dead_log" in tabs_now else []
+        state_cn = {"sent": "已发出", "claimed": "发送中", "pending": "排队中",
+                    "dropped": "已放弃(连败3次)", "skipped": "已跳过",
+                    "skip_returned": "已回池·不发", "skip_noemail": "无邮箱·不发"}
+        if mails or notices or deads:
+            if deads:
+                for r in deads:
+                    say(f"    ✂ 删号流水：{r['reason']}  {r['at']}")
+            for r in notices:
+                st = state_cn.get(r["state"], r["state"])
+                say(f"    ✉ 删号通知[{r['kind'] or 'dead'}]：{st}  入队 {r['removed_at']}  发出 {r['sent_at'] or '—'}"
+                    + (f"（{r['skip_reason']}）" if r["skip_reason"] else ""))
+            if mails:
+                say(f"    {'类型':<14}{'状态':<10}{'入队时间':<21}{'发出时间':<21}备注")
+                for r in mails:
+                    st = state_cn.get(r["state"], r["state"])
+                    say(f"    {r['kind']:<14}{st:<10}{r['created_at'] or '-':<21}{r['sent_at'] or '-':<21}{r['skip_reason'] or ''}")
+        else:
+            say("    无任何邮件记录：这个号从未进过任何邮件队列，也从未发过重登邮件。")
+            say("    注意：重登邮件只由采集判死链路触发（run.py 判死→直邮→写 relogin_at）；")
+            say("    号还没被采集判死（比如只显示「采集缺失」）时，不会有任何邮件。")
+            if "mail_queue" not in tabs_now:
+                say("    （镜像缺 mail_queue/dead_notice 表，本次显示不完整——删旧镜像后重跑会自动重导）")
+
         # 8 结论
-        say(f"\n【7】结论分析：")
+        say(f"\n【8】结论分析：")
         say("    " + verdict(e, hist, a, p, marks, live, owner, rpcD))
         say()
 
