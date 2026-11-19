@@ -11575,7 +11575,7 @@ function rangeLabels(){
    识别口径：含 /r/ 直接取后面编码（≥3 位）；否则整串纯字母数字 ≥4 位才算链接查询
    （纯数字也放行：后端按手机号+编码双 LIKE，搜 uid/手机号时顺带把该号登记过的链接也带出来）。
    结果按编码缓存 + 400ms 去抖防连击；查询失败只影响横幅，表格回退普通搜索。 */
-var REGLOOK={code:'',rows:null,done:false,err:'',timer:null};
+var REGLOOK={code:'',rows:null,done:false,err:'',at:0,timer:null};
 function regSearchCode(raw){
   if(!raw)return '';
   var s=String(raw),i=s.indexOf('/r/');
@@ -11586,7 +11586,11 @@ function regSearchCode(raw){
   return s;
 }
 function regSearchFetch(code){
-  if(REGLOOK.code===code&&(REGLOOK.done||REGLOOK.timer))return;
+  if(REGLOOK.code===code){
+    if(REGLOOK.timer)return;
+    if(REGLOOK.done&&!REGLOOK.err)return;                 // 2026-11-19：成功结果缓存复用
+    if(REGLOOK.done&&Date.now()-REGLOOK.at<10000)return;  // 2026-11-19：失败后 10 秒内不反复重试，过了就自动再试（原来失败被缓存死，横幅永远赖着）
+  }
   clearTimeout(REGLOOK.timer);
   REGLOOK.timer=setTimeout(function(){
     REGLOOK.timer=null;
@@ -11594,12 +11598,14 @@ function regSearchFetch(code){
     REGLOOK.code=code;REGLOOK.rows=null;REGLOOK.done=false;REGLOOK.err='';
     api('/api/regtoken_list',{user:t.user,pass:t.pass,q:code,limit:20}).then(function(r){
       if(REGLOOK.code!==code)return;   // 响应回来时搜索词已经变了，丢弃
+      REGLOOK.at=Date.now();
       if(r.ok&&r.d&&r.d.ok){REGLOOK.rows=r.d.rows||[];}
       else{REGLOOK.rows=[];REGLOOK.err=(r.d&&r.d.message)||'登记链接查询失败';}
       REGLOOK.done=true;render();
     }).catch(function(){
       if(REGLOOK.code!==code)return;
-      REGLOOK.rows=[];REGLOOK.done=true;REGLOOK.err='网络错误，登记链接查询失败';
+      REGLOOK.at=Date.now();
+      REGLOOK.rows=[];REGLOOK.done=true;REGLOOK.err='查询请求没通（网络或网关抖动），几秒后再输一次会自动重试';
       render();
     });
   },400);
@@ -11607,7 +11613,14 @@ function regSearchFetch(code){
 function regSearchBanner(code,rows,n){
   var el=$('regBanner');
   if(!el)return;
-  if(!code||!rows||(!rows.length&&!REGLOOK.err)){el.hidden=true;el.innerHTML='';return;}
+  if(!code||!rows||(!rows.length&&!REGLOOK.err&&!/[A-Za-z]/.test(code))){el.hidden=true;el.innerHTML='';return;}
+  if(!rows.length&&!REGLOOK.err){
+    /* 2026-11-19 12:22 改：查到 0 条也明确反馈（原来静默隐藏，客服分不清是查询失败还是没这条链接）。
+       只对含字母的编码显示 —— 纯数字（uid/手机号）搜不到链接记录是常态，不弹横幅打扰 */
+    el.innerHTML='<b>登记链接未查到</b>：库里没有包含「'+esc(code)+'」的登记链接记录 —— 多半是编码抄错了，或这条链接没生成过。'
+      +'（如果刚才是网络抖动导致的失败，几秒后再输一次会自动重试）';
+    el.hidden=false;return;
+  }
   if(!rows.length&&REGLOOK.err){
     el.innerHTML='<b>登记链接查询失败：</b>'+esc(REGLOOK.err);
     el.hidden=false;return;
