@@ -2593,6 +2593,36 @@ async function addEntry(entry) {
         // 补号：有效期继承原单，一分钱不收，不给提成
         entry.exp = String(keepRow.exp).slice(0, 10);
         if (keepRow.added) entry.added = String(keepRow.added).slice(0, 19);
+        /* 2026-11-19（用户口径）：掉线不吃加速期 —— 补登把入池日顺延「掉线天数」。
+           背景：加速档按入池日历天数算（accelTargetOf），补登又特意保留原 added（11-10），
+           于是掉线期间号已删、歌完全停播，加速窗口却照走日历 —— 掉 3 天回来只剩 4 天加速，
+           掉超 7 天回来加速期直接没了（镜像实测：11-08 批量清算 36 例错过加速期；
+           家宽时代 11-10 后 49 例回流全部 ≤3 天，每例白烧 0.5~2 天加速）。
+           改法：按 uid 查 dead_log 最近一次删号时间，把 added 顺延（补登日 − 删号日）天：
+             · 重新付钱的新单（reg）added=今天、加速期天然重来，不需要改；
+             · exp/到期日不动、rb_start 仍记真实原单登记日（2026-11-19 用户拍板）；
+             · 判死延迟 0~1 天不补偿（2026-11-19 用户拍板）；
+             · dead_log 查不到 / D1 读失败 / 日期非法 → 不顺延（宁可少顺不误顺）；
+             · 顺延后最多到补登日当天，异常数据（added 晚于删号日）兜底不动。
+           台账 start 写的就是 entry.added → 顺延结果落台账，多次掉线各补各的、天然累加。 */
+        try {
+          const _del = uidKey
+            ? await d1All('SELECT at FROM dead_log WHERE uid=? ORDER BY at DESC LIMIT 1', [String(uidKey)])
+            : null;
+          const _delAt = _del && _del.length ? String(_del[0].at || '') : '';
+          const _today = beijingDate();
+          const _off = _delAt ? Math.floor((Date.parse(_today + 'T00:00:00Z')
+                        - Date.parse(_delAt.slice(0, 10) + 'T00:00:00Z')) / 86400000) : 0;
+          if (_off > 0 && /^\d{4}-\d{2}-\d{2}/.test(String(entry.added || ''))) {
+            const _nd = new Date(Date.parse(entry.added.slice(0, 10) + 'T00:00:00Z') + _off * 86400000)
+                        .toISOString().slice(0, 10);
+            if (_nd <= _today && _nd !== String(entry.added).slice(0, 10)) {
+              entry.added = (_nd + String(entry.added).slice(10)).slice(0, 19);
+              console.log('补号顺延入池日（掉线 ' + _off + ' 天）：' + String(entry.name || uidKey)
+                          + '  added → ' + entry.added);
+            }
+          }
+        } catch (e) { console.error('补号顺延入池日失败（按不顺延处理）:', e && e.message); }
         // 2026-11-16（用户口径）：补号自动带回原单套餐 —— 原单（台账 hist.plan / 失效行 plan）
         // 有套餐就继承；买家补登页不选套餐，这里就是套餐的唯一来源，控制台不再显示「未标注」。
         if (keepRow.plan) entry.plan = String(keepRow.plan).slice(0, 16);
