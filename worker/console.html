@@ -788,6 +788,7 @@ function loadData(force){
     b.disabled=false;b.textContent=bt;
     if(!o.ok){if(((o.d&&o.d.message)||'').indexOf('密码')>=0){dropTok();TOKEN=null;}$('lm').textContent=o.d.message||'请重新登录';$('lm').className='msg err';$('loginBox').hidden=false;$('mainBox').hidden=true;return;}
     DATA=o.d;
+    inflateData(DATA);            // 2026-11-20 优化2：服务端瘦身传输（数组），这里还原成对象，渲染代码零改动
     applyCfg(DATA.cfg);           // 客服/套餐下拉 + 汇总口径
     applyRole(DATA.role);         // 满权限 / 只读（服务端 data 里带，刷新一次就恢复正确权限）
     render();fitTable();
@@ -797,6 +798,41 @@ function loadData(force){
     b.disabled=false;b.textContent='刷新失败';
     setTimeout(function(){b.textContent=bt;},2500);
   });
+}
+/* ===== 2026-11-20 优化2（响应瘦身）：把服务端压缩传输的数组还原成原有对象结构 =====
+   响应 1.6MB 里 ~470KB 是 19 个字段名/键名的引号开销、~300KB 是三天快照的键名开销、
+   ~50KB 是前端从未消费的 periods。服务端（worker.js /api/console/data）改为定序数组下发，
+   这里在 render 之前一次性还原，accsOf / buildRows / 详情弹窗等所有下游代码零改动。
+   ⚠️ 字段顺序与 worker.js 的 disp / MIS_WIRE_KEYS / snapPk 一一对应，两边必须一起改。
+   兼容：老格式响应（对象/键值对，比如缓存里部署前的残留）按 Array.isArray 判别自动跳过还原。 */
+var EKEYS=['name','uid','song','added','source','registrationMethod','loginEgress','email','phone','noListen','exp','agent','plan','pub','note','rb','rbFrom','rbStart','relogin'];
+/* mis 键序与 worker.js MIS_WIRE_KEYS 同序（按字典序排好）；前端只消费这两个键（otherMis/MIS_TOTAL），
+   服务端将来加新任务键时两边同步扩。 */
+var MIS_KEYS=['mission_code_musician_notebook_publish','mission_code_recently_play_effect_count_v2'];
+function inflateData(o){
+  if(!o)return;
+  function ents(a){
+    if(!Array.isArray(a)||!a.length||!Array.isArray(a[0]))return a;   // 老格式（对象数组）原样返回
+    return a.map(function(r){
+      var e={};
+      EKEYS.forEach(function(k,i){e[k]=r[i];});
+      e.noListen=!!r[9];e.pub=!!r[13];e.rb=!!r[15];e.relogin=!!r[18]; // 布尔 1/0 → true/false
+      return e;
+    });
+  }
+  function accm(a){
+    if(!Array.isArray(a)||!a.length||!Array.isArray(a[0]))return a;   // 老格式（{uid:acc}）原样返回
+    var m={};
+    a.forEach(function(r){
+      var mis={};
+      if(r[5])MIS_KEYS.forEach(function(k,i){if(r[5][i]!=null)mis[k]=r[5][i];});
+      // cnt 服务端已不下发（前端无消费）；at 由 epoch 毫秒还原成 ISO，bjTime/cmpOk 拿到的与原来一致
+      m[r[0]]={rate:r[1],rpc30:r[2],cnt:null,dur:r[3],at:r[4]?new Date(r[4]).toISOString():'',mis:mis};
+    });
+    return m;
+  }
+  o.hz=ents(o.hz);o.dz=ents(o.dz);
+  if(o.snap&&o.snap.cur){['cur','prev','old'].forEach(function(d){if(o.snap[d]){o.snap[d].hz=accm(o.snap[d].hz);o.snap[d].dz=accm(o.snap[d].dz);}});}
 }
 // ===== 2026-11-16：CF 额度卡（满权限专属）=====
 // 11-16 账号升级 Workers Paid（$5/月，按开通日每月 16 日扣费）：D1/KV/Workers 从

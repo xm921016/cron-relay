@@ -8248,24 +8248,30 @@ async function handle(request) {
         const p = r.pool === 'dz' ? 'dz' : 'hz';
         (relByPool[p] = relByPool[p] || new Set()).add(String(r.uid));
       }
-      const disp = e => ({
-        name: e.name || '', uid: e.uid != null ? String(e.uid) : '',
-        song: e.song != null ? String(e.song) : '', added: e.added || '',
-        source: String(e.source || ''),
-        registrationMethod: role === 'full' ? String(e.registrationMethod || '') : '',
-        loginEgress: role === 'full' ? String(e.loginEgress || '') : '',
-        email: e.email || '', phone: e.phone || '', noListen: !!e.noListen, exp: e.exp || '',
+      /* 2026-11-20 优化2（响应瘦身）：disp 从「对象」改为「定序数组」下发 ——
+         19 个字段名 + 引号每条白占 ~190B，1664 条就是 ~300KB。顺序与前端 console.html
+         的 EKEYS 一一对应（前端 loadData 里 inflateData 还原成对象，渲染代码零改动），
+         两边必须一起改：[name, uid, song, added, source, registrationMethod, loginEgress,
+         email, phone, noListen, exp, agent, plan, pub, note, rb, rbFrom, rbStart, relogin]。
+         布尔压成 1/0，前端 inflate 还原。 */
+      const disp = e => [
+        e.name || '', e.uid != null ? String(e.uid) : '',
+        e.song != null ? String(e.song) : '', e.added || '',
+        String(e.source || ''),
+        role === 'full' ? String(e.registrationMethod || '') : '',
+        role === 'full' ? String(e.loginEgress || '') : '',
+        e.email || '', e.phone || '', e.noListen ? 1 : 0, e.exp || '',
         // 2026-10-27：客服标签 + 套餐档位（控制台新增两列 / 顶部套餐汇总 / 按客服筛选的数据源）
-        agent: e.agent || '', plan: e.plan || '',
+        e.agent || '', e.plan || '',
         // 2026-11-01：公益号（只帮别人听，自己的歌不进互听环，不签到）
-        pub: !!e.pub,
+        e.pub ? 1 : 0,
         // 2026-11-05：备注（存在 D1 的 note 列）+ 补号标记。
         // 前端据此渲染「备注」列和「补」标签，也是编辑弹窗回填的初值。
-        note: e.note || '', rb: !!e.rb, rbFrom: Number(e.rbFrom) || 0, rbStart: e.rbStart || '',
+        e.note || '', e.rb ? 1 : 0, Number(e.rbFrom) || 0, e.rbStart || '',
         // 2026-11-16：已通知重登标记（mergePool 的 d1RowToEntry 已带 relogin 字段）。
         // 前端据此把「采集缺失」徽章换成「已通知重登」，不再天天像故障。
-        relogin: !!e.relogin,
-      });
+        e.relogin ? 1 : 0,
+      ];
       const hz = master.map(disp);
       // 定制群账号列表：实时向对端 worker 拉（对穿口令；拉失败不阻塞主群展示）
       // ⚠️ 对穿方向：本 worker 的 PEER_PASS 键存的是「定制群口令」，而定制群 worker 的 PEER_PASS 键
@@ -8302,8 +8308,8 @@ async function handle(request) {
       // 2026-10-26 新增：furtherVipGetTime 留档（键 'hz|uid' / 'dz|uid' → YYYY-MM-DD）。
       // 只在 slice=am 补采时写入；读失败降级 null。⚠️ 仅数据留档，不参与任何判定
       //（实测它不是当前周期结束日，详见 /api/snap 处说明）。
-      let periods = null;
-      try { periods = JSON.parse(await POOL.get('console:period') || 'null'); } catch (e) { periods = null; }
+      // 2026-11-20 优化2：原 periods（KV 'console:period'）随响应下发，但前端从未消费
+      //（console.html 里只在一条 10-26 已否决的注释里提到），~50KB 白传 —— 不再读、不再下发。
       // ---- 2026-10-23 组装运行状态数据（纯加法：全部是新键，不影响 hz/dz/durs/snap）----
       // coverage：应跑 vs 实跑。
       // 2026-11-09：口径改成「当轮 plan 快照」优先 —— expected 取本轮首轮 plan 落地的名单，
@@ -8497,9 +8503,34 @@ async function handle(request) {
         if (Array.isArray(y.nodes)) y.nodes = y.nodes.map(function (n) { return Object.assign({}, n, { url: '' }); });
         return y;
       });
-      const _out = { ok: true, date: date, prevDate: prevDate, oldDate: dateMinusN(date, 14), hz: hz, dz: dz, durs: durs, snap: { cur: cur, prev: prev, old: old },
+      /* 2026-11-20 优化2（响应瘦身）：snap 三天快照是响应最大头（~775KB / 全响应 1.6MB）。
+         压缩为定序数组 [uid, rate, rpc30, dur, atMs, misVals]：
+           - cnt 前端无消费（console.html 里 .cnt 全是台账字段），直接去掉；
+           - at ISO 串(24字符) → epoch 毫秒(13字符)，前端 inflate 还原成 ISO，下游 bjTime/cmpOk 零改动；
+           - mis 固定键序 MIS_WIRE_KEYS（与前端 MIS_KEYS 同序，两边必须一起改），全空 → null；
+           - 键名/引号开销每行省 ~60B × 三天约 5000 行 ≈ 300KB。
+         前端 loadData → inflateData 还原为原对象结构，accsOf 及所有渲染代码零改动。
+         兼容：缓存里残留的老格式（对象）响应，前端 inflate 按 Array.isArray 判别自动跳过。 */
+      const MIS_WIRE_KEYS = ['mission_code_musician_notebook_publish', 'mission_code_recently_play_effect_count_v2'];
+      function snapPk(day) {
+        const out = { hz: [], dz: [] };
+        for (const pool of ['hz', 'dz']) {
+          const src = (day && day[pool]) || {};
+          const rows = [];
+          for (const uid of Object.keys(src)) {
+            const a = src[uid] || {};
+            let misArr = MIS_WIRE_KEYS.map(k => (a.mis && a.mis[k] != null ? a.mis[k] : null));
+            if (!misArr.some(v => v != null)) misArr = null;
+            rows.push([uid, a.rate == null ? null : a.rate, a.rpc30 == null ? null : a.rpc30,
+                       a.dur == null ? null : a.dur, a.at ? (Date.parse(a.at) || 0) : 0, misArr]);
+          }
+          out[pool] = rows;
+        }
+        return out;
+      }
+      const _out = { ok: true, date: date, prevDate: prevDate, oldDate: dateMinusN(date, 14), hz: hz, dz: dz, durs: durs, snap: { cur: snapPk(cur), prev: snapPk(prev), old: snapPk(old) },
                     coverage: cov, actions: actionsOut, dead: dead, deadToday: deadToday, suspects: suspects, fresh: fresh,
-                    streak: streak, songs: songs, artists: artists, periods: periods,
+                    streak: streak, songs: songs, artists: artists,
                     // 2026-10-27：role 决定页面要不要把写入口关掉；cfg 供筛选下拉与编辑弹窗用
                     // 2026-11-09：今晚每号要听几首（供「运行状态」横条显示）。plan 上面已经算过，
                     // 这里只是把已有字段搬出来 —— **不新增任何 D1 / KV 读**，且随首屏 KV 缓存一起命中。
@@ -11551,6 +11582,7 @@ function loadData(force){
     b.disabled=false;b.textContent=bt;
     if(!o.ok){if(((o.d&&o.d.message)||'').indexOf('密码')>=0){dropTok();TOKEN=null;}$('lm').textContent=o.d.message||'请重新登录';$('lm').className='msg err';$('loginBox').hidden=false;$('mainBox').hidden=true;return;}
     DATA=o.d;
+    inflateData(DATA);            // 2026-11-20 优化2：服务端瘦身传输（数组），这里还原成对象，渲染代码零改动
     applyCfg(DATA.cfg);           // 客服/套餐下拉 + 汇总口径
     applyRole(DATA.role);         // 满权限 / 只读（服务端 data 里带，刷新一次就恢复正确权限）
     render();fitTable();
@@ -11560,6 +11592,41 @@ function loadData(force){
     b.disabled=false;b.textContent='刷新失败';
     setTimeout(function(){b.textContent=bt;},2500);
   });
+}
+/* ===== 2026-11-20 优化2（响应瘦身）：把服务端压缩传输的数组还原成原有对象结构 =====
+   响应 1.6MB 里 ~470KB 是 19 个字段名/键名的引号开销、~300KB 是三天快照的键名开销、
+   ~50KB 是前端从未消费的 periods。服务端（worker.js /api/console/data）改为定序数组下发，
+   这里在 render 之前一次性还原，accsOf / buildRows / 详情弹窗等所有下游代码零改动。
+   ⚠️ 字段顺序与 worker.js 的 disp / MIS_WIRE_KEYS / snapPk 一一对应，两边必须一起改。
+   兼容：老格式响应（对象/键值对，比如缓存里部署前的残留）按 Array.isArray 判别自动跳过还原。 */
+var EKEYS=['name','uid','song','added','source','registrationMethod','loginEgress','email','phone','noListen','exp','agent','plan','pub','note','rb','rbFrom','rbStart','relogin'];
+/* mis 键序与 worker.js MIS_WIRE_KEYS 同序（按字典序排好）；前端只消费这两个键（otherMis/MIS_TOTAL），
+   服务端将来加新任务键时两边同步扩。 */
+var MIS_KEYS=['mission_code_musician_notebook_publish','mission_code_recently_play_effect_count_v2'];
+function inflateData(o){
+  if(!o)return;
+  function ents(a){
+    if(!Array.isArray(a)||!a.length||!Array.isArray(a[0]))return a;   // 老格式（对象数组）原样返回
+    return a.map(function(r){
+      var e={};
+      EKEYS.forEach(function(k,i){e[k]=r[i];});
+      e.noListen=!!r[9];e.pub=!!r[13];e.rb=!!r[15];e.relogin=!!r[18]; // 布尔 1/0 → true/false
+      return e;
+    });
+  }
+  function accm(a){
+    if(!Array.isArray(a)||!a.length||!Array.isArray(a[0]))return a;   // 老格式（{uid:acc}）原样返回
+    var m={};
+    a.forEach(function(r){
+      var mis={};
+      if(r[5])MIS_KEYS.forEach(function(k,i){if(r[5][i]!=null)mis[k]=r[5][i];});
+      // cnt 服务端已不下发（前端无消费）；at 由 epoch 毫秒还原成 ISO，bjTime/cmpOk 拿到的与原来一致
+      m[r[0]]={rate:r[1],rpc30:r[2],cnt:null,dur:r[3],at:r[4]?new Date(r[4]).toISOString():'',mis:mis};
+    });
+    return m;
+  }
+  o.hz=ents(o.hz);o.dz=ents(o.dz);
+  if(o.snap&&o.snap.cur){['cur','prev','old'].forEach(function(d){if(o.snap[d]){o.snap[d].hz=accm(o.snap[d].hz);o.snap[d].dz=accm(o.snap[d].dz);}});}
 }
 // ===== 2026-11-16：CF 额度卡（满权限专属）=====
 // 11-16 账号升级 Workers Paid（$5/月，按开通日每月 16 日扣费）：D1/KV/Workers 从
