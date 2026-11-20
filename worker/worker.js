@@ -3534,7 +3534,10 @@ async function d1SnapWrite(day, pool, clean, force) {
   // 2026-11-20：占坑豁免的分界线 = 北京 09:30（= UTC 01:30，快照 day 锚定北京日）。
   // 旧行 at 早于它 = 播放轮播完顺手写的「播时快照」（run.py 设计内行为），不算「今天已采过」，
   // 结算后的新值必须覆盖（用户 2026-11-20 拍板：早于早上 9 点半的当天行，依然要采、要覆盖）。
-  const staleCut = String(day) + 'T01:30';
+  // ⚠️ 分界线必须内联成 SQL 字面量（snapshots.day || 'T01:30'），不能用 ? 绑参：
+  //   D1 Worker 绑定对「ON CONFLICT DO UPDATE ... WHERE ?」的占位符计数与 REST API 不一致，
+  //   绑参直接报 D1_ERROR: Wrong number of parameter bindings（2026-11-20 18:45 部署实锤，
+  //   全部快照走 KV 兜底、D1 零写入且 job 全绿——d1err 诊断字段就是为这次加的）。
   try {
     const now = new Date().toISOString();
     const snapWhere = force ? '' :
@@ -3547,7 +3550,7 @@ async function d1SnapWrite(day, pool, clean, force) {
       //   下午补采新值反而更小被大者胜挡掉 → 采集时间停在凌晨、控制台整天 0 增长假信号。
       //   占坑豁免只对「旧行早于 09:30」生效，09:30 后结算好的数据仍受大者胜保护（语义不变）。
       ' WHERE (COALESCE(excluded.rpc30, -1) >= COALESCE(snapshots.rpc30, -1)' +
-      ' OR snapshots.at < ?)';
+      ' OR snapshots.at < (snapshots.day || \'T01:30\'))';
     // 2026-10-24 修复：D1 单次 batch 最多 1000 条语句，而 snap650 是 jobs=1 写全池。
     // hz 登记上限 1440（2026-11-13 由 1200 上调），号池涨到千级后会整批写入失败（快照一条都进不去）。
     // 与 d1DursWrite/d1RunsWrite 统一按 100 条分批；小批量仍只跑一次循环，行为不变。
@@ -3561,11 +3564,11 @@ async function d1SnapWrite(day, pool, clean, force) {
         'cnt=COALESCE(excluded.cnt, snapshots.cnt), missions=excluded.missions, ' +
         'dur=COALESCE(excluded.dur, snapshots.dur), at=excluded.at' + snapWhere
       ).bind(day, pool, String(uid), clean[uid].rate, clean[uid].rpc30, clean[uid].cnt,
-             JSON.stringify(clean[uid].mis || {}), clean[uid].dur, now, staleCut));
+             JSON.stringify(clean[uid].mis || {}), clean[uid].dur, now));
       await DB.batch(stmts);
     }
     return true;
-  } catch (e) { console.error('D1 快照写入失败:', e && e.message); return false; }
+  } catch (e) { _d1LastErr = String((e && e.message) || e); console.error('D1 快照写入失败:', e && e.message); return false; }
 }
 
 // ====================================================================
@@ -8004,6 +8007,7 @@ async function handle(request) {
         }
       }
       return json({ ok: true, key: key, count: Object.keys(clean).length, ran: ranWrote, d1: d1okSnap,
+                    d1err: d1okSnap ? '' : String(_d1LastErr || ''),
                     kv_fallback: !d1okSnap }, 200, CORS);
     }
     // ---- 覆盖率核对（2026-10-22 新增）：应跑 vs 实跑 ----
