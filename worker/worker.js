@@ -10057,6 +10057,10 @@ const BACKUP_CRONS = ['30 8 * * *', '30 10 * * *', '30 12 * * *'];   // 北京 1
 // 注意：CF schedules Free 版全账号上限 5 条（实测 10072 报错）且不支持逗号列表，
 // 现在只剩每小时第 5 分一条发令腿（另外 4 条是主 cron + 备份发令），派发脚本一班内循环清队列。
 const MAIL_CRONS = ['5 * * * *'];
+// 2026-11-20：bridge 健康监测独立 cron（每 10 分钟）。Paid 计划 cron 上限 250/账号（官方
+// Limits 文档），免费版才是 5——此前挂靠每小时邮件 cron 是保守做法。⚠ 必须在 scheduled()
+// 里先于「主 cron 全量路径」分流，否则每 10 分钟会把快照采集/到期清理全跑一遍。
+const BRIDGE_CRONS = ['*/10 * * * *'];
 const MAIL_REPO = { owner: 'xm921016', repo: 'cron-relay', workflow: 'notify-mail.yml' };
 const BACKUP_REPOS = [
   { pool: 'hz', owner: 'xm921016', repo: 'cron-relay', tokenKey: 'GH_TOKEN' },
@@ -13860,6 +13864,12 @@ export default {
       ctx.waitUntil(d1QuotaProbe().catch(() => {}));
       // 2026-11-10：重放「登记成功但没写进 D1」的补偿队列（relay 停跑时也有兜底腿）
       ctx.waitUntil(replayFixups().catch(() => {}));
+      return;
+    }
+    // 2026-11-20：bridge 监测独立腿（*/10 每 10 分钟），只探活不干别的，跑完即 return。
+    // ⚠ 此分流必须在「主 cron 全量路径」之前——否则每 10 分钟会把快照/清理/对穿全跑一遍。
+    if (BRIDGE_CRONS.indexOf(_cron) >= 0) {
+      ctx.waitUntil(bridgeHealthProbe().catch(() => {}));
       return;
     }
     ctx.waitUntil(dispatchSnap650('all').catch(() => {}));
