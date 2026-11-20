@@ -1466,22 +1466,22 @@ function renderRunbar(){
       var live=!!a.status&&a.status!=='completed';
       var jobTxt=a.jobs_total?(' · '+a.jobs_ok+'/'+a.jobs_total+' job'):'';
       // 2026-11-18（用户口径二改）：hz 主仓 Phase 2 后只剩排片 job，「1/1 job」没意义——
-      // 改按「仓库」口径：24h 内有过 run 的节点仓（015/016）算活跃仓，全绿显示「仓库 2/2」；
-      // 有仓在跑显示「播放中/补跑中 仓号」（节点 run 的北京 0~6 点=主轮播放，其余时段=补漏轮）。
-      // 节点仓数据服务端 nodes[] 已带 status/conclusion/created（RO 只抹 url），前端纯本地计算。
+      // 2026-11-20 三改：只剩 016 一个活仓后「仓库 1/1」也没信息量，再改按「片数」口径
+      //（见下 repoTxt）；节点状态文字保留「播放中/补跑中 仓号」与「xx仓失败」。
       var repoTxt='',nodeTxt='';
+      // 2026-11-20（用户口径）：hz 只剩 016 一个活仓，「仓库 1/1」没信息量——改按「片数」：
+      // 服务端 day_slices={done,ns}（今天 runs 落账 distinct slice / plan 公式 ns），全绿「片数 59/59」。
+      if(a.pool==='hz'&&a.day_slices&&a.day_slices.ns>0)repoTxt=' · 片数 '+a.day_slices.done+'/'+a.day_slices.ns;
       if(a.pool==='hz'&&Array.isArray(a.nodes)){
         var act=a.nodes.filter(function(n){return n&&n.created&&(Date.now()-new Date(n.created).getTime())<86400000;});
-        var okN=0,lvMain=[],lvBack=[],flNames=[];
+        var lvMain=[],lvBack=[],flNames=[];
         act.forEach(function(n){
           if(n.status&&n.status!=='completed'){
             var bh=new Date(new Date(n.created).getTime()+8*3600*1000).getUTCHours();
             if(bh<6)lvMain.push(n.name);else lvBack.push(n.name);
           }
-          else if(n.conclusion==='success')okN++;
-          else flNames.push(n.name);
+          else if(n.conclusion!=='success')flNames.push(n.name);
         });
-        if(act.length)repoTxt=' · 仓库 '+okN+'/'+act.length;
         if(lvMain.length)nodeTxt+='<span style="color:#185FA5"> · 播放中 '+lvMain.join(',')+'</span>';
         if(lvBack.length)nodeTxt+='<span style="color:#185FA5"> · 补跑中 '+lvBack.join(',')+'</span>';
         if(flNames.length)nodeTxt+='<span class="bad"> · '+flNames.join(',')+'仓失败</span>';

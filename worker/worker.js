@@ -9750,6 +9750,36 @@ async function fetchActionsStatus() {
       hzOut.gray = { day: _grayDay, slices: _gSl };
     } catch (e) { /* 灰度进度查询失败不影响主卡 */ }
   }
+  // 2026-11-20（用户口径）：hz 只剩 016 一个活仓，「仓库 1/1」没信息量 → 改显示今日片数
+  // 进度「片数 d/ns」。分母 ns 与 run.yml plan / relay_plan 端点公式逐字同源
+  //（n=buildPlan 本池可播数），算不出时回退 max(slice)+1；分子=今天 runs 落账的
+  // distinct slice 数（含灰度机昨天预播的 0-7，防双播本来就按同一天合并口径）。
+  if (hzOut) {
+    try {
+      const _bjDay = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+      let _ns = 0;
+      try {
+        const _plan = await buildPlan(_bjDay);
+        if (_plan && _plan.ok) {
+          const _nP = _plan.plans.filter(x => x.pool === 'hz').length;
+          if (_nP > 0) {
+            const _per0 = Math.max(8, Math.ceil(_nP / 60));
+            const _par = Math.max(24, Math.min(48, Math.ceil(_per0 * 2.0)));
+            const _per = Math.max(8, Math.min(_per0, Math.floor(_par / 2)));
+            _ns = Math.max(4, Math.min(250, Math.ceil(_nP / _per)));
+          }
+        }
+      } catch (e) { /* ns 公式失败走回退 */ }
+      const _tRow = await DB.prepare(
+        "SELECT COUNT(DISTINCT slice) AS ds, MAX(slice) AS ms, COUNT(*) AS n FROM runs WHERE day=? AND pool='hz'")
+        .bind(_bjDay).first();
+      const _ms = Number((_tRow && _tRow.ms) || -1) + 1;
+      hzOut.day_slices = { day: _bjDay,
+        done: Number((_tRow && _tRow.ds) || 0),
+        ns: _ns || _ms || 0,
+        accounts: Number((_tRow && _tRow.n) || 0) };
+    } catch (e) { /* 片数查询失败不影响主卡 */ }
+  }
   // 2026-11-04：有 run 在跑时缓存只留 60 秒（进度要看得见在动）；全部结束才用 5 分钟，
   // 避免控制台每刷一次就去打 2 个仓库 x (1 次 runs + 1~3 次 jobs) 的 GitHub 接口。
   // 2026-11-10：落 Cache API（不占 KV 写额度）。跑批时 60 秒刷新依旧保留。
@@ -11958,22 +11988,22 @@ function renderRunbar(){
       var live=!!a.status&&a.status!=='completed';
       var jobTxt=a.jobs_total?(' · '+a.jobs_ok+'/'+a.jobs_total+' job'):'';
       // 2026-11-18（用户口径二改）：hz 主仓 Phase 2 后只剩排片 job，「1/1 job」没意义——
-      // 改按「仓库」口径：24h 内有过 run 的节点仓（015/016）算活跃仓，全绿显示「仓库 2/2」；
-      // 有仓在跑显示「播放中/补跑中 仓号」（节点 run 的北京 0~6 点=主轮播放，其余时段=补漏轮）。
-      // 节点仓数据服务端 nodes[] 已带 status/conclusion/created（RO 只抹 url），前端纯本地计算。
+      // 2026-11-20 三改：只剩 016 一个活仓后「仓库 1/1」也没信息量，再改按「片数」口径
+      //（见下 repoTxt）；节点状态文字保留「播放中/补跑中 仓号」与「xx仓失败」。
       var repoTxt='',nodeTxt='';
+      // 2026-11-20（用户口径）：hz 只剩 016 一个活仓，「仓库 1/1」没信息量——改按「片数」：
+      // 服务端 day_slices={done,ns}（今天 runs 落账 distinct slice / plan 公式 ns），全绿「片数 59/59」。
+      if(a.pool==='hz'&&a.day_slices&&a.day_slices.ns>0)repoTxt=' · 片数 '+a.day_slices.done+'/'+a.day_slices.ns;
       if(a.pool==='hz'&&Array.isArray(a.nodes)){
         var act=a.nodes.filter(function(n){return n&&n.created&&(Date.now()-new Date(n.created).getTime())<86400000;});
-        var okN=0,lvMain=[],lvBack=[],flNames=[];
+        var lvMain=[],lvBack=[],flNames=[];
         act.forEach(function(n){
           if(n.status&&n.status!=='completed'){
             var bh=new Date(new Date(n.created).getTime()+8*3600*1000).getUTCHours();
             if(bh<6)lvMain.push(n.name);else lvBack.push(n.name);
           }
-          else if(n.conclusion==='success')okN++;
-          else flNames.push(n.name);
+          else if(n.conclusion!=='success')flNames.push(n.name);
         });
-        if(act.length)repoTxt=' · 仓库 '+okN+'/'+act.length;
         if(lvMain.length)nodeTxt+='<span style="color:#185FA5"> · 播放中 '+lvMain.join(',')+'</span>';
         if(lvBack.length)nodeTxt+='<span style="color:#185FA5"> · 补跑中 '+lvBack.join(',')+'</span>';
         if(flNames.length)nodeTxt+='<span class="bad"> · '+flNames.join(',')+'仓失败</span>';
