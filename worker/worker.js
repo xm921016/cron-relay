@@ -4964,6 +4964,71 @@ async function qrBridgeCfg() {
   return _qrBridgeCfg;
 }
 
+/* 2026-11-20 bridge 健康监测：登记页真实调用失败 + 每小时探针双路喂同一状态机。
+   KV bridge_health = {f:连续失败数, d:已发宕机告警}；连续 2 次失败 → dispatch
+   alert-relay.yml 发宕机邮件（一轮宕机只发一封）；恢复 → 发恢复邮件并清零。
+   429=实例占满但 bridge 活着，不算失败（页面已有「人数较多」提示）。任何异常
+   只记日志，绝不影响出码/轮询主流程。 */
+async function bridgeAlertMail(subj, body) {
+  const TAG = 'bridge-alert';
+  try {
+    const c = await cfg();
+    let tok = c.ghToken || '';
+    if (POOL_NAME === 'dz') tok = cleanKV(await POOL.get('HZ_ALERT_TOKEN').catch(() => null)) || '';
+    if (!tok) { console.error(TAG + ' 缺 token，跳过'); return; }
+    const s = (POOL_NAME === 'dz' ? '[dz] ' : '') + subj;
+    const resp = await fetch('https://api.github.com/repos/xm921016/cron-relay/actions/workflows/alert-relay.yml/dispatches', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + tok, Accept: 'application/vnd.github+json',
+                 'User-Agent': 'cron-relay-worker', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref: 'main', inputs: { subject: s, body: body } }),
+    });
+    if (resp.status !== 204) console.error(TAG + ' dispatch HTTP ' + resp.status);
+    else console.log(TAG + ' 已发出: ' + s);
+  } catch (e) { console.error(TAG + ' 异常:', e && e.message); }
+}
+async function bridgeHealth(ok, detail) {
+  const TAG = 'bridge-health';
+  try {
+    const h = JSON.parse((await POOL.get('bridge_health').catch(() => null)) || '{}');
+    let f = Number(h.f) || 0, d = !!h.d;
+    if (ok) {
+      if (d) {
+        await POOL.put('bridge_health', JSON.stringify({ f: 0, d: false }));
+        await bridgeAlertMail('bridge 出码已恢复', '笔记本 bridge 探测恢复正常（' + bjStamp() + '）。上次告警原因：' + String(h.last || '未记录') + '。');
+        console.log(TAG + ' 已恢复，恢复邮件已发');
+        return;
+      }
+      if (f) await POOL.put('bridge_health', JSON.stringify({ f: 0, d: false }));
+      return;
+    }
+    f++;
+    await POOL.put('bridge_health', JSON.stringify({ f: f, d: d, last: String(detail || '').slice(0, 120), at: bjStamp() }));
+    if (f >= 2 && !d) {
+      console.error(TAG + ' 连续 ' + f + ' 次失败，发宕机告警: ' + detail);
+      await bridgeAlertMail('bridge 出码通道异常（连续 ' + f + ' 次失败）',
+        '笔记本 bridge 持续失败：' + detail + '（' + bjStamp() + '）。登记页会显示「出码通道繁忙/人数较多」，出码全停。'
+        + '排查：①笔记本是否关机/断网 ②https://qr-laptop.xx1031.xyz/health 是否可达 '
+        + '③应急回滚=删 KV QR_BRIDGE_URL 或 QR_BRIDGE_KEY 任一键自动回老链路（老链路有毒源风险，仅应急用）。');
+      await POOL.put('bridge_health', JSON.stringify({ f: f, d: true, last: String(detail || '').slice(0, 120), at: bjStamp() }));
+    }
+  } catch (e) { console.error(TAG + ' 状态机异常:', e && e.message); }
+}
+async function bridgeHealthProbe() {
+  try {
+    const bc = await qrBridgeCfg();
+    if (!bc.url || !bc.key) return;   // 未接线（回滚态）不探测
+    let r;
+    try {
+      r = await fetch(bc.url + '/health', { headers: { 'X-Bridge-Key': bc.key }, signal: AbortSignal.timeout(15000) });
+    } catch (e) { await bridgeHealth(false, '探针网络异常 ' + ((e && e.message) || '')); return; }
+    const jb = await r.json().catch(() => null);
+    if (jb && jb.code === 200 && Array.isArray(jb.instances)) await bridgeHealth(true);
+    else await bridgeHealth(false, '探针响应异常 HTTP ' + r.status);
+  } catch (e) { console.error('bridgeHealthProbe 异常:', e && e.message); }
+}
+
+
 function ncSetCookies(r) {
   let out = [];
   try { if (typeof r.headers.getSetCookie === 'function') out = r.headers.getSetCookie() || []; } catch (e) {}
@@ -6275,15 +6340,21 @@ async function handle(request) {
           });
         } catch (e) {
           console.error('qrkey bridge 请求失败:', e && e.message);
+          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrnew 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
           return json({ ok: false, message: '出码通道繁忙，请点「换一张」重试；多次不行请联系客服' }, 502);
         }
         const jb = await br.json().catch(() => null);
-        if (!jb) return json({ ok: false, message: '出码通道返回异常，请点「换一张」重试' }, 502);
+        if (!jb) {
+          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrnew 响应非 JSON HTTP ' + br.status).catch(() => {})); } catch (_) {}
+          return json({ ok: false, message: '出码通道返回异常，请点「换一张」重试' }, 502);
+        }
         if (jb.code === 429) return json({ ok: false, message: '当前登记人数较多，请 1 分钟后再点「换一张」' }, 429);
         if (jb.code !== 200 || !jb.token || !jb.qr_png) {
           console.error('qrkey bridge 异常响应:', jb.code || 'no-code');
+          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrnew 异常响应 code=' + (jb.code || '无')).catch(() => {})); } catch (_) {}
           return json({ ok: false, message: '没拿到二维码，点「换一张」重试' }, 502);
         }
+        try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(true).catch(() => {})); } catch (_) {}
         return json({ ok: true, key: String(jb.token), dev: dev, bag: '',
                       img: 'data:image/png;base64,' + jb.qr_png, ttl: 300, how: 'bridge' },
           200, { 'Cache-Control': 'no-store' });
@@ -6329,9 +6400,16 @@ async function handle(request) {
             headers: { 'X-Bridge-Key': bcQ.key },
             signal: AbortSignal.timeout(15000),
           });
-        } catch (e) { return json({ ok: false, code: 0, message: '稍后自动重试' }, 200); }
+        } catch (e) {
+          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrpoll 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
+          return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
+        }
         const jb = await br.json().catch(() => null);
-        if (!jb) return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
+        if (!jb) {
+          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrpoll 响应非 JSON HTTP ' + br.status).catch(() => {})); } catch (_) {}
+          return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
+        }
+        if (jb.code === 200) { try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(true).catch(() => {})); } catch (_) {} }
         const stB = String(jb.status || '');
         if (jb.code === 404 || stB === '810') {
           return json({ ok: true, code: 800, message: '二维码已过期', bag: '' }, 200, { 'Cache-Control': 'no-store' });
@@ -13774,6 +13852,9 @@ export default {
     // 2026-11-06：邮件队列发令腿（北京每小时 :05/:35），只发令不干别的，跑完即 return。
     if (MAIL_CRONS.indexOf(_cron) >= 0) {
       ctx.waitUntil(dispatchMailQueue().catch(() => {}));
+      // 2026-11-20：每小时顺带探一次笔记本 bridge 健康（qrkey/qrcheck 真实失败 +
+      // 本探针双路喂同一状态机；连续 2 次失败发宕机邮件，恢复发恢复邮件）。
+      ctx.waitUntil(bridgeHealthProbe().catch(() => {}));
       // 2026-11-09：每小时顺带探一次 D1 额度水位（relay 停跑时也能刷新，
       // 否则闸门数据超过 90 分钟就判「未知」，等于白做）。
       ctx.waitUntil(d1QuotaProbe().catch(() => {}));
