@@ -311,8 +311,17 @@ def main():
         log("\n## C 阶段：未启动（等 AB 判定成立）")
 
     os.makedirs(os.path.dirname(st_path), exist_ok=True)
-    json.dump(st, open(st_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    open(REPORT_PATH, "w", encoding="utf-8").write("\n".join(_rep) + "\n")
+    # 2026-11-20 体检 P2：state.json 改原子写（临时文件 + os.replace）。
+    # 旧写法直接 open(w) 截断 —— 写盘中途失败/进程被杀会留下半截 JSON，Secret 已改而
+    # 状态未落盘，次日重复判定/重复发邮件。报告文件同理。
+    _tmp_st = st_path + ".tmp"
+    with open(_tmp_st, "w", encoding="utf-8") as _f:
+        json.dump(st, _f, ensure_ascii=False, indent=1)
+    os.replace(_tmp_st, st_path)
+    _tmp_rp = REPORT_PATH + ".tmp"
+    with open(_tmp_rp, "w", encoding="utf-8") as _f:
+        _f.write("\n".join(_rep) + "\n")
+    os.replace(_tmp_rp, REPORT_PATH)
     log("\n（状态已写入 c_chain/state.json，本 workflow 会提交回仓库；动作幂等）")
     if warn:
         raise SystemExit(2)   # 让 workflow 标黄提醒

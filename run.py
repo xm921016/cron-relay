@@ -139,6 +139,9 @@ POOL_TAG = os.environ.get("POOL_TAG", "").strip() or ("dz" if "dz." in WORKER_UR
 # 正常一轮（当天第一次跑）名单为空，行为与以前完全一致；SKIP_DONE=0 可一键关掉这条路径。
 SKIP_DONE = os.environ.get("SKIP_DONE", "1").strip() != "0"
 _RUN_MARK_WARNED = [False]
+# 2026-11-20 体检 P0：已跑标记失败计数。mark 失败只 WARN 曾留下「片判成功但 run_done 缺号」
+# ——次日 GitHub 00:25 快照不跳过这批号 = 双播（11-06 双播 127 号同型）。片尾 fail-closed。
+_RUN_MARK_FAILS = [0]
 
 _EAPI_KEY = "e82ckenh8dichen8"   # eapi 公开已知密钥
 _EAPI_SALT = "36cd479b6b5"       # eapi 固定 salt
@@ -609,7 +612,9 @@ def fetch_run_done(day):
 
 
 def mark_run_done(day, uid, slice_idx):
-    """单号播完后的增量标记（2026-11-02）。失败只告警一次，绝不影响播放。"""
+    """单号播完后的增量标记（2026-11-02）。失败只告警一次，绝不影响播放。
+    2026-11-20 体检：失败不再只 WARN —— 计入 _RUN_MARK_FAILS，片尾 fail-closed 退非零，
+    让 run_all/guard 重试补标记（已标记号被 SKIP_DONE 跳过，不会翻倍）。"""
     if not SKIP_DONE:
         return
     try:
@@ -617,14 +622,17 @@ def mark_run_done(day, uid, slice_idx):
             "pass": ASSIGN_PASS, "pool": POOL_TAG, "day": day,
             "uids": [str(uid)], "slice": slice_idx}, timeout=15,
             headers={"User-Agent": BROWSER_UA})  # 2026-11-13：铁律 6
-        if r.status_code != 200 and not _RUN_MARK_WARNED[0]:
-            _RUN_MARK_WARNED[0] = True
-            print("::warning::已跑标记写入失败 HTTP %s %s（只影响断点续跑，不影响播放）"
-                  % (r.status_code, r.text[:120]))
+        if r.status_code != 200:
+            _RUN_MARK_FAILS[0] += 1
+            if not _RUN_MARK_WARNED[0]:
+                _RUN_MARK_WARNED[0] = True
+                print("::warning::已跑标记写入失败 HTTP %s %s（不影响播放；片尾 fail-closed）"
+                      % (r.status_code, r.text[:120]))
     except Exception as e:
+        _RUN_MARK_FAILS[0] += 1
         if not _RUN_MARK_WARNED[0]:
             _RUN_MARK_WARNED[0] = True
-            print("::warning::已跑标记写入异常 %s（只影响断点续跑，不影响播放）" % e)
+            print("::warning::已跑标记写入异常 %s（不影响播放；片尾 fail-closed）" % e)
 
 
 def _load_cfg():
@@ -1110,6 +1118,14 @@ def main():
         # 这种也属于「本片没跑成」，同样交 guard 补跑（正常每号 28~32 次，不可能命中）。
         print(f"[slice {slice_idx}] ⚠️ 有效播放仅 {done} 次（{len(my_accounts)} 个号），"
               f"低于每号 1 次，判定本片失败，交由 guard 补跑")
+        sys.exit(1)
+
+    # 2026-11-20 体检 P0（fail-closed）：本片有已跑标记（run_mark）失败 → run_done 可能缺号，
+    # 次日 GitHub 00:25 快照不会跳过这批号 = 双播。这里退非零让 run_all 重试 / guard 补跑：
+    # 已标记成功的号会被 SKIP_DONE 跳过，只有真正没标记上的号重播一遍，不会翻倍。
+    if SKIP_DONE and _RUN_MARK_FAILS[0] > 0:
+        print(f"[slice {slice_idx}] ❌ 已跑标记失败 {_RUN_MARK_FAILS[0]} 个：run_done 可能缺号，"
+              f"判定本片失败以便重试补标记（SKIP_DONE 跳过已标记号，不会双播）")
         sys.exit(1)
 
 

@@ -3553,7 +3553,13 @@ async function d1SnapWrite(day, pool, clean, force) {
   //   全部快照走 KV 兜底、D1 零写入且 job 全绿——d1err 诊断字段就是为这次加的）。
   try {
     const now = new Date().toISOString();
-    const snapWhere = force ? '' :
+    // 2026-11-20 体检 P2（force 边界收紧）：force 不再「无条件覆盖全部行」，与普通写入共用
+    // 同一条 WHERE。原因：占坑豁免（OR 分支）已覆盖 force 的真实诉求 —— 覆盖播时占坑行
+    // （旧行 at < 09:30）；无条件覆盖会连 09:30 后已结算好的正确值也用偏小的补采值改掉。
+    // force 的作用收敛在 snapshot.py 侧：跳过 already_collected_today 判重（force 补采仍可达）。
+    // 同一天内 rpc30 只会涨不会跌（650 进度按日推进），所以「同天新值更小」= 旧行是
+    // 播时占坑（走 OR 分支放行）或新值异常（被大者胜挡住），都不该破坏已结算数据。
+    const snapWhere =
       // 2026-11-09：真正实现「rpc30 大者胜」。原来是无条件 DO UPDATE = 最后写入者胜，
       // 而读侧的 prev 因主键 (day,pool,uid) 永远是单行、prev 恒为空，那段比较是死代码。
       // 于是任何晚到的旧值（早班补采、被取消的片重试）都能把已结算好的数据静默改小。
@@ -5030,12 +5036,20 @@ async function bridgeHealth(ok, detail) {
     f++;
     await POOL.put('bridge_health', JSON.stringify({ f: f, d: d, last: String(detail || '').slice(0, 120), at: bjStamp() }));
     if (f >= 2 && !d) {
+      // 2026-11-20 体检 P2：并发竞态防护。两个请求同时失败时都会走到这里，各自读到的
+      // d 都是 false → 各发一封宕机邮件，「一轮一封」去重失效。发信前二次复核 KV 里的
+      // d 标志：已被并发者置位就跳过发信，只把失败计数带上。
+      const h2 = JSON.parse((await POOL.get('bridge_health').catch(() => null)) || '{}');
+      if (!!h2.d) {
+        console.log(TAG + ' 宕机告警已被并发实例发出（d=true），本轮跳过发信');
+        return;
+      }
       console.error(TAG + ' 连续 ' + f + ' 次失败，发宕机告警: ' + detail);
+      await POOL.put('bridge_health', JSON.stringify({ f: f, d: true, last: String(detail || '').slice(0, 120), at: bjStamp() }));
       await bridgeAlertMail('bridge 出码通道异常（连续 ' + f + ' 次失败）',
         '笔记本 bridge 持续失败：' + detail + '（' + bjStamp() + '）。登记页会显示「出码通道繁忙/人数较多」，出码全停。'
         + '排查：①笔记本是否关机/断网 ②https://qr-laptop.xx1031.xyz/health 是否可达 '
         + '③应急回滚=删 KV QR_BRIDGE_URL 或 QR_BRIDGE_KEY 任一键自动回老链路（老链路有毒源风险，仅应急用）。');
-      await POOL.put('bridge_health', JSON.stringify({ f: f, d: true, last: String(detail || '').slice(0, 120), at: bjStamp() }));
     }
   } catch (e) { console.error(TAG + ' 状态机异常:', e && e.message); }
 }
@@ -5679,9 +5693,19 @@ async function handle(request) {
       const dayS = beijingDate();
       const rows = await d1All('SELECT pool, COUNT(*) AS n FROM snapshots WHERE day=? GROUP BY pool', [dayS]).catch(() => null);
       if (!rows) return json({ ok: false, message: '快照查询失败' }, 503);
+      // 2026-11-20 体检 P1：再加一个「过了 09:30 门闩之后写入」的口径（hzPost）。
+      // 播时快照（run.py 片尾上报，正常发生在 00:10~08:00 夜轮）也会落 snapshots 行，
+      // 旧口径只数全量行 → 夜间播过就 hz>0，watchdog snapGuard 会误判「今天已采过」
+      // 不再补采 —— 11-20 主采整班缺失正是这个形态（14 行播时占坑）。at >= day||'T01:30'
+      // 的行只可能是门闩后的主采/兜底采（或异常晚播的播时快照，概率极低）。
+      const rowsPost = await d1All(
+        "SELECT pool, COUNT(*) AS n FROM snapshots WHERE day=? AND at >= (day || 'T01:30') GROUP BY pool", [dayS]).catch(() => null);
+      const mPost = {};
+      for (const r of (rowsPost || [])) mPost[r.pool] = r.n;
       const m = {};
       for (const r of rows) m[r.pool] = r.n;
-      return json({ ok: true, day: dayS, hz: m.hz || 0, dz: m.dz || 0 });
+      return json({ ok: true, day: dayS, hz: m.hz || 0, dz: m.dz || 0,
+                    hzPost: mPost.hz || 0, dzPost: mPost.dz || 0 });
     }
     // ---- D1 额度水位（2026-11-09）----
     // 闸门读的是 KV qgt:d1（{p:百分比, t:探测时间}）。平时由 scheduled / /api/assign 的探针刷新；
@@ -6453,6 +6477,9 @@ async function handle(request) {
           return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
         }
         if (jb.code === 200) { try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(true).catch(() => {})); } catch (_) {} }
+        // 2026-11-20 体检观察项：bridge 返回 JSON 但 code!=200（实例内部异常）也喂一次失败，
+        // 与 qrnew 路径口径对齐（429 限频由 bridgeHealth 内部按口径处理，不另算）。
+        else if (jb.code && jb.code !== 429) { try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrpoll 异常响应 code=' + jb.code).catch(() => {})); } catch (_) {} }
         const stB = String(jb.status || '');
         if (jb.code === 404 || stB === '810') {
           return json({ ok: true, code: 800, message: '二维码已过期', bag: '' }, 200, { 'Cache-Control': 'no-store' });
@@ -7402,9 +7429,12 @@ async function handle(request) {
       // claimed 卡住超过 2 小时的回退，避免 runner 挂死把这批永久占住
       await d1Run("UPDATE dead_notice SET state='pending',claimed_at=NULL WHERE state='claimed' AND claimed_at<=?",
         [bjStamp(nowMs - 2 * 3600000)]);
+      // 2026-11-20 体检 P2（铁律 3）：读失败≠读到空。D1 故障时按空列表返回 ok:true 会让
+      // runner 静默漏发失效号通知邮件，与「确实无待发」不可分 —— 必须 503 让 Actions 报红。
       const pend = await d1All(
         'SELECT pool,uid,name,email,removed_at,kind FROM dead_notice WHERE state=? AND removed_at<=? ORDER BY removed_at LIMIT 100',
-        ['pending', cutoff]) || [];
+        ['pending', cutoff]);
+      if (pend === null) return json({ ok: false, message: 'D1 读失败（dead_notice）' }, 503);
       // 2026-11-16：550 类永久退信（买家邮箱注销/写错）每天重试一次会试到永远 ——
       // 改为判死（removed_at）起最多 3 天，超过即标 skip_giveup 停止重试（用户 2026-11-16 定）。
       // 3 天 ≈ 每日兜底跑 3 轮的机会；之后号主邮箱换对了也走控制台手动补发。
@@ -10698,7 +10728,10 @@ async function applyEntryEdit(body) {
     // KV 键 entry:u<uid> 以 uid 为主（无 uid 才用 name），改名不动键；D1 accounts 以 uid 为主键，同安全。
     // 改名不回改成交台账（台账是按单的历史快照，结算口径不变）。
     if (body.newName != null && String(body.newName).trim() !== '') {
+      // 2026-11-20 体检 P3：先清洗控制字符再判空。旧顺序 trim() 通过后内层清洗可能把
+      // 纯控制字符输入洗成空串仍写入 target.name=''（把账号名清空）。
       const nn = String(body.newName).trim().replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 40);
+      if (nn === '') return json({ message: '账号名/手机号不能是空的（或全是不可见字符）' }, 400, CORS);
       if (/^qr:/i.test(nn)) return json({ message: '账号名不能用 qr: 开头（系统扫码占位保留字）' }, 400, CORS);
       if (String(target.name || '') !== nn) {
         const dup = master.find(x => x !== target && x.name != null && String(x.name) === nn);

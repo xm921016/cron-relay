@@ -6,8 +6,13 @@ name: snapshot
 #   门闩一到全部放行，同一个号池被采了 3 遍（约 2400 次工作台请求 + 3 倍 D1 读）。
 # cancel-in-progress: false —— 绝不打断正在采的那份（数据要留住）；新来的排队。
 #   GitHub 每个 group 只保留 1 个 pending，再来的会把更早的 pending 挤掉，不会无限堆积。
+# 2026-11-20 体检 P2：group 按触发事件名细分。事故形态（11-20 实锤）：relay 结束触发的
+#   主采班 00:16 起在排队等门闩，10:10 CF cron 的 dispatch 班把主采 pending 挤成 cancelled，
+#   当天 09:30 主采整班缺席（后续靠 force 补采救回）。按事件分组后 workflow_run / schedule /
+#   workflow_dispatch 各自独占一个 group，手动兜底班不再挤掉排队中的主采班；多班并发时
+#   snapshot.py 的 already_collected_today「先来后到」判定保证不会重复采集。
 concurrency:
-  group: snapshot-${{ github.repository }}
+  group: snapshot-${{ github.repository }}-${{ github.event_name }}
   cancel-in-progress: false
 
 # 目标任务快照补采。
