@@ -8364,7 +8364,12 @@ async function handle(request) {
          本接口验证失败/超时一律归入「漏跑」，绝不因为显示层误判死号。 */
       for (const p of ['hz', 'dz']) {
         const cpC = cov[p];
-        if (!cpC || !cpC.missing_n || !Array.isArray(cpC.missing) || !cpC.missing.length) continue;
+        if (!cpC || !cpC.missing_n || !Array.isArray(cpC.missing) || !cpC.missing.length) {
+          /* 2026-11-20：缺口全被 dead_log 归入失效（missing_n=0）时也要把 log_dead 并进
+             dead_n/dead，否则前端 dead_n 为空、失效栏整个不显示（14:37 实测 None）。 */
+          if (cpC && (cpC.log_dead_n || 0)) { cpC.dead_n = cpC.log_dead_n; cpC.dead = cpC.log_dead || []; }
+          continue;
+        }
         const missC = cpC.missing.slice(0, 40);
         let hvC = 0;
         const hashSrcC = missC.join(',');
@@ -8537,13 +8542,14 @@ async function handle(request) {
       // 2026-11-16：只读口令放宽 —— 仅允许「只改通知邮箱 / 歌曲链接」的 update。
       //   判据：action=update 且除 email/link 外不携带任何其它可写字段（ck/exp/agent/plan/note/
       //   rbStart/rbFrom 非空即算携带；noListen/pub/rb 只要出现就算携带，防止 noListen:"" 之类的
-      //   空值写入 —— applyEntryEdit 对 noListen/pub/rb 是「出现即生效」）。删除与其它字段仍 403。
+      //   空值写入 —— applyEntryEdit 对 noListen/pub/rb 是「出现即生效」；2026-11-20 加 newName 同口径）。
+      //   删除与其它字段仍 403。
       if (!(await consoleAuthFull(body))) {
         const who = await consoleRole(body);
         const roHas = (v) => v != null && String(v).trim() !== '';
         const roLimited = who === 'ro' && body.action === 'update' &&
           !roHas(body.ck) && !roHas(body.exp) && !roHas(body.agent) && !roHas(body.plan) &&
-          !roHas(body.note) && !roHas(body.rbStart) && !roHas(body.rbFrom) &&
+          !roHas(body.note) && !roHas(body.rbStart) && !roHas(body.rbFrom) && !roHas(body.newName) &&
           body.noListen === undefined && body.pub === undefined && body.rb === undefined;
         if (!roLimited) {
           return json({ message: who === 'ro' ? '当前是只读口令，只能修改「通知邮箱」和「歌曲链接」' : '账号或密码错误' }, 403, CORS);
@@ -8560,7 +8566,9 @@ async function handle(request) {
             ck: body.ck, link: body.link, email: body.email, exp: body.exp, noListen: body.noListen,
             agent: body.agent, plan: body.plan,
             // 2026-11-05：备注 / 补号标记也要转发，否则在控制台给定制群的号打补号标会静默无效
-            note: body.note, rb: body.rb, rbStart: body.rbStart, rbFrom: body.rbFrom };
+            note: body.note, rb: body.rb, rbStart: body.rbStart, rbFrom: body.rbFrom,
+            // 2026-11-20：手机号/账号名改名也要转发（dz applyEntryEdit 已同步支持）
+            newName: body.newName };
           const r = await fetch(peerUrl + '/api/peer/entry', { method: 'POST',
             headers: { 'Content-Type': 'application/json', 'User-Agent': 'cron-relay-worker' },
             body: JSON.stringify(fwd) });
@@ -10527,6 +10535,21 @@ async function applyEntryEdit(body) {
         rbLog = { on: false };
       }
     }
+    // ===== 2026-11-20：手机号/账号名（name 字段）满权限可改 =====
+    // 背景：扫码登记漏填手机号的号 name=qr:<uid> 占位（客服反馈 8179120713 案例），控制台编辑补填。
+    // 口径：本表没有独立 phone 列，手机号就是 name 本体；qr: 开头是系统扫码占位保留字，禁设。
+    // KV 键 entry:u<uid> 以 uid 为主（无 uid 才用 name），改名不动键；D1 accounts 以 uid 为主键，同安全。
+    // 改名不回改成交台账（台账是按单的历史快照，结算口径不变）。
+    if (body.newName != null && String(body.newName).trim() !== '') {
+      const nn = String(body.newName).trim().replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 40);
+      if (/^qr:/i.test(nn)) return json({ message: '账号名不能用 qr: 开头（系统扫码占位保留字）' }, 400, CORS);
+      if (String(target.name || '') !== nn) {
+        const dup = master.find(x => x !== target && x.name != null && String(x.name) === nn);
+        if (dup) return json({ message: '手机号/账号名「' + nn + '」已被另一个账号占用（uid ' + (dup.uid || '?') + '），不能重复' }, 400, CORS);
+        target.name = nn;
+        changes.push('手机号/账号名=' + nn);
+      }
+    }
     if (!changes.length) return json({ message: '没有要修改的内容（各栏留空=不改）' }, 400, CORS);
     await POOL.put(entryKeyOf(target), JSON.stringify(target));
     // 2026-10-22：D1 已是唯一读路径，镜像写失败必须显式告诉调用方 ——
@@ -10840,7 +10863,8 @@ body:has(.modal:not([hidden])){overflow:hidden}
 .deadbox summary{cursor:pointer;color:#3b6d11;padding:4px 0}
 .deadbox table{margin-top:6px;border:1px solid #eee;border-radius:8px}
 /* ===== 2026-11-15 方案④手机整页重做：桌面端只新增下面这几个手机专属容器，渲染零变化 =====
-   infoBtn（详情按钮）由满权限角色渲染，在桌面和手机端均可见；筛选面板/工具抽屉/遮罩/工具按钮是手机专属容器；
+   infoBtn（详情按钮）2026-11-20 起对所有角色渲染（弹窗内编辑/验证CK等仍仅满权限），桌面和手机端均可见；
+   筛选面板/工具抽屉/遮罩/工具按钮是手机专属容器；
    #infoBody 的 kv 样式放基础层，保证任何环境打开详情弹窗都可读。 */
 .infoBtn{display:inline-block}
 .agAt{display:none}  /* 2026-11-15：采集时间跟在客服后面，仅手机端显示（今日650格下方不再重复） */
@@ -11124,6 +11148,9 @@ body:has(.modal:not([hidden])){overflow:hidden}
 </div>
 <div class="modal" id="modal" hidden data-page-node-id="HrNaAIFT1KILEXBoLc7f06"><div class="mbox" data-page-node-id="WOex3wAhapNmyUDkOVY0xj">
   <h3 id="mTitle" data-page-node-id="hsdKqBm7YiKHZAcLQoTSTz">编辑账号</h3><p style="font-size:12px;color:#888;margin:4px 0 0" id="mSub" data-page-node-id="tlhtfU3BjD9FMhhgv4IMTc"></p>
+  <!-- 2026-11-20：手机号/账号名（客户标识）满权限可改 —— 扫码登记漏填手机号的号（name=qr:占位）
+       在这里补填；留空或没变=不改。只读口令此栏隐藏，服务端对只读携带 newName 一律 403。 -->
+  <label data-page-node-id="Nw20261120PhoneLbl">手机号 / 账号名（客户标识，留空不改）</label><input id="eName" inputmode="numeric" placeholder="如 13800138000" data-page-node-id="Nw20261120PhoneInp">
   <label data-page-node-id="O66bvBhFD32CJDDwZzbzkj">改绑歌曲（粘贴 APP 分享链接，留空不改）</label><input id="eLink" placeholder="https://163.com/... 或 song?id=..." data-page-node-id="3nXpyDLsf4vVskwyem0ma2">
   <label data-page-node-id="KUwSYJUsNLKL6FZYDYNVPp">通知邮箱（留空不改）</label><input id="eEmail" data-page-node-id="DzuOMtQKa2ldToZrmknHtu">
   <label data-page-node-id="0FTYOQJjlF38ckQl2EXWKW">客服（谁录的这条，留空不改）</label><select id="eAgent" data-page-node-id="CSh2oH1jmnna72yVveGcxc"><option value="" data-page-node-id="gvfLx5gd4j0EIiatcOXToG">不修改</option></select>
@@ -12129,8 +12156,9 @@ function render(){
       ? '<button class="mini" style="padding:4px 10px;font-size:12px" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'">编辑</button>'
       // 2026-11-16：只读口令放宽 —— 给「改邮箱/歌」按钮，openEdit 里只放开邮箱和歌曲链接两栏
       : '<button class="mini" style="padding:4px 10px;font-size:12px;background:#eef4fb;color:#255ea6;border-color:#c9d8ee" data-pool="'+r.pool+'" data-uid="'+esc(e.uid)+'" data-name="'+esc(e.name)+'" title="只读口令只能改通知邮箱和歌曲链接">改邮箱/歌</button>';
-    // 详情仅对满权限角色开放，并放在编辑按钮右侧；只读角色不渲染详情入口。
-    if(ROLE==='full')opCell+='<button class="mini infoBtn" style="padding:4px 10px;font-size:12px" data-info="'+i+'" title="查看该号详情">详情</button>';
+    // 2026-11-20（用户要求）：详情对所有角色开放 —— 弹窗里的「编辑」「验证CK」按钮和
+    // 「购买记录」「登记链接」查询本来就有 ROLE==='full' 门控，只读打开天然是纯查看，无需再加开关。
+    opCell+='<button class="mini infoBtn" style="padding:4px 10px;font-size:12px" data-info="'+i+'" title="查看该号详情">详情</button>';
     // 2026-11-05：备注列 + 补号标签。
     // 「补」的意义在结账时才体现：这行是客户掉线后免费补的号，钱不算、客服也不提成。
     var noteCell='';
@@ -12305,10 +12333,11 @@ function renderRunbar(){
     // 漏跑=号活着没跑到（系统自动补）。删号缺口不再混进漏跑栏，漏跑只报真漏跑。
     var tip='实跑=真的播了的号（有效播放口径）。失效=CK 已失效、已判死删号并直邮号主（补登后自动回池）；漏跑=号还活着没跑到，系统自动补跑。';
     var missTxt='';
-    if(mn){
-      var ddead=c.dead_n||0;
-      var dmiss=mn-ddead;
-      var parts=[];
+    // 2026-11-20：失效段不能包在 if(mn) 里 —— dead 全归失效后 missing_n=0，失效48就不渲染了。
+    var ddead=c.dead_n||0;
+    var dmiss=Math.max(0,mn-ddead);
+    var parts=[];
+    {
       if(dmiss){
         if(poolLive(p))parts.push('<span class="bad">漏跑'+dmiss+' · 补跑中</span>');
         else if(bjHnow()<20)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 自动补漏盯补中（播完即查·每10分钟·两轮制）</span>');
@@ -12405,10 +12434,13 @@ function renderRunbar(){
 }
 window.openEdit=function(pool,uid,name){
   $('eLink').value='';$('eEmail').value='';$('eExp').value='';$('eNo').value='';$('eCk').value='';$('em').textContent='';$('ePub').value='';
+  $('eName').value='';
   // 2026-11-16：只读口令放宽 —— 弹窗里只保留「歌曲链接」「通知邮箱」两栏，其余字段与删号按钮全部隐藏。
+  // 2026-11-20：手机号/账号名（eName）同样是满权限专属，只读隐藏。
   // 标签元素没有 id，用各输入框的 previousElementSibling 定位（label 紧贴在输入框前面）；备注/补号是同一个外层 div，直接藏父节点。
   var roEdit=(ROLE!=='full');
   function roHide(el){if(el)el.style.display=roEdit?'none':'';}
+  roHide($('eName'));roHide($('eName').previousElementSibling);
   roHide($('eCk'));roHide($('eCk').previousElementSibling);
   roHide($('eExp'));roHide($('eExp').previousElementSibling);
   roHide($('eNo'));roHide($('eNo').previousElementSibling);
@@ -12427,6 +12459,8 @@ window.openEdit=function(pool,uid,name){
   // 只读口令不提交备注（服务端对只读携带 note 会 403）
   NOTE_OK=!!ent&&!roEdit;
   $('eNote').value=ent?(ent.note||''):'';
+  // 2026-11-20：手机号/账号名回填（满权限可见；与原值相同或留空都不会提交，见 doEdit）
+  $('eName').value=ent?(ent.name||''):'';
   $('eRb').value='';$('rbStart').value='';$('rbFrom').value='';$('rbQ').value='';$('rbList').innerHTML='';
   $('rbBox').hidden=true;
   $('rbHint').textContent='到期日 = 原单登记日 + 本单套餐天数。这样客户不会因为补号白得剩下的月份；想手工指定到期日，就填上面的「有效期」，以你填的为准。';
@@ -12653,6 +12687,10 @@ function doEdit(pool,e,action){
   var body={user:t.user,pass:t.pass,pool:pool,action:action,uid:e.uid,name:e.name};
   if(action==='update'){
     body.link=$('eLink').value.trim();body.email=$('eEmail').value.trim();body.exp=$('eExp').value.trim();body.ck=$('eCk').value.trim();
+    // 2026-11-20：手机号/账号名 —— 只在「满权限打开弹窗改了值」时才提交。
+    // 只读弹窗此栏隐藏且回填原值 → 恒等于原值 → 恒不提交，不会误触后端 403。
+    var _nv=($('eName')?$('eName').value.trim():'');
+    if(_nv!==''&&_nv!==String(e.name||''))body.newName=_nv;
     if($('eNo').value!=='')body.noListen=$('eNo').value==='1';
     if($('ePub').value!=='')body.pub=$('ePub').value==='1';
     // 2026-10-27：留空=不改（与其它栏一致）
