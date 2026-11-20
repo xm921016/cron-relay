@@ -66,7 +66,24 @@
    "2026-11-21",
    "2026-11-22"
   ],
-  "results": {},
+  "results": {
+   "2026-11-19": {
+    "exp_sum": 370,
+    "ctrl_sum": -319,
+    "exp_pos": 15,
+    "ctrl_pos": 14,
+    "missing": [],
+    "suspect": false
+   },
+   "2026-11-20": {
+    "exp_sum": 453,
+    "ctrl_sum": 299,
+    "exp_pos": 14,
+    "ctrl_pos": 13,
+    "missing": [],
+    "suspect": false
+   }
+  },
   "launched": "2026-11-19"
  }
 }
