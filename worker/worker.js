@@ -9751,34 +9751,52 @@ async function fetchActionsStatus() {
     } catch (e) { /* 灰度进度查询失败不影响主卡 */ }
   }
   // 2026-11-20（用户口径）：hz 只剩 016 一个活仓，「仓库 1/1」没信息量 → 改显示今日片数
-  // 进度「片数 d/ns」。分母 ns 与 run.yml plan / relay_plan 端点公式逐字同源
-  //（n=buildPlan 本池可播数），算不出时回退 max(slice)+1；分子=今天 runs 落账的
-  // distinct slice 数（含灰度机昨天预播的 0-7，防双播本来就按同一天合并口径）。
+  // 进度「片数 d/ns」。分母 ns 用 plan_snap 当晚排片 n 过 run.yml plan 公式（同一时刻池数，
+  // 与 GitHub 实际片数一致——白天 watchdog 删号会让实时 buildPlan 算出 59 而当晚实跑 60，
+  // 11-20 实测 60/59 就是这个坑）；无快照回退实时 buildPlan，再回退 max(slice)+1。
+  // 分子=今天 runs 落账 distinct slice（≥0；slice 有哨兵 -1=watchdog 补漏落账，必须排除）。
   if (hzOut) {
     try {
       const _bjDay = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
-      let _ns = 0;
+      const _nsCalc = (_nP) => {
+        const _per0 = Math.max(8, Math.ceil(_nP / 60));
+        const _par = Math.max(24, Math.min(48, Math.ceil(_per0 * 2.0)));
+        const _per = Math.max(8, Math.min(_per0, Math.floor(_par / 2)));
+        return Math.max(4, Math.min(250, Math.ceil(_nP / _per)));
+      };
+      let _ns = 0, _nsSrc = '', _snapN = 0;
       try {
+        const _snap = await planSnapGet(_bjDay, 'hz');
+        if (_snap && _snap.n > 0) { _snapN = _snap.n; _ns = _nsCalc(_snap.n); _nsSrc = 'snap'; }
+      } catch (e) { /* 快照读失败走实时 */ }
+      if (!_ns) try {
         const _plan = await buildPlan(_bjDay);
         if (_plan && _plan.ok) {
           const _nP = _plan.plans.filter(x => x.pool === 'hz').length;
-          if (_nP > 0) {
-            const _per0 = Math.max(8, Math.ceil(_nP / 60));
-            const _par = Math.max(24, Math.min(48, Math.ceil(_per0 * 2.0)));
-            const _per = Math.max(8, Math.min(_per0, Math.floor(_par / 2)));
-            _ns = Math.max(4, Math.min(250, Math.ceil(_nP / _per)));
-          }
+          if (_nP > 0) { _ns = _nsCalc(_nP); _nsSrc = 'live'; }
         }
       } catch (e) { /* ns 公式失败走回退 */ }
+      // ⚠ slice 有哨兵值 -1（watchdog 补漏/回刷落账），必须排除，否则 done 会大于 ns。
       const _tRow = await DB.prepare(
-        "SELECT COUNT(DISTINCT slice) AS ds, MAX(slice) AS ms, COUNT(*) AS n FROM runs WHERE day=? AND pool='hz'")
+        "SELECT COUNT(DISTINCT CASE WHEN CAST(slice AS INTEGER)>=0 THEN CAST(slice AS INTEGER) END) AS ds, "
+        + "MAX(CAST(slice AS INTEGER)) AS ms, COUNT(*) AS n FROM runs WHERE day=? AND pool='hz'")
         .bind(_bjDay).first();
+      let _vals = [];
+      try {
+        const _vr = await DB.prepare("SELECT DISTINCT CAST(slice AS INTEGER) AS s FROM runs WHERE day=? AND pool='hz' ORDER BY s")
+          .bind(_bjDay).all();
+        _vals = (_vr.results || []).map(r => Number(r.s));
+      } catch (e) {}
       const _ms = Number((_tRow && _tRow.ms) || -1) + 1;
-      hzOut.day_slices = { day: _bjDay,
+      // 分母取两者大者：快照/实时公式（排片时刻池数）可能比实际少 1（11-20 实测 59 vs 60，
+      // GitHub 00:25 pool_stat 池数 > 快照写入时刻），而 GitHub 真跑到 slice 59 后 ms+1=60 收敛为真值。
+      const _nsFinal = Math.max(_ns, _ms) || 0;
+      hzOut.day_slices = { day: _bjDay, gen: new Date().toISOString().slice(11, 19),
         done: Number((_tRow && _tRow.ds) || 0),
-        ns: _ns || _ms || 0,
+        ns: _nsFinal,
+        nsSrc: _nsSrc, snapN: _snapN,
         accounts: Number((_tRow && _tRow.n) || 0) };
-    } catch (e) { /* 片数查询失败不影响主卡 */ }
+    } catch (e) { hzOut.day_slices_err = String((e && e.message) || e).slice(0, 100); }
   }
   // 2026-11-04：有 run 在跑时缓存只留 60 秒（进度要看得见在动）；全部结束才用 5 分钟，
   // 避免控制台每刷一次就去打 2 个仓库 x (1 次 runs + 1~3 次 jobs) 的 GitHub 接口。
