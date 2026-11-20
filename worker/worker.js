@@ -7929,6 +7929,10 @@ async function handle(request) {
       // 2026-11-06 重试上限：用户要求「尝试几次不行就放弃，别浪费额度」。
       // attempts 每次发信失败 +1，满 3 次标 dropped（skip_reason 注明）。
       // claimed 2 小时超时回退不算次数（那是崩溃恢复，不是真发过）。
+      // 2026-11-20 体检 P2（与 dz 同款）：失败重试不再当轮回 pending —— 旧写法下
+      // notify_mail 的领取循环几十秒内就会把回退的行重新领走重发，3 次重试瞬间烧完
+      // → dropped，本该隔一段再试的提醒永久丢失；SMTP 已投递仅回执超时时还会重复发信。
+      // 改为保持 claimed + attempts+1，由「claimed 超 2 小时回退 pending」既有机制自然重试。
       for (const it of items) {
         if (retry) {
           const rs = await d1All("SELECT attempts FROM mail_queue WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
@@ -7940,7 +7944,8 @@ async function handle(request) {
               [String(it.pool || ''), String(it.uid || ''), String(it.kind || ''), String(it.ref || '')]);
             if (ok) { n++; dropped++; }
           } else {
-            const ok = await d1Run("UPDATE mail_queue SET state='pending',attempts=attempts+1,claimed_at=NULL,sent_at=NULL WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
+            // 保持 claimed（回退交给 2 小时超时机制，详见上方说明）
+            const ok = await d1Run("UPDATE mail_queue SET attempts=attempts+1 WHERE pool=? AND uid=? AND kind=? AND ref=? AND state='claimed'",
               [String(it.pool || ''), String(it.uid || ''), String(it.kind || ''), String(it.ref || '')]);
             if (ok) n++;
           }
