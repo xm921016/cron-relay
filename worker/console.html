@@ -1561,8 +1561,9 @@ function renderRunbar(){
     var eff=(c.expected!=null)?Math.max(0,c.expected-rn):null;
     var cls=mn?'bad':'good';
     // 2026-11-18（用户口径二改）：分子=真播了的号（有效播放口径），不再把没跑的算成满额。
-    // 服务端已对漏跑名单实时验证 CK（结果缓存）：失效=CK 已死，今晚判死+直邮；漏跑=号活着会自动补。
-    var tip='实跑=真的播了的号（有效播放口径）。失效=CK 已失效（实时验证、与夜轮同口径），今晚主轮判死并直邮号主，不会有有效播放；漏跑=号还活着没跑到，系统自动补跑。';
+    // 2026-11-20（用户口径三改）：失效=dead_log 有删号记录（已判死删号+直邮）+ 剩余缺口实时 CK 验证兜底；
+    // 漏跑=号活着没跑到（系统自动补）。删号缺口不再混进漏跑栏，漏跑只报真漏跑。
+    var tip='实跑=真的播了的号（有效播放口径）。失效=CK 已失效、已判死删号并直邮号主（补登后自动回池）；漏跑=号还活着没跑到，系统自动补跑。';
     var missTxt='';
     if(mn){
       var ddead=c.dead_n||0;
@@ -1573,7 +1574,7 @@ function renderRunbar(){
         else if(bjHnow()<20)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 自动补漏盯补中（播完即查·每10分钟·两轮制）</span>');
         else parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 今晚 0:10 主轮补跑</span>');
       }
-      if(ddead)parts.push('<span class="bad">失效'+ddead+'</span><span class="muted"> · 今晚判死+直邮，之后转「未补登」</span>');
+      if(ddead)parts.push('<span class="bad">失效'+ddead+'</span><span class="muted"> · 已判死删号+直邮号主，补登后自动回池</span>');
       if(parts.length)missTxt=' '+parts.join(' ');
     }
     covH+='<span class="'+cls+'" title="'+tip+'">'

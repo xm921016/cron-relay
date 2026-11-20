@@ -8309,6 +8309,15 @@ async function handle(request) {
       // 2026-11-09：口径改成「当轮 plan 快照」优先 —— expected 取本轮首轮 plan 落地的名单，
       // 与 /api/coverage 完全一致；没有快照（老日期 / D1 读不到）时回退实时 buildPlan。
       const cov = {};
+      /* 2026-11-20（用户确认口径三改）：dead_log 近3天有删号记录的缺口一律归「失效」，
+         不再进实时 CK 验证/漏跑栏 —— 修复「快照后~开跑前刚删的号被显示成漏跑、天天虚报」。
+         真漏跑=活着却没跑（watchdog 要补的），由下方实时验证对剩余缺口兜底判定。
+         合并：cov[p].dead_n = log_dead_n(删号记录) + liveDead(实时验证)，前端公式不变。 */
+      const deadLogByPool = {};
+      for (const r of (deadRows || [])) {
+        const _dp = r.pool === 'dz' ? 'dz' : 'hz';
+        (deadLogByPool[_dp] = deadLogByPool[_dp] || new Set()).add(String(r.uid || ''));
+      }
       if (Array.isArray(ranRows) || (plan && plan.ok && Array.isArray(plan.plans))) {
         const ranByPool = {};
         for (const r of (ranRows || [])) {
@@ -8325,16 +8334,21 @@ async function handle(request) {
           if (!exp || !exp.length) continue;
           const ranSet = ranByPool[p] || new Set();
           const missing = exp.filter(u => !ranSet.has(u));
+          const dlogSetP = deadLogByPool[p] || new Set();
+          const logDead = missing.filter(u => dlogSetP.has(u));
+          const missRest = missing.filter(u => !dlogSetP.has(u));
           /* 2026-11-16（用户口径）：与 /api/coverage 同口径 —— 已通知重登的号从「缺」里拆出来，
              单独放 relogin 字段；pct 分母去掉它们，正常号跑满就显示 100%。
              relByPool 查失败（null）时退回老口径：全部算缺，绝不伪装成「没有未补登」。 */
           const relSetP = relByPool[p] || new Set();
-          const rel = missing.filter(u => relSetP.has(u));
-          const miss2 = missing.filter(u => !relSetP.has(u));
+          const rel = missRest.filter(u => relSetP.has(u));
+          const miss2 = missRest.filter(u => !relSetP.has(u));
           const effExp = exp.length - rel.length;
           cov[p] = { expected: exp.length, ran: exp.length - missing.length,
                      missing_n: miss2.length,
                      missing: miss2.slice(0, 80),
+                     log_dead_n: logDead.length,
+                     log_dead: logDead.slice(0, 80),
                      relogin_n: rel.length,
                      relogin: rel.slice(0, 80),
                      src: srcp, snap_at: sn ? sn.at : '',
@@ -8359,7 +8373,9 @@ async function handle(request) {
         let cachedC = null;
         try { cachedC = JSON.parse(await POOL.get(ckKeyC) || 'null'); } catch (e) { cachedC = null; }
         if (cachedC && cachedC.hash === String(hvC) && Array.isArray(cachedC.dead)) {
-          cpC.dead_n = cachedC.dead_n; cpC.dead = cachedC.dead; cpC.dead_at = cachedC.at || '';
+          cpC.dead_n = (cpC.log_dead_n || 0) + cachedC.dead_n;
+          cpC.dead = (cpC.log_dead || []).concat(cachedC.dead);
+          cpC.dead_at = cachedC.at || '';
           continue;
         }
         const ckRowsC = await d1All('SELECT uid, ck FROM accounts WHERE pool=? AND uid IN (' +
@@ -8379,7 +8395,9 @@ async function handle(request) {
           } catch (e) { isDeadC = false; }
           (isDeadC ? deadC : unkC).push(uC);
         }));
-        cpC.dead_n = deadC.length; cpC.dead = deadC; cpC.dead_at = bjStamp();
+        cpC.dead_n = (cpC.log_dead_n || 0) + deadC.length;
+        cpC.dead = (cpC.log_dead || []).concat(deadC);
+        cpC.dead_at = bjStamp();
         try {
           await POOL.put(ckKeyC, JSON.stringify({ hash: String(hvC), dead_n: deadC.length, dead: deadC, at: bjStamp() }),
             { expirationTtl: 172800 });
@@ -12283,8 +12301,9 @@ function renderRunbar(){
     var eff=(c.expected!=null)?Math.max(0,c.expected-rn):null;
     var cls=mn?'bad':'good';
     // 2026-11-18（用户口径二改）：分子=真播了的号（有效播放口径），不再把没跑的算成满额。
-    // 服务端已对漏跑名单实时验证 CK（结果缓存）：失效=CK 已死，今晚判死+直邮；漏跑=号活着会自动补。
-    var tip='实跑=真的播了的号（有效播放口径）。失效=CK 已失效（实时验证、与夜轮同口径），今晚主轮判死并直邮号主，不会有有效播放；漏跑=号还活着没跑到，系统自动补跑。';
+    // 2026-11-20（用户口径三改）：失效=dead_log 有删号记录（已判死删号+直邮）+ 剩余缺口实时 CK 验证兜底；
+    // 漏跑=号活着没跑到（系统自动补）。删号缺口不再混进漏跑栏，漏跑只报真漏跑。
+    var tip='实跑=真的播了的号（有效播放口径）。失效=CK 已失效、已判死删号并直邮号主（补登后自动回池）；漏跑=号还活着没跑到，系统自动补跑。';
     var missTxt='';
     if(mn){
       var ddead=c.dead_n||0;
@@ -12295,7 +12314,7 @@ function renderRunbar(){
         else if(bjHnow()<20)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 自动补漏盯补中（播完即查·每10分钟·两轮制）</span>');
         else parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 今晚 0:10 主轮补跑</span>');
       }
-      if(ddead)parts.push('<span class="bad">失效'+ddead+'</span><span class="muted"> · 今晚判死+直邮，之后转「未补登」</span>');
+      if(ddead)parts.push('<span class="bad">失效'+ddead+'</span><span class="muted"> · 已判死删号+直邮号主，补登后自动回池</span>');
       if(parts.length)missTxt=' '+parts.join(' ');
     }
     covH+='<span class="'+cls+'" title="'+tip+'">'
