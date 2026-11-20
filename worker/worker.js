@@ -4942,10 +4942,26 @@ async function ncReceiptRead(code, mu) {
   try {
     const rows = await d1All('SELECT v FROM kv_misc WHERE k=? LIMIT 1', [await ncReceiptKey(code, mu)]);
     const r = rows && rows.length ? JSON.parse(rows[0].v) : null;
-    if (r && Date.now() - r.at < 86400000 && ['home_relay', 'cf_direct'].includes(r.loginEgress))
+    if (r && Date.now() - r.at < 86400000 && ['home_relay', 'cf_direct', 'home_browser'].includes(r.loginEgress))
       return { registrationMethod: 'link_qr', loginEgress: r.loginEgress };
   } catch (e) { console.error('扫码来源证据读取失败'); }
   return { registrationMethod: 'link_qr', loginEgress: '' };
+}
+
+/* 2026-11-20 S2-4 接线：真浏览器出码 bridge（家宽笔记本，S1/S2 已验收；
+   11-20 三样本判定通过——样本2 id=9144717514 第 4 天存活）。
+   配置放 KV：QR_BRIDGE_URL（如 https://qr-laptop.xx1031.xyz）+ QR_BRIDGE_KEY（bridge.key，
+   口令只进 KV 不进仓库）。两键齐 → qrkey/qrcheck/qrack 走 bridge（真 Chrome 出码、
+   官方页 JS 在真 Chrome 里轮询领 CK，登录会话出生在真浏览器+家宽 IP）；
+   删掉任一键 = 回滚开关，自动回老链路，代码不用动。
+   红线：bridge 429/故障绝不落回老链路（老链路服务端假 UA 明文轮询=毒源，11-17 实证）。 */
+let _qrBridgeCfg = { at: 0, url: '', key: '' };
+async function qrBridgeCfg() {
+  if (Date.now() - _qrBridgeCfg.at < 60000) return _qrBridgeCfg;
+  const u = cleanKV(await POOL.get('QR_BRIDGE_URL').catch(() => null)) || '';
+  const k = cleanKV(await POOL.get('QR_BRIDGE_KEY').catch(() => null)) || '';
+  _qrBridgeCfg = { at: Date.now(), url: u.replace(/\/+$/, ''), key: k };
+  return _qrBridgeCfg;
 }
 
 function ncSetCookies(r) {
@@ -5297,6 +5313,10 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
     api('/api/r/qrkey?t=' + encodeURIComponent(T) + '&dev=' + encodeURIComponent(st.dev)).then(function(j){
       st.busy = false;
       if (!j.ok) { setTip(j.message || '出码失败，点「换一张」重试'); setNewBtn(true); return; }
+      /* 2026-11-20：新链路（bridge）每张码占一个真浏览器实例，换一张时先把上一张
+         的 token 释放掉（否则被丢弃的一单要占实例最长 15 分钟，连点会占满实例池）；
+         老链路该端点返回 ok:true 空操作，无感兼容。 */
+      if (st.key && st.key !== j.key) { try { fetch('/api/r/qrack?t=' + encodeURIComponent(T) + '&key=' + encodeURIComponent(st.key)).catch(function(){}); } catch(e) {} }
       st.key = j.key; st.bag = j.bag;
       E('qr').src = j.img;
       countdown(j.ttl || 300);
@@ -6242,6 +6262,32 @@ async function handle(request) {
       if (!row || regStateOf(row) !== 'unused') return json({ ok: false, message: '链接不可用，请刷新页面' }, 410);
       const dev = String(url.searchParams.get('dev') || '').trim();
       if (!/^YD-[0-9a-f]{36}$/.test(dev)) return json({ ok: false, message: '设备号无效，请刷新页面重试' }, 400);
+      /* 2026-11-20 bridge 分支：真浏览器出码（家宽笔记本 Chrome 预热码）。
+         dev 在新链路只作页面侧会话标记（真 Chrome 的指纹由 bridge 自己生成，
+         sDeviceId 不再参与网易请求），bag 恒为空串，页面逻辑无需改动。 */
+      const bc = await qrBridgeCfg();
+      if (bc.url && bc.key) {
+        let br;
+        try {
+          br = await fetch(bc.url + '/qrnew', {
+            headers: { 'X-Bridge-Key': bc.key },
+            signal: AbortSignal.timeout(20000),
+          });
+        } catch (e) {
+          console.error('qrkey bridge 请求失败:', e && e.message);
+          return json({ ok: false, message: '出码通道繁忙，请点「换一张」重试；多次不行请联系客服' }, 502);
+        }
+        const jb = await br.json().catch(() => null);
+        if (!jb) return json({ ok: false, message: '出码通道返回异常，请点「换一张」重试' }, 502);
+        if (jb.code === 429) return json({ ok: false, message: '当前登记人数较多，请 1 分钟后再点「换一张」' }, 429);
+        if (jb.code !== 200 || !jb.token || !jb.qr_png) {
+          console.error('qrkey bridge 异常响应:', jb.code || 'no-code');
+          return json({ ok: false, message: '没拿到二维码，点「换一张」重试' }, 502);
+        }
+        return json({ ok: true, key: String(jb.token), dev: dev, bag: '',
+                      img: 'data:image/png;base64,' + jb.qr_png, ttl: 300, how: 'bridge' },
+          200, { 'Cache-Control': 'no-store' });
+      }
       const bag = { sDeviceId: dev };
       let nk;
       try { nk = await ncNewKey(bag); }
@@ -6271,6 +6317,41 @@ async function handle(request) {
       }
       const key = String(url.searchParams.get('key') || '').trim().slice(0, 64);
       if (!key) return json({ ok: false, code: 0, message: '缺少 key' }, 400);
+      /* 2026-11-20 bridge 分支：轮询走家宽笔记本 bridge（真 Chrome 官方页自己轮询领 CK，
+         worker 只搬运状态和 CK）。状态映射：801/802 原样；803 → mu/uid/nick（凭据记
+         home_browser=真浏览器家宽）；810/404 → 800（页面按过期处理，引导换一张）。
+         bridge 网络失败 → 「稍后自动重试」与老链路 catch 同形，绝不回老轮询（毒源）。 */
+      const bcQ = await qrBridgeCfg();
+      if (bcQ.url && bcQ.key) {
+        let br;
+        try {
+          br = await fetch(bcQ.url + '/qrpoll?token=' + encodeURIComponent(key), {
+            headers: { 'X-Bridge-Key': bcQ.key },
+            signal: AbortSignal.timeout(15000),
+          });
+        } catch (e) { return json({ ok: false, code: 0, message: '稍后自动重试' }, 200); }
+        const jb = await br.json().catch(() => null);
+        if (!jb) return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
+        const stB = String(jb.status || '');
+        if (jb.code === 404 || stB === '810') {
+          return json({ ok: true, code: 800, message: '二维码已过期', bag: '' }, 200, { 'Cache-Control': 'no-store' });
+        }
+        if (jb.code === 200 && stB === '803' && jb.ck) {
+          const muB = String(jb.ck);
+          try {
+            await d1Run('INSERT OR REPLACE INTO kv_misc (k,v,updated_at) VALUES (?,?,?)',
+              [await ncReceiptKey(url.searchParams.get('t'), muB),
+               JSON.stringify({ loginEgress: 'home_browser', at: Date.now() }), bjStamp()]);
+          } catch (e) { console.error('扫码来源证据保存失败'); }
+          return json({ ok: true, code: 803, message: '', bag: '', mu: muB,
+                        uid: jb.uid, nick: jb.nick }, 200, { 'Cache-Control': 'no-store' });
+        }
+        if (jb.code === 200 && (stB === '801' || stB === '802')) {
+          return json({ ok: true, code: Number(stB), message: '', bag: '' }, 200, { 'Cache-Control': 'no-store' });
+        }
+        /* err / 未知状态 / 803 但无 ck → 让页面稍后自动重试 */
+        return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
+      }
       const dev = String(url.searchParams.get('dev') || '').trim().slice(0, 64);
       const bag = ncDecBag(url.searchParams.get('bag') || '');
       if (dev && !bag.sDeviceId) bag.sDeviceId = dev;
@@ -6294,6 +6375,25 @@ async function handle(request) {
         console.error('qrcheck 803 无 MUSIC_U:', out.dbg);
       }
       return json(out, 200, { 'Cache-Control': 'no-store' });
+    }
+    /* 2026-11-20 bridge 专用：买家点「换一张」时释放上一个 bridge 实例（否则被丢弃的
+       一单要占实例最长 15 分钟才自动复位，连点几次会把 4 实例池占满成 429）。
+       未配置 bridge 时返回 ok:true（页面无感兼容）。轻量端点不做频控，
+       bridge 侧 404（token 不存在/已复位）无害。 */
+    if (url.pathname === '/api/r/qrack') {
+      const bcA = await qrBridgeCfg();
+      if (bcA.url && bcA.key) {
+        const ak = String(url.searchParams.get('key') || '').trim().slice(0, 64);
+        if (ak) {
+          try {
+            await fetch(bcA.url + '/qrack?token=' + encodeURIComponent(ak), {
+              headers: { 'X-Bridge-Key': bcA.key },
+              signal: AbortSignal.timeout(8000),
+            });
+          } catch (e) { /* 释放失败无害：bridge 15 分钟自动复位兜底 */ }
+        }
+      }
+      return json({ ok: true }, 200, { 'Cache-Control': 'no-store' });
     }
     /* 提交登记：套餐/客服/天数全部取自 token（前端改不了），成功即原子消耗 token */
     if (url.pathname === '/api/r/submit' && request.method === 'POST') {
