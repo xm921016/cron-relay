@@ -8992,26 +8992,29 @@ async function handle(request) {
         scanned: { accounts: TH.acc.length, ledger: TH.led.length, dead_log: TH.dead.length } }, 200, CORS);
     }
     /* ---- 2026-11-17：失效号邮件提醒实时查询 /api/console/mailtrace ----
-       回答一个问题：失效的号，重登/删号/每日提醒邮件到底发没发、什么时候发的。
-       背景（11-17 排查 13077105665）：重登邮件只有 run.py 采集判死 → 直邮成功 →
-       回调 /api/relogin_mailed 写 relogin_at 这一条链路会产生记录；号没被采到就
-       不会判死、不会有邮件，控制台只会显示「采集缺失」。此前没有任何入口能查
-       「某号到底发没发过邮件」，只能翻 D1，现做成控制台一等公民。
+       回答一个问题：失效的号，删号/每日提醒邮件到底发没发、什么时候发的。
+       2026-11-20 对齐「立即删号」口径（11-18 拍板）：失效号立即删号+直邮，
+       relogin_at/suspect_at 零写入 —— 旧版清单只读 accounts（relogin_at/suspect_at）
+       因此永远空转、单号查询对已删号一律误报「没查到」。现改为：
+         清单模式 = dead_log 时间窗口内已删号（主体，每号带删号时间/原因）+
+                    accounts 里 suspect_at 非空的号（兼容保留，现网 0 行）；
+         单号模式 = accounts 查不到时回查 mail_queue / dead_log / dead_notice 反查候选
+                    （已删号的邮件/通知记录都在这三张表里）。
        数据源实时读 D1，外层套「版本指纹缓存」（2026-11-17 二期，见端点内注释）：
        邮件数据没变化时反复刷新只读 KV 缓存不读 D1，有新增/状态变化才重建；force=true 强制重读。
-         accounts.relogin_at  重登邮件已发时间（直邮成功回调写入）
-         accounts.suspect_at  待复核标记（老口径）
+         accounts.relogin_at  重登邮件已发时间（直邮成功回调写入；11-18 起零写入，仅历史兼容）
+         accounts.suspect_at  待复核标记（老口径，兼容保留）
+         dead_log             删号流水（清单主体：删号时间 + 原因）
          dead_notice          删号通知队列 state: pending/claimed/sent + removed_at/sent_at
          mail_queue           号主邮件队列（relogin2=每日重登提醒、reg、exp*、songchange…）
                               state + created_at/claimed_at/sent_at/skip_reason
-         dead_log             删号流水（对照号是什么时候没的）
        两种用法：
          q 非空（≥3 位）：查单号，返回它全部邮件记录（mail_queue 走 (pool,uid) 唯一索引）。
-         q 为空：失效号清单 = relogin_at 或 suspect_at 非空的全部在池号 + 每号最新一条
-                 relogin2 提醒状态（mail_queue 按 created_at DESC 有界扫，LIMIT 1500）。
-       额度（Workers Paid，2026-11-16 起）：本接口 5 次查询全走小表或索引点查，
-       accounts ~1300 行 / dead_log ~300 行 / dead_notice、mail_queue 各几百行，
-       单次全开 ≈5000 行读 ≈ 月包含的 0.00002%，实时查询无压力。 */
+         q 为空：失效号清单 = dead_log 窗口内已删号（LIMIT 500，超过置 trunc 标志）+
+                 在池 suspect_at 号 + 每号最新一条 relogin2 提醒状态。
+       额度（Workers Paid，2026-11-16 起）：本接口全走小表或索引点查，现网规模
+       accounts ~1675 / dead_log ~390 / dead_notice ~190 / mail_queue ~2300 行，
+       单次全开 <1 万行读 ≈ 月包含的 0.00004%，实时查询无压力。 */
     if (url.pathname === '/api/console/mailtrace' && request.method === 'POST') {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let bodyM;
@@ -9081,21 +9084,46 @@ async function handle(request) {
       };
       if (qM.length >= 3) {
         // ---- 单号模式 ----
-        const accRows = await d1All('SELECT pool,uid,name,email,agent,plan,exp,added,pub,relogin_at,suspect_at FROM accounts ' +
+        // 2026-11-20 修复：11-18 起失效号立即删号（relogin_at/suspect_at 零写入），
+        // 已删号不在 accounts —— accounts 查不到时回查 mail_queue / dead_log / dead_notice
+        // 三张小表反查候选号（已删号的邮件/删号通知记录都在这三张表里），否则单号查询
+        // 对已删号一律误报「没查到这个号」。三张表合计 <4.5k 行，量级与原设计一致。
+        let accRows = await d1All('SELECT pool,uid,name,email,agent,plan,exp,added,pub,relogin_at,suspect_at FROM accounts ' +
           'WHERE uid=? OR name=? OR uid LIKE ? OR name LIKE ? LIMIT 20',
           [qM, qM, '%' + qM + '%', '%' + qM + '%']);
         if (accRows === null) return json({ message: hintM() }, 503, CORS);
+        if (accRows.length === 0) {
+          const mqHit = await d1All('SELECT DISTINCT pool,uid FROM mail_queue WHERE uid=? OR uid LIKE ? OR name=? LIMIT 20',
+            [qM, '%' + qM + '%', qM]);
+          if (mqHit === null) return json({ message: hintM() }, 503, CORS);
+          const dlHit = await d1All('SELECT DISTINCT pool,uid FROM dead_log WHERE uid=? OR uid LIKE ? OR name=? LIMIT 20',
+            [qM, '%' + qM + '%', qM]);
+          if (dlHit === null) return json({ message: hintM() }, 503, CORS);
+          const dnHit = await d1All('SELECT DISTINCT pool,uid FROM dead_notice WHERE uid=? OR uid LIKE ? OR name=? LIMIT 20',
+            [qM, '%' + qM + '%', qM]);
+          if (dnHit === null) return json({ message: hintM() }, 503, CORS);
+          const seenM2 = new Set();
+          accRows = [].concat(mqHit, dlHit, dnHit).filter(r => {
+            const kM3 = histKey(r.pool, r.uid);
+            if (seenM2.has(kM3)) return false;
+            seenM2.add(kM3);
+            return true;
+          }).slice(0, 20);
+        }
         const deadRows = await d1All('SELECT pool,uid,name,reason,at FROM dead_log ORDER BY at DESC LIMIT 800', []);
         if (deadRows === null) return json({ message: hintM() }, 503, CORS);
         const noticeRows = await d1All('SELECT pool,uid,name,email,state,kind,removed_at,sent_at,skip_reason FROM dead_notice LIMIT 1500', []);
         if (noticeRows === null) return json({ message: hintM() }, 503, CORS);
         const accs = [];
         for (const a of accRows) {
-          const mq = await d1All('SELECT pool,uid,kind,ref,state,created_at,claimed_at,sent_at,skip_reason,attempts FROM mail_queue ' +
+          const mq = await d1All('SELECT pool,uid,kind,ref,name,email,state,created_at,claimed_at,sent_at,skip_reason,attempts FROM mail_queue ' +
             'WHERE pool=? AND uid=? AND created_at>=? ORDER BY created_at DESC LIMIT 200', [nrmM(a.pool), nrmM(a.uid), mqCutM]);
           if (mq === null) return json({ message: hintM() }, 503, CORS);
+          const ntHit = noticeRows.filter(n => histKey(n.pool, n.uid) === histKey(a.pool, a.uid));
           accs.push({
-            pool: nrmM(a.pool), uid: nrmM(a.uid), name: nrmM(a.name), email: nrmM(a.email),
+            pool: nrmM(a.pool), uid: nrmM(a.uid),
+            name: nrmM(a.name) || nrmM(ntHit.length && ntHit[0].name) || nrmM(mq.length && mq[0].name),
+            email: nrmM(a.email) || nrmM(ntHit.length && ntHit[0].email) || nrmM(mq.length && mq[0].email),
             agent: nrmM(a.agent), plan: nrmM(a.plan), exp: nrmM(a.exp), added: nrmM(a.added),
             pub: Number(a.pub) || 0, relogin_at: nrmM(a.relogin_at), suspect_at: nrmM(a.suspect_at),
             mails: mq,
@@ -9105,9 +9133,23 @@ async function handle(request) {
               || (nrmM(d.name) && nrmM(d.name) === nrmM(a.name))).slice(0, 5),
           });
         }
+        // 已删号排前（按删号时间倒序），在池号排后
+        accs.sort((x, y) => {
+          const dx = (x.dead && x.dead[0] && x.dead[0].at) || '', dy = (y.dead && y.dead[0] && y.dead[0].at) || '';
+          if (dx !== dy) return dx < dy ? 1 : -1;
+          return 0;
+        });
         return mtRespond({ accs: accs }, 'one');
       }
-      // ---- 清单模式：全部失效相关号 + 每号最新一条 relogin2 每日提醒 ----
+      // ---- 清单模式：时间窗口内的已删号（主体）+ 在池待复核号（兼容保留）----
+      // 2026-11-20 修复：11-18 起失效号立即删号，relogin_at/suspect_at 零写入（现网全库
+      // 0 行），旧清单（只读 accounts）永远空转。改为以 dead_log 窗口内删号为主体，
+      // 每号带删号时间/原因 + dead_notice 删号通知状态 + 窗口内邮件 kinds；
+      // accounts 里 suspect_at 非空的号兼容保留（口径再变时有兜底）。
+      // dead_log 已实锤覆盖全部有邮件记录的已删号（11-20 镜像：mail_queue 里 86 个
+      // 已删号 100% 在 dead_log），无需再并 mail_queue 反查。
+      const dlRows = await d1All('SELECT pool,uid,name,reason,at FROM dead_log WHERE at>=? ORDER BY at DESC LIMIT 500', [mqCutM]);
+      if (dlRows === null) return json({ message: hintM() }, 503, CORS);
       const relRows = await d1All("SELECT pool,uid,name,email,agent,plan,exp,added,pub,relogin_at,suspect_at FROM accounts " +
         "WHERE (relogin_at IS NOT NULL AND relogin_at<>'') OR (suspect_at IS NOT NULL AND suspect_at<>'') " +
         'ORDER BY CASE WHEN relogin_at<>\'\' THEN relogin_at ELSE suspect_at END DESC LIMIT 200', []);
@@ -9115,27 +9157,40 @@ async function handle(request) {
       const rel2 = await d1All("SELECT pool,uid,state,ref,created_at,claimed_at,sent_at,skip_reason FROM mail_queue " +
         "WHERE kind='relogin2' ORDER BY created_at DESC LIMIT 1500", []);
       if (rel2 === null) return json({ message: hintM() }, 503, CORS);
-      const noticeRows2 = await d1All('SELECT pool,uid,state,kind,removed_at,sent_at,skip_reason FROM dead_notice LIMIT 1500', []);
+      const noticeRows2 = await d1All('SELECT pool,uid,name,email,state,kind,removed_at,sent_at,skip_reason FROM dead_notice LIMIT 1500', []);
       if (noticeRows2 === null) return json({ message: hintM() }, 503, CORS);
       // 2026-11-18 四期：清单模式也支持类型筛选 —— 每号带「窗口内出现过的全部邮件 kind」，
       // 一趟 DISTINCT 小扫（mail_queue 全表现网 ~4000 行）即可，客户端本机过滤不耗配额。
       const kindRows2 = await d1All('SELECT DISTINCT pool,uid,kind FROM mail_queue WHERE created_at>=? LIMIT 3000', [mqCutM]);
       if (kindRows2 === null) return json({ message: hintM() }, 503, CORS);
-      const rel2Map = {}, noticeMap = {}, kindMap2 = {};
+      const rel2Map = {}, noticeMap = {}, kindMap2 = {}, dlMap = {};
       for (const m of rel2) { const k = histKey(m.pool, m.uid); if (!rel2Map[k]) rel2Map[k] = m; }
       for (const n of noticeRows2) { const k = histKey(n.pool, n.uid); if (!noticeMap[k]) noticeMap[k] = n; }
       for (const kk of kindRows2) { const k = histKey(kk.pool, kk.uid); (kindMap2[k] = kindMap2[k] || []).push(nrmM(kk.kind)); }
-      const rows = relRows.map(a => {
+      for (const d of dlRows) { const k = histKey(d.pool, d.uid); if (!dlMap[k]) dlMap[k] = d; }
+      const mkRow = a => {
         const k = histKey(a.pool, a.uid);
-        const m = rel2Map[k] || null, n = noticeMap[k] || null;
-        return { pool: nrmM(a.pool), uid: nrmM(a.uid), name: nrmM(a.name), email: nrmM(a.email),
+        const m = rel2Map[k] || null, n = noticeMap[k] || null, d = dlMap[k] || null;
+        return { pool: nrmM(a.pool), uid: nrmM(a.uid), name: nrmM(a.name),
+          email: nrmM(a.email) || (n ? nrmM(n.email) : ''),
           agent: nrmM(a.agent), exp: nrmM(a.exp), added: nrmM(a.added), pub: Number(a.pub) || 0,
           relogin_at: nrmM(a.relogin_at), suspect_at: nrmM(a.suspect_at),
           rel2: m ? { state: nrmM(m.state), created_at: nrmM(m.created_at), sent_at: nrmM(m.sent_at), skip_reason: nrmM(m.skip_reason) } : null,
           notice: n ? { state: nrmM(n.state), kind: nrmM(n.kind), removed_at: nrmM(n.removed_at), sent_at: nrmM(n.sent_at) } : null,
+          dead: d ? { reason: nrmM(d.reason), at: nrmM(d.at) } : null,
           kinds: kindMap2[k] || [] };
-      });
-      return mtRespond({ rows: rows }, 'list');
+      };
+      // 已删号优先（dead_log 按 at DESC），在池待复核号排后；键重复时以先入者为准
+      const rows = [];
+      const rowSeen = new Set();
+      for (const a of dlRows) { const k = histKey(a.pool, a.uid); rowSeen.add(k); rows.push(mkRow(a)); }
+      for (const a of relRows) {
+        const k = histKey(a.pool, a.uid);
+        if (rowSeen.has(k)) continue;
+        rowSeen.add(k);
+        rows.push(mkRow(a));
+      }
+      return mtRespond({ rows: rows, trunc: dlRows.length >= 500 }, 'list');
     }
     /* ---- 2026-11-17 二期：邮件补发 /api/console/mailresend（满权限，写 mail_queue）----
        场景：①某封提醒邮件没发出去（dropped/skipped）或号主说没收到 —— 重发已有队列记录；
@@ -11342,7 +11397,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
 <!-- ===== 2026-11-17：失效号邮件提醒查询（实时读 D1，满权限专属） ===== -->
 <div class="modal" id="mtModal" hidden><div class="mbox" style="width:1040px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
   <h3>失效号邮件提醒查询（实时 + 缓存）</h3>
-  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），默认返回近 <b>30 天</b>全部类型邮件（切大时间范围才多读，省配额），类型筛选在本机过滤不耗配额；每封队列邮件后有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」。<br><b>失效号清单</b>：列出全部「已通知重登」+「待复核」的号，每行可点「邮件」直达该号明细。<br><b>异常检查</b>：按 2026-11-18 拍板口径「今天播了明天就得有播放量」，列三类异常 —— 播放无效（生效数=0）/ 播放量停滞（近30日播放持平）/ 缺采（当天没采到且无标记）。</p>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），默认返回近 <b>30 天</b>全部类型邮件（切大时间范围才多读，省配额），类型筛选在本机过滤不耗配额；每封队列邮件后有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」。<br><b>失效号清单</b>：列出时间范围内<b>删掉的号</b>（每行带删号时间/原因、删号通知发没发/什么时候发的）+ 在池待复核的号（11-18 起失效号立即删号，清单以已删号为主体），每行可点「邮件」直达该号明细。<br><b>异常检查</b>：按 2026-11-18 拍板口径「今天播了明天就得有播放量」，列三类异常 —— 播放无效（生效数=0）/ 播放量停滞（近30日播放持平）/ 缺采（当天没采到且无标记）。</p>
   <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
     <div style="flex:1;min-width:220px"><label style="margin-top:0">搜索（UID / 手机号片段，可留空）</label><input id="mtQ" placeholder="如 13077105665" style="width:100%"></div>
     <button class="mini" id="mtGo" style="margin-top:0;padding:9px 14px">查单号</button>
@@ -13174,9 +13229,10 @@ function mtRenderOne(o){
       +'（'+(a.pool==='hz'?'主群':'定制')+' · uid '+esc(a.uid)+' · '+(Number(a.pub)===1?'公益':'套餐 '+esc(a.plan||'—')+' · 到期 '+esc(a.exp||'—')+'）')
       +' · 邮箱 '+esc(a.email||'（未留）')+'</div>'
       +'<p style="margin:4px 0 8px;font-size:12.5px">'
-      +'重登邮件：<b>'+(a.relogin_at?'<span class="good">已发出 '+mtTime(a.relogin_at)+'</span>':'<span class="muted">从未发出</span>')+'</b>'
+      +((a.dead&&a.dead.length)?'':('重登邮件：<b>'+(a.relogin_at?'<span class="good">已发出 '+mtTime(a.relogin_at)+'</span>':'<span class="muted">从未发出</span>')+'</b>'
       +(a.relogin_at?'':' <button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="relogin2" data-ref="" style="padding:2px 10px;font-size:11px" title="这个号还没发过重登邮件，手动补一封每日重登提醒（走原发信链路，约 30 分钟内发出）">补发重登提醒</button>')
-      +' ｜ 待复核标记：'+(a.suspect_at?esc(String(a.suspect_at).slice(5,16)):'无')
+      +' ｜ '))
+      +'待复核标记：'+(a.suspect_at?esc(String(a.suspect_at).slice(5,16)):'无')
       +(a.dead&&a.dead.length?(' ｜ 删号流水：<b style="color:#a32d2d">'+esc(String(a.dead[0].reason||''))+' '+mtTime(a.dead[0].at)+'</b>'):'')
       +'</p>';
     // 2026-11-17 二期：类型/时间筛选（本机过滤，不耗 D1 配额）—— 服务端一次拉回近 200 条
@@ -13245,27 +13301,31 @@ function mtRenderList(d){
       return false;
     });
   }
-  if(!rs.length)return '<p style="color:#888">'+(selK?'当前筛选条件下没有匹配的号（'+totalAll+' 个失效相关号里没有窗口内发过该类型邮件的）——把类型/时间范围放宽一点试试。':'当前没有任何「已通知重登」或「待复核」的号 —— 失效邮件体系空转中。')+'</p>';
+  if(!rs.length)return '<p style="color:#888">'+(selK?'当前筛选条件下没有匹配的号（'+totalAll+' 个失效相关号里没有窗口内发过该类型邮件的）——把类型/时间范围放宽一点试试。':'时间窗口内没有已删号、也没有待复核的号 —— 失效邮件体系空转中（可把时间范围切大一点试试）。')+'</p>';
   var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;position:sticky;top:0;border-bottom:1px solid #e6e8ec;text-align:left';
   var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
   var h='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px"><thead><tr>'
     +'<th style="'+TH+'">群</th><th style="'+TH+'">账号</th><th style="'+TH+'">UID</th><th style="'+TH+'">邮箱</th>'
-    +'<th style="'+TH+'" title="重登邮件已发时间（run.py 直邮成功后写入 relogin_at）">重登邮件</th>'
+    +'<th style="'+TH+'" title="删号时间与原因（dead_log 流水；11-18 起失效号立即删号，清单以已删号为主体）">删号</th>'
     +'<th style="'+TH+'" title="每天一封的 relogin2 提醒，取最新一条">每日提醒</th>'
-    +'<th style="'+TH+'" title="手动删号通知状态">删号通知</th><th style="'+TH+'">待复核</th><th style="'+TH+'">到期</th><th style="'+TH+'">邮件</th></tr></thead><tbody>';
+    +'<th style="'+TH+'" title="删号通知状态（dead_notice；直邮链路的删号无回执，显示 —）">删号通知</th><th style="'+TH+'">待复核</th><th style="'+TH+'">到期</th><th style="'+TH+'">邮件</th></tr></thead><tbody>';
   for(var i=0;i<rs.length;i++){var r=rs[i];
-    var rel2=r.rel2,nt=r.notice;
+    var rel2=r.rel2,nt=r.notice,dd=r.dead;
     var rel2Txt='—';
     if(rel2){
       rel2Txt=mtMailState(rel2.state)+(rel2.sent_at?(' '+mtTime(rel2.sent_at)):(rel2.created_at?(' 入队 '+mtTime(rel2.created_at)):''))
         +(rel2.skip_reason?(' <span class="muted">'+esc(rel2.skip_reason)+'</span>'):'');
+    }
+    var ddTxt='—';
+    if(dd){
+      ddTxt='<b style="color:#a32d2d">'+mtTime(dd.at)+'</b> <span class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:bottom" title="'+esc(dd.reason||'')+'">'+esc(dd.reason||'')+'</span>';
     }
     h+='<tr'+(i%2?' style="background:#fafbfc"':'')+'>'
       +'<td style="'+TD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
       +'<td style="'+TD+'">'+esc(String(r.name||'—').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</td>'
       +'<td style="'+TD+'" class="num">'+esc(r.uid)+'</td>'
       +'<td style="'+TD+';max-width:150px;overflow:hidden;text-overflow:ellipsis">'+esc(r.email||'（未留）')+'</td>'
-      +'<td style="'+TD+'">'+(r.relogin_at?'<span class="good">'+mtTime(r.relogin_at)+'</span>':'<span class="muted">未发</span>')+'</td>'
+      +'<td style="'+TD+'">'+ddTxt+'</td>'
       +'<td style="'+TD+'">'+rel2Txt+'</td>'
       +'<td style="'+TD+'">'+(nt?(mtMailState(nt.state)+(nt.sent_at?(' '+mtTime(nt.sent_at)):'')):'—')+'</td>'
       +'<td style="'+TD+'">'+(r.suspect_at?esc(String(r.suspect_at).slice(5,16)):'—')+'</td>'
@@ -13273,7 +13333,10 @@ function mtRenderList(d){
       +'<td style="'+TD+'"><button class="mini" data-act="mtopen" data-uid="'+esc(r.uid)+'" style="padding:2px 10px;font-size:11px" title="跳到这个号的邮件明细（类型筛选/补发都在那里）">邮件</button></td>'
     +'</tr>';
   }
-  h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">'+(selK?('筛选后 '+rs.length+' / 共 '+totalAll+' 个失效相关号（类型筛选只在本机过滤已拉回的数据，切换不耗配额）。'):'共 '+rs.length+' 个失效相关号（已通知重登 + 待复核）。')+'每日提醒=最新一封 relogin2 邮件；「未发」重登邮件的号说明判死邮件链路没走到它（还没被采集判死）。</p>';
+  h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">'
+    +(selK?('筛选后 '+rs.length+' / 共 '+totalAll+' 个失效相关号（类型筛选只在本机过滤已拉回的数据，切换不耗配额）。'):('共 '+rs.length+' 个失效相关号（时间窗口内已删号 + 在池待复核）。'))
+    +(d.trunc?'<b style="color:#a32d2d">已删号超过 500 条，只显示最近的 500 条 —— 想看更早的请缩小时间范围。</b>':'')
+    +'每日提醒=最新一封 relogin2 邮件；删号通知一列显示 — 的号走的是系统判死直邮链路（无 dead_notice 回执），发送结果看该号「邮件」明细。</p>';
   return h;
 }
 var MT_LAST=null;   // 最近一次查询结果（含 mode），筛选切换/补发后在本机重渲染，不重复读库
