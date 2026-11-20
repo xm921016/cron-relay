@@ -1567,6 +1567,19 @@ async function dupSongAlert(songId, uid, name) {
   } catch (e) { console.error(TAG + ' 告警异常:', e && e.message); }
 }
 
+// 2026-11-20：同一首歌池内唯一（用户口径，替代 11-16 的「只告警不拦」）。
+// 登记/改歌前调用：本号新绑的歌已被池内其他号绑了 → 返回那条重复记录，调用方据此拦截。
+// 豁免口径由调用方负责：本号原本就绑这首歌（续费/补登原样重新登记）不算新绑定，
+// ckswap 不涉及歌；arr 为空/异常时返回 null（读失败不误拦，铁律 3：不把读失败当有重复）。
+function dupSongFind(arr, songId, uid) {
+  try {
+    if (!songId || !Array.isArray(arr) || !arr.length) return null;
+    const u = String(uid || '');
+    return arr.find(e => e && String(e.song || '') === String(songId)
+      && String(e.uid || '') !== u) || null;
+  } catch (e) { return null; }
+}
+
 // ---- GitHub Secrets（sealed box） ----
 // GH_TOKEN / GROUP_PASS 存于 KV（加密、不落仓库、不暴露给前端），运行时从 POOL 读取。
 // 这样无需 Cloudflare Secret 权限即可配置，且 GitHub PAT 也不会进公开仓库文件。
@@ -6025,6 +6038,24 @@ async function handle(request) {
       if (!_alreadyIn2 && activePoolSize(_m2) >= myLimit) {
         return json({ message: '本群名额已满（上限 ' + myLimit + ' 人），暂停登记。已有账号的互听和签到不受影响，请稍后再试或联系群主。' }, 429);
       }
+      /* 2026-11-20：同一首歌池内唯一（用户口径，替代 11-16 的「只告警不拦」）。
+         新绑定（新号登记 / 换绑新歌 / 补登重进）撞上池内其他号已绑的歌 → 拦下，
+         让号主换一首名下其他作品。豁免：本号原本就绑这首歌（续费/续期原样重登记，
+         不是新绑定，比如 11-20 邮件里那对存量重复号续费不能被卡死）；换绑登录
+         （ckswap）不涉及歌。mergePool 读失败返回空数组时不误拦。 */
+      if (_mkPre !== 'ckswap' && song.song) {
+        const _selfE2 = _m2.find(e => e && String(e.uid || '') === _u2);
+        const _keepSame2 = _selfE2 && String(_selfE2.song || '') === String(song.song);
+        if (!_keepSame2) {
+          const _dupE2 = dupSongFind(_m2, song.song, v.uid);
+          if (_dupE2) {
+            return json({ ok: false, message: '这首歌《' + (song.name || '') + '》群里已经有别的账号绑定了'
+              + '（同一首歌在一个群只能绑一个号）：' + String(_dupE2.name || _dupE2.uid || '')
+              + '（uid ' + String(_dupE2.uid || '') + '）。请换号主名下的另一首上架作品，'
+              + '重新复制链接提交；不确定用哪首请联系客服。' }, 400);
+          }
+        }
+      }
       // 2026-10-27：客服 + 套餐（口径同 /api/join）
       const rc2 = await regCfg();
       const pl2 = planOf(rc2, body.plan);
@@ -6614,6 +6645,22 @@ async function handle(request) {
       const _alreadyIn = master1.some(e => e && (String(e.uid) === _u0 || (phone && String(e.name || '') === phone)));
       if (!_alreadyIn && activePoolSize(master1) >= myLimit) {
         return json({ ok: false, message: '号池名额已满（上限 ' + myLimit + ' 人），请联系客服，不要重复提交' }, 429);
+      }
+      /* 2026-11-20：同一首歌池内唯一（用户口径，替代 11-16 的「只告警不拦」）。
+         与 join_manual 同口径：本号原本就绑这首歌（续费原样）放行，其他号已绑 →
+         在消耗链接 token 之前拦下，链接没被用掉、买家换一首歌可以直接重扫。 */
+      {
+        const _selfE0 = master1.find(e => e && String(e.uid || '') === _u0);
+        const _keepSame0 = _selfE0 && String(_selfE0.song || '') === String(song.song);
+        if (!_keepSame0) {
+          const _dupE0 = dupSongFind(master1, song.song, v.uid);
+          if (_dupE0) {
+            return json({ ok: false, message: '这首歌《' + (song.name || '') + '》群里已经有别的账号绑定了'
+              + '（同一首歌在一个群只能绑一个号）：' + String(_dupE0.name || _dupE0.uid || '')
+              + '（uid ' + String(_dupE0.uid || '') + '）。请换号主名下的另一首上架作品，'
+              + '重新复制链接提交；不确定用哪首请联系客服。' }, 400);
+          }
+        }
       }
 
       /* 2026-11-10 晚 P0（与 /api/regtoken_new 同一根因）：这条链接生成时如果套餐没解析
@@ -10539,6 +10586,17 @@ async function applyEntryEdit(body) {
          userdetail 接口失败放行，不挡控制台主流程。 */
       const mgUpd = await regMusicianGuard(String(target.uid || ''), song.name, song.arts);
       if (!mgUpd.ok) return json({ message: mgUpd.msg }, 400, CORS);
+      /* 2026-11-20：同一首歌池内唯一（用户口径）——控制台改歌同样拦截。
+         只拦「真的换成了另一首已被绑的歌」：填的还是本号当前这首歌不算新绑定
+         （存量重复号的号改别的字段不受影响）。 */
+      if (String(song.song) !== String(target.song || '')) {
+        const _dupE3 = dupSongFind(master, song.song, target.uid);
+        if (_dupE3) {
+          return json({ message: '这首歌（' + (song.name || ('song ' + song.song)) + '）池内已有其他账号绑定：'
+            + String(_dupE3.name || _dupE3.uid || '') + '（uid ' + String(_dupE3.uid || '') + '）。'
+            + '同一首歌在一个群只能绑一个号，请换一首该号主名下的其他作品。' }, 400, CORS);
+        }
+      }
       target.song = song.song;
       changes.push('歌曲');
     }
