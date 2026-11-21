@@ -11234,7 +11234,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
   .twrap td:nth-child(13){grid-column:4/5;grid-row:2;border-right:1px solid #e4e9f0}
   .twrap td:nth-child(14){grid-column:5/7;grid-row:2;border-radius:0 9px 9px 0}
   .twrap td:nth-child(10)::before,.twrap td:nth-child(11)::before,.twrap td:nth-child(12)::before,.twrap td:nth-child(13)::before,.twrap td:nth-child(14)::before{font-size:8.5px;font-weight:400;margin-right:0;white-space:nowrap}
-  /* 19:05 简化：近30日播放→近30日；笔记任务→笔记，值只留 4/4（misName 文字用 font-size:0 藏掉） */
+  /* 19:05 简化：近30日播放→近30日；笔记任务→笔记。2026-11-21 起列里只渲染分数（1/4），旧 font-size:0 规则保留兜底 */
   .twrap td:nth-child(13)::before{content:'近30日 '}
   .twrap td:nth-child(14)::before{content:'笔记 '}
   .twrap td:nth-child(14) .mtag{font-size:0}
@@ -11935,14 +11935,15 @@ var MIS_NAME={mission_code_musician_notebook_publish:'发布笔记'};  // 网易
 // 计数型任务在这里登记目标值，页面渲染成 x/4；没登记的目标值仍按百分比显示（保持旧行为）。
 var MIS_TOTAL={mission_code_musician_notebook_publish:4};   // 网易任务目标值（条/天，非百分比）
 function misName(k){if(MIS_NAME[k])return MIS_NAME[k];return String(k).replace(/^mission_code_/,'').replace(/_v\\d+$/,'').replace(/_/g,' ');}
-// 「笔记任务」列：650 主任务已在进度列显示，这里只列其余小任务（当前就是发布笔记）并译成中文；没有就显示 —
+// 「笔记任务」列：650 主任务已在进度列显示，这里只列其余小任务；没有就显示 —
+// 2026-11-21（用户要求）：不再写「笔记任务」文字，直接显示 1/4 这样的值；任务名挪到悬停 title 上。
 function otherMis(a){
   if(!a||!a.mis)return '<span class="flat">—</span>';
   var h='';
   Object.keys(a.mis).forEach(function(k){
     if(k===MAIN_MISSION)return;
     var v=a.mis[k],t=MIS_TOTAL[k];
-    h+='<span class="mtag">'+esc(misName(k))+' <i>'+(t?v+'/'+t:v+'%')+'</i></span>';
+    h+='<span class="mtag" title="'+esc(misName(k))+'"><i>'+(t?v+'/'+t:v+'%')+'</i></span>';
   });
   return h||'<span class="flat">—</span>';
 }
