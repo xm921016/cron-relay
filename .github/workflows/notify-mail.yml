@@ -56,6 +56,9 @@ jobs:
       # 2026-11-12：第七发信通道（七通道轮发 ≈ 3500 封/日余量）
       EMAIL_FROM7: ${{ secrets.EMAIL_FROM7 }}
       EMAIL_AUTH_CODE7: ${{ secrets.EMAIL_AUTH_CODE7 }}
+      # 2026-11-21：第八发信通道（八通道轮发 ≈ 4000 封/日余量）
+      EMAIL_FROM8: ${{ secrets.EMAIL_FROM8 }}
+      EMAIL_AUTH_CODE8: ${{ secrets.EMAIL_AUTH_CODE8 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
