@@ -59,6 +59,17 @@ def bj_str(s):
     return d.strftime("%m-%d %H:%M") if d else "?"
 
 
+def runs_recent(db, pool, uid, days=14):
+    """近 N 天实跑名单（runs 表：relay 真跑完才写入，每天每号一条）。
+    旧镜像没导 runs 表时返回 None（调用方静默跳过，不误报）。"""
+    try:
+        return list(db.execute(
+            "SELECT day, slice, at FROM runs WHERE pool=? AND uid=? AND day>=? ORDER BY day",
+            (pool, uid, (datetime.now(BJ) - timedelta(days=days)).strftime("%Y-%m-%d"))))
+    except sqlite3.OperationalError:
+        return None
+
+
 def tf(v):
     """布尔值 → 中英双语（网页和文本报告共用）。"""
     return {True: "是(True)", False: "否(False)"}.get(v, str(v))
@@ -125,7 +136,8 @@ def ensure_mirror(refresh=False):
             r = subprocess.run(
                 [sys.executable, os.path.join(PROJ, "tmp", "d1_mirror.py"),
                  "--table", "accounts", "--table", "snapshots", "--table", "ledger",
-                 "--table", "dead_log", "--table", "dead_notice", "--table", "mail_queue"],
+                 "--table", "dead_log", "--table", "dead_notice", "--table", "mail_queue",
+                 "--table", "runs", "--table", "durs"],
                 capture_output=True, text=True, encoding="locale", errors="replace",
                 cwd=PROJ, timeout=300)
             if r.returncode == 0:
@@ -218,7 +230,7 @@ def dead_history(db, key, say):
 
     # 快照走势（删号前的最后数据；用户可能输手机号，快照要靠 dead_log 回捞出的 uid 来查）
     uids = sorted({str(r["uid"]) for r in deads + notices if r["uid"]})
-    q = "SELECT day,rate,rpc30,at FROM snapshots WHERE name=?"
+    q = "SELECT day,rate,rpc30,at,pool,uid FROM snapshots WHERE name=?"
     args = [key]
     if uids:
         q += " OR uid IN (%s)" % ",".join("?" * len(uids))
@@ -233,6 +245,17 @@ def dead_history(db, key, say):
                 note = "  ←已做满100%"
             say(f"    {r['day']}  650进度(rate)={r['rate']}%  近30日播放(rpc30)={r['rpc30']}  "
                 f"快照时刻={bj_str(r['at'])}{note}")
+        # 实跑记录（删号前 relay 有没有真派到它）
+        _pool = sn[0]["pool"] if sn else None
+        _uid = sn[0]["uid"] if sn else None
+        if _pool and _uid:
+            rr = runs_recent(db, _pool, _uid)
+            if rr is not None:
+                if rr:
+                    say(f"    实跑记录（近 14 天，runs 表）：{'、'.join(r['day'][5:] + '✓' for r in rr)}"
+                        f"（共 {len(rr)} 天真跑过）")
+                else:
+                    say("    ⚠ 近 14 天没有任何实跑记录（runs 表零行）——删号前 relay 一直没派到这个号。")
     return found
 
 
@@ -680,6 +703,19 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
                 say(f"    {r['day']:<12}{str(r['rate']):>8}%{str(r['rpc30']):>12}   {bj_str(r['at'])}{note}")
         else:
             say("    （14 天内无任何快照——新号或一直没跑）")
+        # 实跑记录（runs 表：relay 真派到这个号、跑完了才写入，每天每号一条）
+        rr = runs_recent(db, pool, uid)
+        if rr is not None:
+            if rr:
+                say("    近 14 天实跑记录（runs 表，真跑了才有行）：")
+                for r in rr:
+                    say(f"      {r['day']}  ✓ 片(slice)={r['slice'] or '-'}  跑完入账时刻={bj_str(r['at'])}（北京）")
+                missed = sorted({r["day"] for r in rows} - {r["day"] for r in rr})
+                if missed:
+                    say(f"      ⚠ 快照有但没实跑的日期：{'、'.join(missed)}（当天 relay 没派到这个号）")
+            else:
+                say("    ⚠ 近 14 天没有任何实跑记录（runs 表零行）——relay 一直没派到这个号，"
+                    "播放量不可能涨，先查派片/灰度名单，别往网易侧怀疑。")
         a, p, marks = compute_marks(db, pool, uid, today_day, yest_day, hist)
         rpcD = (a["rpc30"] - p["rpc30"]) if (a and p and a["rpc30"] is not None and p["rpc30"] is not None) else None
 
