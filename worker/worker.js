@@ -9074,9 +9074,10 @@ async function handle(request) {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let bodyH;
       try { bodyH = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
-      if (!(await consoleAuthFull(bodyH))) {
-        const whoH = await consoleRole(bodyH);
-        return json({ message: whoH === 'ro' ? '当前是只读口令：历史登记查询只对群主开放' : '账号或密码错误' }, 403, CORS);
+      /* 2026-11-21：历史登记查询对只读开放（consoleAuthFull→consoleAuth）。
+         纯读：固定扫四张小表（台账/删号流水/在池），不写任何数据。 */
+      if (!(await consoleAuth(bodyH))) {
+        return json({ message: '账号或密码错误' }, 403, CORS);
       }
       const qH = String(bodyH.q == null ? '' : bodyH.q).trim().replace(/[^0-9A-Za-z_:@.\-]/g, '');
       if (qH.length < 3) return json({ message: '请输至少 3 位（UID / 手机号 / 账号名片段）' }, 400, CORS);
@@ -9638,9 +9639,10 @@ async function handle(request) {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let bodyR;
       try { bodyR = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
-      if (!(await consoleAuthFull(bodyR))) {
-        const whoR = await consoleRole(bodyR);
-        return json({ message: whoR === 'ro' ? '当前是只读口令：待挽回清单只对群主开放' : '账号或密码错误' }, 403, CORS);
+      /* 2026-11-21：待挽回清单对只读开放（consoleAuthFull→consoleAuth）。
+         纯读统计；「历史登记」弹窗打开时默认先拉这份清单，必须与 history 同步放宽。 */
+      if (!(await consoleAuth(bodyR))) {
+        return json({ message: '账号或密码错误' }, 403, CORS);
       }
       const daysR = Math.min(90, Math.max(7, Number(bodyR.days) || 30));
       const TR = await histTables();
@@ -11355,7 +11357,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini gray" id="btnCfg" style="display:none" data-page-node-id="fyixyeXAj1IGBnB0XxPYrp">客服名单</button>
     <button class="mini gray" id="btnDev" style="display:none" title="按客服电脑授权：未授权的机器码不能生成登记链接" data-page-node-id="YJHiOvMyZyJGL0BLRrRV4p">设备授权</button>
     <button class="mini gray" id="btnReg" style="display:none" title="生成买家自助登记链接；续费/补登必须选原单，类型定在链接上" data-page-node-id="JqzT5fuKCyCteGDQJKQloy">登记链接</button>
-    <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限可见）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
+    <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限/只读都可看，纯读不改数据）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
     <button class="mini gray" id="btnMailTrace" style="display:none" title="失效号邮件提醒查询（满权限可见，实时读 D1）：查某个失效号的重登邮件/删号通知/每日提醒到底发没发、什么时候发的；也可一键列出全部失效号的邮件状态">邮件提醒</button>
     <button class="mini gray" id="btnOut" data-page-node-id="JfDeJt5vbASdRoOMC7tVaS">退出</button>
   </div>
@@ -11779,7 +11781,8 @@ function applyRole(role){
   var brg=$('btnReg');if(brg)brg.style.display=full?'':'none';
   // 2026-11-05：结算涉及金额，只有满权限能看到入口（服务端也拦）
   var bl=$('btnLedger');if(bl)bl.style.display=full?'':'none';
-  var brs=$('btnRescue');if(brs)brs.style.display=full?'':'none';
+  // 2026-11-21：历史登记查询 + 待挽回清单对只读开放（服务端两个读接口已放宽到 consoleAuth）
+  var brs=$('btnRescue');if(brs)brs.style.display='';
   // 2026-11-17：邮件提醒查询（涉及买家邮箱，满权限专属，服务端同拦）
   var bmt=$('btnMailTrace');if(bmt)bmt.style.display=full?'':'none';
   var t=$('ptitle');
@@ -13242,7 +13245,7 @@ $('btnLedger').onclick=function(){
   lgLoad();
 };
 
-// ===== 2026-11-15：历史登记查询 + 待挽回清单（只读，服务端与月度结算同一套满权限口令）=====
+// ===== 2026-11-15：历史登记查询 + 待挽回清单（2026-11-21 起只读也可看，服务端两接口已放宽）=====
 // 状态标记口径（用户要求特殊记录单独标记）：
 //   在池(绿) / 公益·到期未续(黄) / 已通知重登(黄) / CK失效·已删(灰) / 手动删·退单(红) / 无流水(灰)
 function rcStateBadge(r){
