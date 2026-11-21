@@ -10423,6 +10423,72 @@ async function dispatchMailQueue() {
   return rec;
 }
 
+/* ===== 2026-11-22：登记三件套对账兜底（regReconcile，用户 2026-11-22 拍板加）=====
+   背景：2026-11-21 15:33 一单新登记（uid 3354738090）请求在写完号池后被中途截断，
+   台账与登记邮件双双静默丢失——这两步设计上「失败只记日志、绝不阻断登记」，没有重试，
+   事后只能人工补。本对账每小时随邮件 cron 跑一次（先于 dispatchMailQueue，让本轮
+   补排的邮件当班就发出去，不用再等一小时）：
+     · 取近 48h 用掉且 kind='new' 的登记链接（reg_tokens 全表仅数百行，全扫可忽略）；
+     · 缺登记邮件（mail_queue 无同 ref 的 reg 行）→ 按号上邮箱/客服补排 pending；
+     · 缺台账（ledger 无该 uid 该日行）→ 复用 ledgerAdd 按套餐价补写（src='reg'）；
+   口径与边界：
+     · 只处理 kind='new'——fix/renew 不重发登记邮件是既有去重口径（ref=原登记日
+       撞唯一键被 INSERT OR IGNORE 挡掉），属设计行为，绝不能在对账里"补发"；
+     · ref 用号上 added 的日期部分（与 addEntry 入队口径一致），added 取不到才退
+       used_at 的北京日（跨午夜登记的极端边界）；
+     · 幂等：先查后写 + INSERT OR IGNORE / 唯一键，重复跑不会重复入账/发信；
+     · 铁律 3：任何 D1 读失败（null）直接放弃本轮，绝不把「读失败」当「缺失」；
+     · 对账结果存 KV cron:reg_recon:last（1 周过期），只在有动作/有错时写。 */
+async function regReconcile() {
+  if (!d1ok()) return { skip: 'no-d1' };
+  const out = { checked: 0, mailBack: 0, ledBack: 0, err: '' };
+  try {
+    const toks = await d1All("SELECT uid,uname,phone,agent,plan,used_at,kind FROM reg_tokens " +
+      "WHERE state='used' AND kind='new' AND used_at>=?",
+      [new Date(Date.now() - 48 * 3600 * 1000).toISOString().replace('T', 'T')]);
+    if (toks === null) { out.err = '读 reg_tokens 失败（' + (_d1LastErr || 'D1 异常') + '）'; return out; }
+    for (const t of (toks || [])) {
+      out.checked++;
+      const uid = String((t && t.uid) != null ? t.uid : '');
+      if (!uid) continue;
+      /* 号上行是邮件 ref / 台账 day 的唯一事实源（added=登记时刻，北京时区） */
+      const accQ = await d1All("SELECT name,email,agent,plan,exp,added FROM accounts WHERE pool=? AND uid=?", [POOL_NAME, uid]);
+      if (accQ === null) { out.err = '读 accounts 失败（uid ' + uid.slice(0, 6) + '…）'; break; }
+      const acc = (accQ && accQ[0]) || null;
+      const addedStr = acc ? String(acc.added || '') : '';
+      const refDay = (addedStr.slice(0, 10)) || bjDayOf(String(t.used_at || ''));
+      if (!refDay) continue;
+      const nm = String((acc && acc.name) || t.uname || t.phone || '');
+      const ag = String((acc && acc.agent) || t.agent || '');
+      /* ① 登记邮件：唯一键 (pool,uid,'reg',refDay) 查不到才补排 */
+      const mQ = await d1All("SELECT ref FROM mail_queue WHERE pool=? AND uid=? AND kind='reg' AND ref=? LIMIT 1", [POOL_NAME, uid, refDay]);
+      if (mQ === null) { out.err = '读 mail_queue 失败（uid ' + uid.slice(0, 6) + '…）'; break; }
+      if (!(mQ && mQ.length)) {
+        const okM = await mailEnqueue(POOL_NAME, uid, 'reg', refDay,
+          String((acc && acc.email) || ''), nm, ag, String((acc && acc.exp) || ''));
+        if (okM) out.mailBack++;
+      }
+      /* ② 台账：唯一键 (pool,uid,day) 查不到才补写，价格/天数由 ledgerAdd 按 reg_cfg 现算 */
+      const lQ = await d1All("SELECT id FROM ledger WHERE pool=? AND uid=? AND day=? LIMIT 1", [POOL_NAME, uid, refDay]);
+      if (lQ === null) { out.err = '读 ledger 失败（uid ' + uid.slice(0, 6) + '…）'; break; }
+      if (!(lQ && lQ.length)) {
+        const okL = await ledgerAdd({
+          uid: uid, name: nm, agent: ag,
+          plan: String((acc && acc.plan) || t.plan || ''),
+          exp: String((acc && acc.exp) || ''),
+          added: addedStr || (refDay + ' 00:00:00'),
+        }, { src: 'reg', start: addedStr || refDay });
+        if (okL) out.ledBack++;
+      }
+    }
+  } catch (e) { out.err = String((e && e.message) || e).slice(0, 140); }
+  if (out.mailBack || out.ledBack || out.err) {
+    try { await POOL.put('cron:reg_recon:last', JSON.stringify(Object.assign({ at: new Date().toISOString() }, out)), { expirationTtl: 604800 }); } catch (e) { }
+    console.log('[reg-reconcile] ' + JSON.stringify(out));
+  }
+  return out;
+}
+
 async function dispatchDailyBackup(slot) {
   const c = await cfg();
   const rec = { at: new Date().toISOString(), slot: slot, day: bjDate(0), action: '', reason: '', out: [] };
@@ -14235,7 +14301,12 @@ export default {
     }
     // 2026-11-06：邮件队列发令腿（北京每小时 :05/:35），只发令不干别的，跑完即 return。
     if (MAIL_CRONS.indexOf(_cron) >= 0) {
-      ctx.waitUntil(dispatchMailQueue().catch(() => {}));
+      // 2026-11-22：登记三件套对账先跑完再发令 —— 对账补排的 pending 邮件当班就发，
+      // 不用再等下一小时（串行 await，防止 dispatchMailQueue 先数 pend=0 而跳过派发）。
+      ctx.waitUntil((async () => {
+        try { await regReconcile(); } catch (e) { console.error('regReconcile 异常:', (e && e.message) || e); }
+        try { await dispatchMailQueue(); } catch (e) { console.error('dispatchMailQueue 异常:', (e && e.message) || e); }
+      })().catch(() => {}));
       // 2026-11-20：每小时顺带探一次笔记本 bridge 健康（qrkey/qrcheck 真实失败 +
       // 本探针双路喂同一状态机；连续 2 次失败发宕机邮件，恢复发恢复邮件）。
       ctx.waitUntil(bridgeHealthProbe().catch(() => {}));
