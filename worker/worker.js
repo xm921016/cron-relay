@@ -5510,8 +5510,16 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
        所以「保存到相册」一起置灰，和「换一张」保持一致。 */
     try { E('b-save').disabled = true; } catch(e) {}
     /* 2026-11-21：优先显示音乐人名（用户口径：买家登记歌曲认的是音乐人名，账号昵称常
-       与音乐人名无关联容易看错）。artist 为空（非音乐人号/接口偶发失败）回退账号昵称。 */
-    E('who').textContent = '已识别账号：' + (j.artist || j.nick || '网易云账号') + (j.uid ? '（uid ' + j.uid + '）' : '');
+       与音乐人名无关联容易看错）。artist 为空（接口偶发失败）回退账号昵称。
+       noart=1=确认非音乐人（服务端拿到 profile 且 artistId 为空）：绿条变红当场提醒，
+       别让买家白填表单——提交时 regMusicianGuard 本来就会硬拦，这里是提前一步说清。 */
+    var wt = E('who');
+    wt.textContent = '已识别账号：' + (j.artist || j.nick || '网易云账号') + (j.uid ? '（uid ' + j.uid + '）' : '');
+    if (j.noart) {
+      wt.textContent += '。注意：这个账号还没有入驻网易音乐人——普通号的播放不计入任务数据，点「完成登记」也会被拦下。请先用这个账号在网易云 APP 免费入驻音乐人（音乐人中心→入驻），入驻成功后重新扫码登记';
+      wt.style.background = 'rgba(255,44,85,.10)';
+      wt.style.color = 'var(--pri)';
+    }
     /* 2026-11-11：表单改成进页面就全展示（买家扫完就关浏览器，以为登记完了），
        扫码成功只要把「已识别账号」这条绿条补上即可，不用再切 f-box。 */
     show('who', true);
@@ -5646,12 +5654,13 @@ async function ncProfile(mu) {
 /* 2026-11-21：取音乐人名（/r/ 扫码成功绿条显示音乐人名用，用户口径：买家登记歌曲时
    认的是音乐人名，账号昵称常与音乐人名无关联、容易看错）。
    数据源与 regMusicianGuard 完全同源：/api/v1/user/detail/<uid> 公开接口（无需 CK，
-   桌面 Chrome UA），profile.artistId 非空时才回 artistName —— 普通号回空串，
-   前端自动回退显示账号昵称。仅扫码成功（803）时调用一次，任何异常返回空串，
-   不影响登记主流程、不碰扫码链路本身的 UA/Cookie/通道（9e 红线）。 */
+   桌面 Chrome UA）。返回 {ok, aid, aname}：
+     ok=true  profile 拿到了 —— aid 空=确认非音乐人（绿条当场提醒，用户 11-21 口径）；
+     ok=false 接口失败/异常 —— 不提醒不误报，与 regMusicianGuard 放行口径一致。
+   仅扫码成功（803）时调用一次，不拦路；不碰扫码链路本身的 UA/Cookie/通道（9e 红线）。 */
 async function ncArtistName(uid) {
   const u = String(uid || '');
-  if (!u || !/^\d+$/.test(u)) return '';
+  if (!u || !/^\d+$/.test(u)) return { ok: false, aid: '', aname: '' };
   try {
     const MUA2 = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
     const r = await fetch(BASE + '/api/v1/user/detail/' + encodeURIComponent(u), {
@@ -5660,9 +5669,10 @@ async function ncArtistName(uid) {
     });
     const j = await r.json();
     const p = (j && j.profile) || null;
-    if (p && String(p.artistId || '') && p.artistName) return String(p.artistName);
-  } catch (e) { /* 取不到音乐人名不拦路 */ }
-  return '';
+    if (!p) return { ok: false, aid: '', aname: '' };
+    const aid = String(p.artistId || '');
+    return { ok: true, aid: aid, aname: (aid && p.artistName) ? String(p.artistName) : '' };
+  } catch (e) { return { ok: false, aid: '', aname: '' }; }
 }
 /* 回滚 token（抢占后登记失败才用） */
 async function regTokenUndo(code) {
@@ -6521,10 +6531,12 @@ async function handle(request) {
               [await ncReceiptKey(url.searchParams.get('t'), muB),
                JSON.stringify({ loginEgress: 'home_browser', at: Date.now() }), bjStamp()]);
           } catch (e) { console.error('扫码来源证据保存失败'); }
-          /* 2026-11-21：绿条显示音乐人名（artist 为空时前端回退昵称），多查一次公开 user/detail */
+          /* 2026-11-21：绿条显示音乐人名（artist 为空时前端回退昵称）；ok 且 aid 空=确认
+             非音乐人，回 noart=1 让绿条当场提醒（提交时 regMusicianGuard 仍会硬拦兜底） */
           const anB = await ncArtistName(jb.uid);
           return json({ ok: true, code: 803, message: '', bag: '', mu: muB,
-                        uid: jb.uid, nick: jb.nick, artist: anB }, 200, { 'Cache-Control': 'no-store' });
+                        uid: jb.uid, nick: jb.nick, artist: anB.aname,
+                        noart: (anB.ok && !anB.aid) ? 1 : 0 }, 200, { 'Cache-Control': 'no-store' });
         }
         if (jb.code === 200 && (stB === '801' || stB === '802')) {
           return json({ ok: true, code: Number(stB), message: '', bag: '' }, 200, { 'Cache-Control': 'no-store' });
@@ -6547,7 +6559,11 @@ async function handle(request) {
         } catch (e) { console.error('扫码来源证据保存失败'); }
         out.mu = p.musicU;
         const pr = await ncProfile(p.musicU);
-        if (pr) { out.uid = pr.uid; out.nick = pr.nick; out.artist = await ncArtistName(pr.uid); }
+        if (pr) {
+          const an = await ncArtistName(pr.uid);
+          out.uid = pr.uid; out.nick = pr.nick; out.artist = an.aname;
+          if (an.ok && !an.aid) out.noart = 1;
+        }
       } else if (p.code === 803) {
         /* 手机点了「确认登录」但服务端没收到 MUSIC_U：把诊断信息回给页面显示，
            不然页面只能干等（买家看到的就是「什么都没发生」）。 */
