@@ -82,6 +82,14 @@
     "ctrl_pos": 13,
     "missing": [],
     "suspect": false
+   },
+   "2026-11-21": {
+    "exp_sum": 328,
+    "ctrl_sum": 161,
+    "exp_pos": 14,
+    "ctrl_pos": 11,
+    "missing": [],
+    "suspect": false
    }
   },
   "launched": "2026-11-19"
