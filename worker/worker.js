@@ -2993,6 +2993,13 @@ function bjStamp(ms) {
 // 不会出现「删了但不知道通没通知」的空白行。
 async function d1QueueNotice(e, kind) {
   if (!d1ok() || !e) return false;
+  // 2026-11-21：入队时补存客服归属（agent）—— dead_pending 发信时按 reg_cfg 现查群号，
+  // 让「账号信息过期」直邮也能像 mail_queue 那样带「售后群：」行（用户 11-21 反馈邮件无群号）。
+  // 表尚未加列时新 INSERT 会 Unknown column 失败（d1Run 回 false）→ 退化成不带 agent 的老写法。
+  const withAgent = await d1Run('INSERT OR IGNORE INTO dead_notice (pool,uid,name,email,agent,removed_at,state,kind) VALUES (?,?,?,?,?,?,?,?)',
+    [POOL_NAME, String(e.uid != null ? e.uid : ''), String(e.name || ''), String(e.email || '').trim(),
+     String(e.agent || ''), bjStamp(), 'pending', String(kind || '')]);
+  if (withAgent) return true;
   return d1Run('INSERT OR IGNORE INTO dead_notice (pool,uid,name,email,removed_at,state,kind) VALUES (?,?,?,?,?,?,?)',
     [POOL_NAME, String(e.uid != null ? e.uid : ''), String(e.name || ''), String(e.email || '').trim(),
      bjStamp(), 'pending', String(kind || '')]);
@@ -7307,6 +7314,13 @@ async function handle(request) {
       //   没标成的由主群 notify_dead.py 隔 12 小时兜底发（两群共用同一张 D1 表，pool 各自独立）。
       //   12 小时窗口顺带挡掉「删完当天就重登」的误报（判据在 /api/dead_pending 的 skip_returned）。
       let queued = 0;
+      // 2026-11-21：随删号回执下发 name→售后群号（按 reg_cfg 现查：客服群→default_group→''）。
+      // run.py/signin.py 收到回执后直邮「账号过期」邮件时带上，号主能看到该去哪个群。
+      let deadGroups = {};
+      try {
+        const rcfgRep = await regCfg();
+        for (const e of reallyGone) deadGroups[String(e.name || e.uid || '')] = agentGroupOf(rcfgRep, e.agent);
+      } catch (_e) {}
       for (const e of reallyGone) {
         try { if (await d1QueueNotice(e)) queued++; } catch (_e) {}
       }
@@ -7323,7 +7337,7 @@ async function handle(request) {
       const failNote = delFail.length
         ? `；${delFail.length} 个 D1 删除失败（${delFail.map(e => e.name || e.uid).join('、')}）仍留在池内，未发信，下轮会重试`
         : '';
-      return json({ ok: true, deleted: deleted, relogin: reloginNotify,
+      return json({ ok: true, deleted: deleted, groups: deadGroups, relogin: reloginNotify,
         message: `本次确认清理 ${confirmed.length} 个${confirmed.length ? '（' + nm(confirmed) + '）' : ''}`
         + `，实际删除 ${reallyGone.length} 个${failNote}${keepNote}；`
         + `新增疑似 ${suspects.length} 个（需下一轮再次判死才删除${suspects.length ? '：' + nm(suspects) : ''}），`
@@ -7432,13 +7446,16 @@ async function handle(request) {
       // 2026-11-20 体检 P2（铁律 3）：读失败≠读到空。D1 故障时按空列表返回 ok:true 会让
       // runner 静默漏发失效号通知邮件，与「确实无待发」不可分 —— 必须 503 让 Actions 报红。
       const pend = await d1All(
-        'SELECT pool,uid,name,email,removed_at,kind FROM dead_notice WHERE state=? AND removed_at<=? ORDER BY removed_at LIMIT 100',
+        'SELECT pool,uid,name,email,agent,removed_at,kind FROM dead_notice WHERE state=? AND removed_at<=? ORDER BY removed_at LIMIT 100',
         ['pending', cutoff]);
       if (pend === null) return json({ ok: false, message: 'D1 读失败（dead_notice）' }, 503);
       // 2026-11-16：550 类永久退信（买家邮箱注销/写错）每天重试一次会试到永远 ——
       // 改为判死（removed_at）起最多 3 天，超过即标 skip_giveup 停止重试（用户 2026-11-16 定）。
       // 3 天 ≈ 每日兜底跑 3 轮的机会；之后号主邮箱换对了也走控制台手动补发。
       const giveupCutoff = bjStamp(nowMs - 3 * 86400000);
+      // 2026-11-21：发信前按 reg_cfg 现查群号（客服群 → default_group → ''），随 to_send 下发，
+      // notify_dead.py 透传给 relogin 模板 —— 与 mail_queue 口径一致，号主邮件直接带「售后群：」。
+      const rcfg = await regCfg();
       const toSend = [], skipped = [];
       for (const r of pend) {
         if (String(r.removed_at || '') <= giveupCutoff) {
@@ -7466,7 +7483,8 @@ async function handle(request) {
         }
         const em = String(r.email || '').trim();
         if (!em) { skipped.push({ pool: r.pool, uid: uid, name: nm, removed_at: r.removed_at, state: 'skip_noemail', why: '未登记邮箱' }); continue; }
-        toSend.push({ pool: r.pool, uid: uid, name: nm, email: em, removed_at: String(r.removed_at) });
+        toSend.push({ pool: r.pool, uid: uid, name: nm, email: em, removed_at: String(r.removed_at),
+          group: agentGroupOf(rcfg, r.agent) });
       }
       const stamp = bjStamp();
       const isDry = body.dry === true;   // 干跑：只返回名单，不改任何状态（核对用）

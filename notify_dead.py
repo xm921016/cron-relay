@@ -87,7 +87,9 @@ def main():
             who = who[7:] or str(t.get("uid") or "")
         ok = False
         try:
-            ok = notify.notify_relogin(t.get("email"), "", who)
+            # 2026-11-21：dead_pending 现按 reg_cfg 查好群号随名单下发（t["group"]），透传给
+            # relogin 模板补「售后群：」行（用户反馈邮件没群号）。旧 worker 无该字段时降级空串。
+            ok = notify.notify_relogin(t.get("email"), "", who, t.get("group") or "")
         except Exception as e:
             print(f"   [{who}] 发信异常：{e}")
         if ok:

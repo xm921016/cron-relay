@@ -291,7 +291,7 @@ def notify_verify(email, nickname, name, uid=""):
     return ok
 
 
-def notify_relogin(email, nickname, name):
+def notify_relogin(email, nickname, name, group=""):
     """登录凭证过期/掉线，需要重新登记一次。平和陈述，不吓人。
 
     2026-10-23 改版：
@@ -302,6 +302,11 @@ def notify_relogin(email, nickname, name):
       · 删掉「7 天后自动移除」——实际清理是「两次判死才删」，与 7 天无关，写进去会误导。
       · 正文里不再出现任何网址（用户要求）：号主不一定能分清哪个链接是真的，
         直接让他找售后最省事，也避免仿冒站搭便车。JOIN_PAGE 常量保留但已不写进邮件。
+
+    2026-11-21 改版（用户反馈：号主收到的邮件没有群号，不知道「联系售后」去哪联系）：
+      · 补「售后群：」行（group 参数），自动套加红加大样式；沿用 mail_queue 口径：
+        群号由 worker 按 reg_cfg 现查随链路下发（report_dead 回执 / dead_pending 名单），
+        这里绝不写死群号；拿不到群号时降级「联系你的客服获取」。
     """
     if not (email or "").strip():
         return False
@@ -309,13 +314,14 @@ def notify_relogin(email, nickname, name):
     body = (
         f"你好，{_who(nickname, name)}：\n\n"
         "跟你说一声：这个号的登录信息过期了，直接联系售后帮你登记。\n\n"
+        + _group_line(group) + "\n\n"
         "重新登记完，下一次任务会自动恢复正常，不用再做别的。\n\n"
         "——" + SIGN
     )
     return send_user_email(email, subject, body)
 
 
-def notify_relogin2(email, nickname, name):
+def notify_relogin2(email, nickname, name, group=""):
     """网易官方波动口径的重登引导（2026-11-15 新增，kind=relogin2）。
 
     背景：11-15 凌晨 hz 21 号（同日同源簇）会话被整批强制下线。部分买家补登时贴回
@@ -323,6 +329,7 @@ def notify_relogin2(email, nickname, name):
     「网易官方系统波动」，安抚为主（账号本体没事、进度不受影响）。
     正文不出现任何网址（沿用 relogin 的红线）：补登链接由售后单独发，不写进邮件。
     与 relogin 的区别：relogin 只说「信息过期联系售后」，本模板解释原因 + 给两步操作。
+    2026-11-21：同 relogin 补「售后群：」行（group 参数，worker 侧现查下发）。
     """
     if not (email or "").strip():
         return False
@@ -335,6 +342,7 @@ def notify_relogin2(email, nickname, name):
         "1. 打开网易云音乐 App，先退出登录，再用手机号重新登录一次"
         "（这一步是让平台生成新的登录凭证，一定要先退出再登录）；\n"
         "2. 重新登录后，联系售后拿新的补登链接，重新提交登记。\n\n"
+        + _group_line(group) + "\n\n"
         "重新登记完，下一次任务会自动恢复正常，不用再做别的。\n\n"
         "——" + SIGN
     )
@@ -636,7 +644,8 @@ if __name__ == "__main__":
         tpl = sys.argv[2] if len(sys.argv) >= 3 else ""
         if tpl == "relogin":
             aname = sys.argv[3] if len(sys.argv) >= 4 else "你的账号"
-            ok = notify_relogin(to, "", aname)
+            grp = sys.argv[4] if len(sys.argv) >= 5 else ""
+            ok = notify_relogin(to, "", aname, grp)
         elif tpl == "regok":
             aname = sys.argv[3] if len(sys.argv) >= 4 else "你的账号"
             grp = sys.argv[4] if len(sys.argv) >= 5 else ""
