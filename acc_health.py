@@ -18,6 +18,11 @@
   ①标注到【2】快照走势对应日期行尾 ②【8】结论新增「换歌观察期」分支（优先于结算延迟口径）
   ③【3】「连续N天未涨」标记在冷却期内附提示（口径对齐 worker.js mail_scan v3）。
 
+2026-11-20 改造：
+  ①镜像导出失败自动重试 1 次，并把子进程真实报错带出来（以前网页端只显示「镜像导出失败」或英文原始异常）
+  ②新增【8】笔记发布章节：网易任务「30 天内发布图文笔记天数 ≥4」（封顶 4/4），展示近 14 天走势
+  ③【7】邮件口径更新：11-18 已废除「已通知重登」，relogin_at 不再写入，过期号立即删号+直邮
+
 依赖: requests、pycryptodome（系统 Python 3.13.9 已带）。
 注意: 实时复核每次只发 1 条只读 eapi 查询（登录校验+工作台），无写操作。
 """
@@ -29,6 +34,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))          # 项目根
@@ -51,6 +57,22 @@ def bj(s):
 def bj_str(s):
     d = bj(s)
     return d.strftime("%m-%d %H:%M") if d else "?"
+
+
+def tf(v):
+    """布尔值 → 中英双语（网页和文本报告共用）。"""
+    return {True: "是(True)", False: "否(False)"}.get(v, str(v))
+
+
+KIND_CN = {  # mail_queue 邮件类型 → 中英双语说明
+    "reg": "reg(登记成功通知)",
+    "songchange": "songchange(自动换歌)",
+    "songfix": "songfix(共创冻结处置)",
+    "songfix2": "songfix2(独唱冻结处置)",
+    "songfix3": "songfix3(绑错歌/查无此歌处置)",
+    "notify-dead": "notify-dead(删号通知)",
+    "feenote": "feenote(收费口径说明)",
+}
 
 
 def load_runpy():
@@ -76,7 +98,6 @@ def _mirror_ok(dbf):
 
 def ensure_mirror(refresh=False):
     os.makedirs(MIRROR_DIR, exist_ok=True)
-    today = datetime.now(BJ).strftime("%Y%m%d")
     # 只认 d1_mirror_日期_时间.db 严格格式（跳过 d1_mirror_p0p1_xxx 这类部分导出文件）
     dbs = []
     for dbf in glob.glob(os.path.join(MIRROR_DIR, "d1_mirror_*.db")):
@@ -93,16 +114,33 @@ def ensure_mirror(refresh=False):
         if not _mirror_ok(dbf):
             continue
         if not refresh:
-            return dbf, f"复用镜像（{dt:%m-%d %H:%M} 导出，--refresh 可重导）"
-    print("  导出 D1 镜像（/export 通道，不吃读配额）…")
-    r = subprocess.run(
-        [sys.executable, os.path.join(PROJ, "tmp", "d1_mirror.py"),
-         "--table", "accounts", "--table", "snapshots", "--table", "ledger",
-         "--table", "dead_log", "--table", "dead_notice", "--table", "mail_queue"],
-        capture_output=True, text=True, cwd=PROJ, timeout=300)
-    if r.returncode != 0:
-        print(r.stdout[-500:] if r.stdout else "", r.stderr[-500:] if r.stderr else "")
-        raise SystemExit("  镜像导出失败")
+            return dbf, f"复用镜像（{dt:%m-%d %H:%M} 导出，勾选「强制重导」可重导）"
+    # 2026-11-20 改造：失败自动重试 1 次，并把子进程真实报错带出来（以前只给一句
+    # 「镜像导出失败」，网页端看不到任何原因——实际多为瞬时网络/代理问题，重试即好）
+    last_err = ""
+    ok = False
+    for attempt in (1, 2):
+        print(f"  导出 D1 镜像（/export 通道，不吃读配额，第 {attempt}/2 次）…")
+        try:
+            r = subprocess.run(
+                [sys.executable, os.path.join(PROJ, "tmp", "d1_mirror.py"),
+                 "--table", "accounts", "--table", "snapshots", "--table", "ledger",
+                 "--table", "dead_log", "--table", "dead_notice", "--table", "mail_queue"],
+                capture_output=True, text=True, encoding="locale", errors="replace",
+                cwd=PROJ, timeout=300)
+            if r.returncode == 0:
+                ok = True
+                break
+            last_err = ((r.stderr or "") + (r.stdout or "")).strip()[-400:] or "子进程退出码非 0（无输出）"
+        except subprocess.TimeoutExpired:
+            last_err = "导出子进程 300 秒超时（多为网络/代理不通）"
+        if attempt == 1:
+            print(f"  第 1 次导出失败（{last_err[:200]}），10 秒后自动重试…")
+            time.sleep(10)
+    if not ok:
+        print(last_err)
+        raise SystemExit(f"镜像导出失败，原因：{last_err}"
+                         f"（可手动跑 python tmp\\d1_mirror.py 复现看完整报错）")
     # 导完从新到旧找第一个格式正确且表齐全的，绝不再盲取 dbs[-1]
     dbs = []
     for dbf in glob.glob(os.path.join(MIRROR_DIR, "d1_mirror_*.db")):
@@ -113,6 +151,89 @@ def ensure_mirror(refresh=False):
         if _mirror_ok(dbf):
             return dbf, "新导镜像"
     raise SystemExit("  导出完成但找不到表齐全的镜像文件")
+
+
+DEAD_REASON_CN = {
+    "cookie_invalid": "CK 失效（cookie 无效判死）",
+    "expired_pub": "公益号到期清理",
+    "manual": "管理员手动删号",
+}
+
+
+def dead_history(db, key, say):
+    """已删号的全部历史档案（2026-11-21 新增）。
+
+    删号后 accounts 表不再有该号的行（号池列表查不到是设计），但历史表都在：
+    dead_log 删号流水 / dead_notice 直邮记录 / ledger 购买台账 / mail_queue 邮件 /
+    snapshots 快照走势。按手机号或 uid 全表回捞，找到任何一条返回 True。"""
+    found = False
+
+    # 删号流水
+    deads = list(db.execute(
+        "SELECT pool,uid,name,reason,at FROM dead_log WHERE name=? OR uid=? ORDER BY at DESC",
+        (key, key)))
+    if deads:
+        found = True
+        say("\n【D1】删号流水（dead_log，时间为北京时间）：")
+        for r in deads:
+            say(f"    ✂ {r['at']}  {DEAD_REASON_CN.get(r['reason'], r['reason'])}"
+                f"（reason={r['reason']}）  pool={r['pool']}  uid={r['uid']}")
+
+    # 直邮记录
+    notices = list(db.execute(
+        "SELECT pool,uid,email,removed_at,sent_at,state,skip_reason,kind FROM dead_notice "
+        "WHERE name=? OR uid=? ORDER BY removed_at DESC LIMIT 10", (key, key)))
+    if notices:
+        found = True
+        say("\n【D2】删号直邮记录（dead_notice）：")
+        for r in notices:
+            say(f"    ✉ {r['removed_at']} 删号 → 收件邮箱 {r['email']}  "
+                f"状态={r['state']}  发出={r['sent_at'] or '—'}"
+                + (f"（{r['skip_reason']}）" if r['skip_reason'] else ""))
+
+    # 台账
+    led = list(db.execute(
+        "SELECT day,agent,plan,price,days,start,exp,remark FROM ledger "
+        "WHERE name=? OR uid=? ORDER BY day DESC LIMIT 10", (key, key)))
+    if led:
+        found = True
+        say("\n【D3】台账记录（ledger，购买/续费流水）：")
+        for r in led:
+            price = "待补价" if r["price"] is None else f"{r['price']:.0f}元"
+            say(f"    {r['day']}  代理={r['agent'] or '-'}  套餐={r['plan'] or '-'}  {price}  {r['days']}天"
+                f"  起始={r['start'] or '-'}  到期={r['exp'] or '-'}  {r['remark'] or ''}")
+
+    # 邮件队列
+    mails = list(db.execute(
+        "SELECT kind,state,created_at,sent_at,skip_reason FROM mail_queue "
+        "WHERE name=? OR uid=? ORDER BY created_at DESC LIMIT 20", (key, key)))
+    if mails:
+        found = True
+        say("\n【D4】历史邮件（mail_queue）：")
+        for r in mails:
+            st = {"sent": "已发出", "claimed": "发送中", "pending": "排队中",
+                  "dropped": "已放弃(连败3次)", "skipped": "已跳过"}.get(r["state"], r["state"])
+            say(f"    {KIND_CN.get(r['kind'], r['kind'])}  {st}  入队={r['created_at']}  发出={r['sent_at'] or '—'}"
+                + (f"（{r['skip_reason']}）" if r['skip_reason'] else ""))
+
+    # 快照走势（删号前的最后数据；用户可能输手机号，快照要靠 dead_log 回捞出的 uid 来查）
+    uids = sorted({str(r["uid"]) for r in deads + notices if r["uid"]})
+    q = "SELECT day,rate,rpc30,at FROM snapshots WHERE name=?"
+    args = [key]
+    if uids:
+        q += " OR uid IN (%s)" % ",".join("?" * len(uids))
+        args += uids
+    sn = list(db.execute(q + " ORDER BY day DESC LIMIT 14", args))
+    if sn:
+        found = True
+        say("\n【D5】删号前快照走势（snapshots，最新在前，rate=650进度 rpc30=近30日播放）：")
+        for r in sn:
+            note = ""
+            if r["rate"] is not None and r["rate"] >= 100:
+                note = "  ←已做满100%"
+            say(f"    {r['day']}  650进度(rate)={r['rate']}%  近30日播放(rpc30)={r['rpc30']}  "
+                f"快照时刻={bj_str(r['at'])}{note}")
+    return found
 
 
 # ---------------------------------------------------------------- 第 2 步 找号
@@ -320,6 +441,15 @@ def verdict(e, hist_days, a, p, marks, live, owner, rpcD, actions=None):
 
     # ①b 快照与实时都没有 650 任务 → 无650任务（对齐控制台「无650任务」口径）
     if rate_t is None:
+        # 今天快照缺失但昨天有数据 → 这是采集缺失，不是「没任务」（11-21 实锤误判修复：
+        # 15255190748 昨天已 100% 做满，今天快照缺被兜底文案判成「可能是非音乐人」——前后矛盾）
+        if rate_y is not None:
+            _extra = ("且昨天已 100% 做满，本周期任务已完成，等 31 天换期归零即可，"
+                      if rate_y >= 100 else
+                      f"最近一次进度 {rate_y:g}%，" if rate_y else "最近一次进度 0%（周期刚换期归零），")
+            lines.append(f"②今天快照缺该号数据（【3】已标采集缺失——接口超时或当轮没跑），{_extra}"
+                         f"今天没采到≠任务没了，明天快照恢复自动接上。偶尔缺失不用管，连续 2 天缺失再查。")
+            return " ".join(lines)
         has_open = (live or {}).get("hasOpen")
         can_open = (live or {}).get("canOpen")
         is_mus = (live or {}).get("isMusician")
@@ -452,7 +582,9 @@ def verdict(e, hist_days, a, p, marks, live, owner, rpcD, actions=None):
 
     # ⑦ 正常
     if rate_t is not None and rate_y is not None and rate_t > rate_y:
-        lines.append(f"⑦650 进度正常爬坡（昨天 {rate_y}% → 今天 {rate_t}%，{rate_t - rate_y:+d}%），"
+        _rd = rate_t - rate_y
+        _rd_s = f"{int(_rd):+d}%" if float(_rd).is_integer() else f"{_rd:+g}%"
+        lines.append(f"⑦650 进度正常爬坡（昨天 {rate_y:g}% → 今天 {rate_t:g}%，{_rd_s}），"
                      f"播放量变化 {rpcD:+d} 次，一切正常，不用管。")
         return " ".join(lines)
 
@@ -487,17 +619,36 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
     # 2 找号
     accs = find_account(db, key)
     if not accs:
-        say(f"\n【账号】没找到手机号/uid 为 {key} 的账号（accounts 全表无匹配）。")
-        say("  可能是：手机号记错 / 号已删（删号后 accounts 无行，只剩 dead_log） / 在另一个池。")
+        say(f"\n【账号】没找到手机号/uid 为 {key} 的在池账号（accounts 全表无匹配）。")
+        if dead_history(db, key, say):
+            say("\n【说明】该号已被删号：删号后 accounts 表不再有它的行，所以号池列表查不到——这是设计，"
+                "不是数据丢了。上面【D1】~【D5】就是它的全部历史档案。")
+            say("    按 11-20 口径（CK三类来源存活对比文档）：CK 失效删号是终态，反复重登有害要劝阻，"
+                "不要引导号主复活；如果买家质疑，把直邮记录和快照走势给TA看即可。")
+            say("    死因判读（毒源=服务端程序化轮询登录态接口，与出口 IP 无关）：")
+            say("      · 2026-11-20 12:38 前登记的扫码号走「老二维码」链路（服务端轮询出码）→ 3~5 天批量清算属预期，"
+                "走家宽出口也照死；")
+            say("      · 11-20 12:38 起已全量切笔记本真浏览器 bridge 出码（真 Chrome，机理同手动长效 CK）→ "
+                "这批号若 3~5 天内死则不正常，首批清算观察点 11-24~25。")
+        else:
+            say("  可能是：手机号记错 / 镜像数据滞后（可勾选「强制重导 D1 镜像」再试）/ 从未登记过。")
         return rep
     if only_pool:
         accs = [a for a in accs if a["pool"] == only_pool]
     targets = []
     for e in accs:
-        say(f"\n【1】账号：pool={e['pool']}  uid={e['uid']}  手机号={e['name']}  agent={e['agent']}")
-        say(f"    登记时间={e['added']}  套餐={e['plan']}  到期={e['exp']}  公益号={'是' if e['pub'] else '否'}"
-            f"  退款={'是(rb=%d)' % e['rb'] if e['rb'] else '否'}  CK嫌疑标记={e['suspect_at'] or '无'}")
-        say(f"    目标歌={e['song']}  no_listen={e['no_listen']}  updated_at={bj_str(e['updated_at'])}（北京时间）")
+        say(f"\n【1】账号：池(pool)={e['pool']}  uid(网易用户ID)={e['uid']}  手机号={e['name']}  代理(agent)={e['agent']}")
+        say(f"    登记时间(added)={e['added']}  套餐(plan)={e['plan']}  到期(exp)={e['exp']}  公益号(pub)={'是' if e['pub'] else '否'}"
+            f"  退款(rb)={'是(rb=%d)' % e['rb'] if e['rb'] else '否'}  CK嫌疑标记={e['suspect_at'] or '无'}")
+        say(f"    目标歌(song)={e['song']}  只收不听(no_listen)={e['no_listen']}  资料更新时间(updated_at)={bj_str(e['updated_at'])}（北京时间）")
+        # 登记链路（11-20 12:38 锚点：前=老二维码服务端轮询（毒源），后=笔记本真浏览器 bridge）
+        _eg = {"home_browser": "笔记本真浏览器出码(新链路·bridge)",
+               "home_relay": "家宽转发·服务端轮询出码(老链路·毒源)"}.get(
+            e["login_egress"] or "", f"未记录({e['login_egress'] or '-'})")
+        _mt = {"link_qr": "链接扫码", "manual_import": "客服EXE+验证码"}.get(
+            e["registration_method"] or "", e["registration_method"] or "未记录")
+        _era = "⚠ 老链路时代登记，3~5 天清算窗口风险" if (e["login_egress"] or "") == "home_relay" else ""
+        say(f"    登记方式(registration_method)={_mt}  登录链路(login_egress)={_eg}{_era}")
         targets.append(dict(e))
 
     for e in targets:
@@ -520,7 +671,7 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
             (datetime.now(BJ) - timedelta(days=14)).strftime("%Y-%m-%d"))))
         hist = {}
         if rows:
-            say(f"    {'日期':<12}{'650进度':>8}{'近30日播放':>12}   快照时刻(北京)")
+            say(f"    {'日期':<12}{'650进度(rate)':>14}{'近30日播放(rpc30)':>18}   快照时刻(北京)")
             for r in rows:
                 hist[r["day"]] = dict(r)
                 note = ""
@@ -541,7 +692,9 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
                 say("    ℹ 该号近 3 天刚做过换歌/冻结处置（见【2】行尾标注）：按 mail_scan 冷却期口径，"
                     "换歌后 3 天内的「连续未涨」不计入冻结判定，此标记暂不必理会。")
         else:
-            say("    ▸ 无异常标记（650 在涨或已做满）")        # 5 实时复核
+            say("    ▸ 无异常标记（650 在涨或已做满）")
+
+        # 5 实时复核
         live = None
         if not no_live and e["ck"]:
             say(f"\n【4】实时复核创作者后台（只读查询，1 次）：")
@@ -550,18 +703,21 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
                 live = live_check(runmod, e["ck"])
                 if live.get("alive"):
                     say(f"    CK=活号；实时 650 进度={live.get('rate')}%  实时近30日播放={live.get('rpc30')}")
-                    say(f"    taskStatus={live.get('taskStatus')}  isMusician={live.get('isMusician')}  "
-                        f"hasOpen={live.get('hasOpen')}  canOpen={live.get('canOpen')}")
-                    say(f"    音乐人 status={live.get('status')}  维持天数={live.get('maintainDays')}  "
-                        f"特殊权益={live.get('unlockVipRight')}  650任务missionStatus={live.get('missionStatus')}")
-                    say(f"    笔记任务进度={live.get('noteProgress')}（在跑的佐证）")
+                    say(f"    任务总开关(taskStatus)={tf(live.get('taskStatus'))}  是音乐人(isMusician)={tf(live.get('isMusician'))}  "
+                        f"特殊权益已开通(hasOpen)={tf(live.get('hasOpen'))}  可开通(canOpen)={tf(live.get('canOpen'))}")
+                    say(f"    音乐人身份状态(status)={live.get('status')}  维持天数(maintainDays)={live.get('maintainDays')}  "
+                        f"特殊权益生效(unlockVipRight)={tf(live.get('unlockVipRight'))}  650任务状态(missionStatus)={live.get('missionStatus')}")
+                    np = live.get("noteProgress")
+                    say(f"    笔记发布进度={np if np is not None else '未返回'}"
+                        f"{'/4（30 天内发笔记天数，封顶 4；走势详见【8】）' if np is not None else ''}")
                     say("    （furtherTaskStartTime/furtherVipGetTime 字段网易数据不可信，仅留档不参与判定）")
                 else:
                     say(f"    ⚠️ CK 状态：{live['text']}——如果判失效，先让买家换 CK 再谈其他")
             except Exception as ex:
                 say(f"    实时复核失败：{ex}")
         else:
-            say("\n【4】实时复核：跳过（--no-live 或无 CK）")
+            say("\n【4】实时复核：跳过（--no-live 或无 CK）" if no_live
+                else "\n【4】实时复核：跳过（该号在镜像里没有 CK）")
 
         # 6 歌曲归属
         if e["song"]:
@@ -575,13 +731,13 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
                 for art in owner.get("artists", []):
                     hit = str(art.get("accountId")) == str(uid)
                     okflag = okflag or hit
-                    say(f"    艺人「{art.get('name')}」(id={art.get('id')}) accountId={art.get('accountId')}"
+                    say(f"    艺人「{art.get('name')}」(id={art.get('id')})  accountId(网易账号ID)={art.get('accountId')}"
                         f"  {'✅ 就是号主本人' if hit else ''}")
                 if not okflag:
                     say("    ⚠️ 没有任何艺人绑定到号主 uid——如果这是号主小号名下的歌，播放可能全无效，重点怀疑！")
 
         # 7 台账
-        say(f"\n【6】台账记录（ledger）：")
+        say(f"\n【6】台账记录（ledger，购买/续费流水）：")
         has_ledger = "ledger" in {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         led = list(db.execute(
             "SELECT day,agent,plan,price,days,start,exp,rb,remark,src FROM ledger "
@@ -596,10 +752,12 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
             say("    无台账" + ("（可能是免费/公益号或漏登记——漏账可用 tmp\\ledger_backfill_1110.py 补）"
                               if has_ledger else "（镜像里没导 ledger，跑一次不带 --table 的 d1_mirror.py 或删掉旧镜像后重试）"))
 
-        # 7 邮件提醒记录（2026-11-17 新增：失效号发没发过邮件、什么时候发的）
-        say(f"\n【7】邮件提醒记录（mail_queue / dead_notice / dead_log）：")
-        say(f"    重登邮件（relogin_at）：{('已发出 ' + e['relogin_at']) if e['relogin_at'] else '从未发出'}"
-            f"  ｜ 每日重登提醒：{'随 relogin_at 每天一封' if e['relogin_at'] else '不会发（只有 relogin_at 非空的号才进每日提醒）'}")
+        # 7 邮件提醒记录（2026-11-20 更新口径：11-18 已废除「已通知重登」，relogin_at 不再写入）
+        say(f"\n【7】邮件提醒记录（邮件队列 mail_queue / 删号通知 dead_notice / 删号流水 dead_log）：")
+        say("    当前邮件口径：判死/过期号 → 立即删号 + 直邮（notify-dead），没有「先通知重登、留缓冲期」这回事；"
+            "管理员手动删号不发邮件（11-19 起）。")
+        if e['relogin_at']:
+            say(f"    relogin_at={e['relogin_at']}：11-18 废除重登机制前的历史遗留记录，该字段现已不再写入，仅留档。")
         tabs_now = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         mails = list(db.execute(
             "SELECT kind,ref,state,created_at,claimed_at,sent_at,skip_reason FROM mail_queue "
@@ -622,10 +780,11 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
                 say(f"    ✉ 删号通知[{r['kind'] or 'dead'}]：{st}  入队 {r['removed_at']}  发出 {r['sent_at'] or '—'}"
                     + (f"（{r['skip_reason']}）" if r["skip_reason"] else ""))
             if mails:
-                say(f"    {'类型':<14}{'状态':<10}{'入队时间':<21}{'发出时间':<21}备注")
+                say(f"    {'类型':<26}{'状态':<10}{'入队时间':<21}{'发出时间':<21}备注")
                 for r in mails:
                     st = state_cn.get(r["state"], r["state"])
-                    say(f"    {r['kind']:<14}{st:<10}{r['created_at'] or '-':<21}{r['sent_at'] or '-':<21}{r['skip_reason'] or ''}")
+                    kind = KIND_CN.get(r["kind"], r["kind"])
+                    say(f"    {kind:<26}{st:<10}{r['created_at'] or '-':<21}{r['sent_at'] or '-':<21}{r['skip_reason'] or ''}")
         else:
             say("    无任何邮件记录：这个号从未进过任何邮件队列，也从未发过重登邮件。")
             say("    注意：重登邮件只由采集判死链路触发（run.py 判死→直邮→写 relogin_at）；")
@@ -633,8 +792,58 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
             if "mail_queue" not in tabs_now:
                 say("    （镜像缺 mail_queue/dead_notice 表，本次显示不完整——删旧镜像后重跑会自动重导）")
 
-        # 8 结论
-        say(f"\n【8】结论分析：")
+        # 8 笔记发布（2026-11-20 新增：网易同组小任务「30 天内发布图文笔记天数 ≥4」，与播放无关）
+        NOTE_KEY = "mission_code_musician_notebook_publish"
+        note_rows = []
+        for r in rows:
+            try:
+                mis = json.loads(r["missions"]) if r["missions"] else {}
+            except (TypeError, ValueError):
+                mis = {}
+            v = mis.get(NOTE_KEY)
+            if v is not None:
+                try:
+                    note_rows.append((r["day"], int(v)))
+                except (TypeError, ValueError):
+                    pass
+        live_np = (live or {}).get("noteProgress") if (live and live.get("alive")) else None
+        say(f"\n【8】笔记发布情况（网易任务 mission_code_musician_notebook_publish："
+            f"30 天内发布图文笔记的天数 ≥4，进度封顶 4/4）：")
+        if live_np is not None:
+            say(f"    实时复核：当前笔记进度 {live_np}/4"
+                + ("（已满，本轮周期内不再发，属正常）" if live_np >= 4 else ""))
+        if note_rows:
+            say(f"    {'日期':<12}{'笔记进度':>8}   说明")
+            prev = None
+            for day, v in note_rows:
+                if prev is None:
+                    note = ""
+                elif v == prev + 1:
+                    note = "当天发过笔记（+1 天）"
+                elif v > prev:
+                    note = f"补涨 +{v - prev}（中间有快照没采到）"
+                elif v < prev:
+                    note = "进度回落（30 天窗口滚动，老的天数过期退出）"
+                else:
+                    note = ""
+                prev = v
+                say(f"    {day:<12}{f'{v}/4':>8}   {note}")
+            last_v = note_rows[-1][1]
+            if last_v >= 4:
+                say("    ✅ 已发满 4/4：本轮任务完成。notes.py 有进度门控（11-11 起），满了自动停发，不用管。")
+            else:
+                say("    ℹ 发布节奏（notes.py 现口径，2026-11 核对代码）：每晚北京 22:23 随 relay 触发，"
+                    "全部号每天都尝试发一篇；发布前先读任务进度——满 4/4 自动跳过（进度门控），没满就发；"
+                    "发完 40~60 秒自动删动态（进度实时结算，删了不影响计数）。所以进度从 0 连涨到 4/4 是正常节奏，"
+                    "涨满后不动=门控停发。只有「进度没满却连续 2 周不涨」才需要查"
+                    "（多半是 CK 失效或被平台 250 风控——被风控的号会收到「安全验证分享异常」提醒邮件，见【7】）。")
+        else:
+            say("    近 14 天快照里没有笔记进度数据：可能是新号、当天快照网易没返回该子任务，或 missions 没上报。")
+            if live_np is None and live and live.get("alive"):
+                say("    实时复核也没拿到笔记进度：该号可能不是音乐人或没进进阶任务，见【4】的 isMusician/hasOpen。")
+
+        # 9 结论
+        say(f"\n【9】结论分析：")
         say("    " + verdict(e, hist, a, p, marks, live, owner, rpcD, actions))
         say()
 

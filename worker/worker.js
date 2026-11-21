@@ -7008,7 +7008,9 @@ async function handle(request) {
       try { b2 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
       const pw2 = await regPass();
       let passOk2 = !!pw2 && String(b2.pass || '') === pw2;
-      if (!passOk2) passOk2 = await consoleAuthFull(b2);       // 2026-11-10：控制台也能查
+      /* 2026-11-21：consoleAuthFull → consoleAuth —— 控制台满权限/只读都能查。
+         只读口令用它在详情弹窗看「登记链接」；生成/作废链接仍是满权限专属接口，不受影响。 */
+      if (!passOk2) passOk2 = await consoleAuth(b2);
       if (!passOk2) {
         if (!pw2) return json({ ok: false, message: '尚未配置生成口令（KV 键 REG_TOKEN_PASS），该功能未开放' }, 503);
         return json({ ok: false, message: '生成口令不正确' }, 403);
@@ -9958,12 +9960,15 @@ async function handle(request) {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let body;
       try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
-      if (!(await consoleAuthFull(body))) return json({ message: '只读口令不能查订单' }, 403, CORS);
+      /* 2026-11-21：consoleAuthFull → consoleAuth —— 只读口令也能查订单。
+         详情弹窗的「购买记录」（含补号行）对只读开放：台账查询本身是纯读，
+         满权限/只读都只是看，写入口（改单/补价）仍然只有满权限那几个接口。 */
+      if (!(await consoleAuth(body))) return json({ message: '口令不正确' }, 403, CORS);
       if (!d1ok()) return json({ message: 'D1 不可用' }, 503, CORS);
       const q = String(body.q || '').trim().slice(0, 40);
       if (q.length < 4) return json({ message: '至少输入 4 位（手机号 / UID / 备注片段）' }, 400, CORS);
       const like = '%' + q + '%';
-      const rows = await d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,remark ' +
+      const rows = await d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,remark,at ' +
         'FROM ledger WHERE name LIKE ? OR uid LIKE ? OR remark LIKE ? ORDER BY day DESC, id DESC LIMIT 20',
         [like, like, like]);
       // 2026-11-06：读失败（rows=null）以前会被下面 `(rows || [])` 变成空列表，
@@ -9991,6 +9996,8 @@ async function handle(request) {
         price: (r.price === null || r.price === undefined) ? null : Number(r.price),
         day: String(r.day || ''), start: String(r.start || ''), exp: String(r.exp || ''),
         rb: Number(r.rb) || 0, rbFrom: Number(r.rb_from) || 0, remark: String(r.remark || ''),
+        /* 2026-11-21：at = 台账写入时刻（北京时间，精确到秒）。老行有可能为空 → 前端回落到 day。 */
+        at: String(r.at || ''),
         alive: !!alive[String(r.pool) + '|' + String(r.uid)],
         curExp: curE[String(r.pool) + '|' + String(r.uid)] || '',
       })) }, 200, CORS);
@@ -12749,7 +12756,7 @@ $('rbFind').onclick=function(){
     var hh='';
     for(var i=0;i<rs.length;i++){var r=rs[i];
       hh+='<div class="rbit" data-i="'+i+'" style="padding:6px 8px;border:1px solid #e6ebf1;border-radius:8px;margin-bottom:5px;cursor:pointer;background:#fff">'
-        +'<b>'+esc(r.day)+'</b> · '+esc(r.name||'—')+' · '+esc(r.plan||'未标注')
+        +'<b>'+esc(r.day)+'</b>'+(r.at?(' '+esc(String(r.at).slice(11,19))):'')+' · '+esc(r.name||'—')+' · '+esc(r.plan||'未标注')
         +(r.price!=null?(' · '+r.price+' 元'):' · <span style="color:#b06a00">待补价</span>')
         +(r.rb?' <span class="badge b-blue">补</span>':'')
         +(r.alive?' <span class="badge b-green">还在池里</span>':' <span class="badge b-gray">已删除</span>')
@@ -12850,12 +12857,13 @@ function openInfo(i){
   /* 2026-11-17：CK 实时验证结果区（点底部「验证CK」按钮触发，只读不改数据）*/
   +(ROLE==='full'?('<div class="dsec" id="infoCkRes" hidden><i>CK验证</i><span style="color:#888">点下方「验证CK」实时测试当前存的凭证</span></div>'):'')
   /* 2026-11-17（方案 A）：台账购买记录 —— 与「补号查原单」同源（/api/console/findorder，
-     满权限专属，只读口令服务端 403 所以直接不渲染这一段）。按 UID 精确过滤后按单展示，
-     套餐本来就是按单记的，按单看才是它的本体；总有效期永远以上面「有效期」为准。 */
-  +(ROLE==='full'?('<div class="dsec" id="infoLedger"><i>购买记录</i><span style="color:#888">查询中…</span></div>'):'')
+     2026-11-21 起对只读开放：服务端查询口令放宽到 consoleAuth，纯读接口。
+     按 UID 精确过滤后按单展示，套餐本来就是按单记的，按单看才是它的本体；
+     总有效期永远以上面「有效期」为准。 */
+  +('<div class="dsec" id="infoLedger"><i>购买记录</i><span style="color:#888">查询中…</span></div>')
   /* 2026-11-19：登记链接 —— 该号关联的 xx1031.xyz/r/编码 链接（/api/regtoken_list 按 uid/手机号查）。
-     用户拍板：搜索栏不再弹横幅，链接信息统一收进详情弹窗看。 */
-  +(ROLE==='full'?('<div class="dsec" id="infoReg"><i>登记链接</i><span style="color:#888">查询中…</span></div>'):'');
+     用户拍板：搜索栏不再弹横幅，链接信息统一收进详情弹窗看。2026-11-21 起只读也可看。 */
+  +('<div class="dsec" id="infoReg"><i>登记链接</i><span style="color:#888">查询中…</span></div>');
   /* 2026-11-15：编辑按钮动态插进弹窗底部唯一的 row2（模板自带一个关闭）。
      原来在 infoBody 里再拼一行「编辑+关闭」，和模板底部的关闭重复 —— 弹窗出现两个关闭（买家实测）。 */
   if(ROLE==='full'){
@@ -12891,11 +12899,9 @@ function openInfo(i){
   $('infoSub').textContent='该号全部字段；完整标记说明见「标记对照表」';
   $('infoBody').innerHTML=bodyH;
   $('infoModal').hidden=false;
-  /* 2026-11-17（方案 A）：异步补台账购买记录（满权限）。INFO_SEQ 防串：连开两个详情时，
-     慢的旧响应不许写进新弹窗。UID 精确过滤（findorder 是 LIKE 查询，可能带出 uid 里
-     含同片段的其他单）；没有 uid 的老号退化为按 name 精确匹配。 */
-  if(ROLE==='full'){
-    INFO_SEQ=(INFO_SEQ||0)+1;
+  /* 2026-11-21：购买记录 / 登记链接两段查询对只读也执行（不再包在 if(ROLE==='full') 里）。
+     「编辑」「验证CK」按钮仍只给满权限（上面 if(ROLE==='full') 那段没动）。 */
+  INFO_SEQ=(INFO_SEQ||0)+1;
     var _seq=INFO_SEQ,_uid=String(e.uid||''),_nm=String(e.name||'');
     var _tI=JSON.parse(TOKEN||'{}');
     api('/api/console/findorder',{user:_tI.user,pass:_tI.pass,q:(_uid||_nm)}).then(function(o){
@@ -12906,7 +12912,10 @@ function openInfo(i){
       if(!rs.length){el.innerHTML='<i>购买记录</i><span style="color:#888">台账里没有这个号的成交记录</span>';return;}
       var lh='';
       for(var li=0;li<rs.length;li++){var _r=rs[li];
-        lh+='<div style="font-size:12px;color:#444;margin:3px 0">'+esc(String(_r.day||'').slice(0,10))
+        /* 2026-11-21：时间细化到时分秒 —— 台账 at 字段（北京时间 YYYY-MM-DD HH:MM:SS）；
+           老行 at 为空时回落到登记日 day。 */
+        var _tAt=String(_r.at||'');
+        lh+='<div style="font-size:12px;color:#444;margin:3px 0">'+esc(_tAt.length>=19?_tAt.slice(0,19):String(_r.day||'').slice(0,10))
           +' · '+esc(_r.plan||'未标注')
           +' · 到期 '+esc(_r.exp||'永久')
           +(_r.rb?' <span class="badge b-blue">补</span>':'')
@@ -12941,7 +12950,6 @@ function openInfo(i){
       }
       elR.innerHTML='<i>登记链接</i>'+rh;
     }).catch(function(){var elR2=$('infoReg');if(elR2&&INFO_SEQ===_seq)elR2.innerHTML='<i>登记链接</i><span style="color:#a32d2d">网络错误</span>';});
-  }
 }
 $('infoClose').onclick=function(){$('infoModal').hidden=true;};
 function doEdit(pool,e,action){

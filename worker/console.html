@@ -539,7 +539,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
 <!-- ===== 2026-11-17：失效号邮件提醒查询（实时读 D1，满权限专属） ===== -->
 <div class="modal" id="mtModal" hidden><div class="mbox" style="width:1040px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
   <h3>失效号邮件提醒查询（实时 + 缓存）</h3>
-  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），默认返回近 <b>30 天</b>全部类型邮件（切大时间范围才多读，省配额），类型筛选在本机过滤不耗配额；每封队列邮件后有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」。<br><b>失效号清单</b>：列出全部「已通知重登」+「待复核」的号，每行可点「邮件」直达该号明细。<br><b>异常检查</b>：按 2026-11-18 拍板口径「今天播了明天就得有播放量」，列三类异常 —— 播放无效（生效数=0）/ 播放量停滞（近30日播放持平）/ 缺采（当天没采到且无标记）。</p>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），默认返回近 <b>30 天</b>全部类型邮件（切大时间范围才多读，省配额），类型筛选在本机过滤不耗配额；每封队列邮件后有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」。<br><b>失效号清单</b>：列出时间范围内<b>删掉的号</b>（每行带删号时间/原因、删号通知发没发/什么时候发的）+ 在池待复核的号（11-18 起失效号立即删号，清单以已删号为主体），每行可点「邮件」直达该号明细。<br><b>异常检查</b>：按 2026-11-18 拍板口径「今天播了明天就得有播放量」，列三类异常 —— 播放无效（生效数=0）/ 播放量停滞（近30日播放持平）/ 缺采（当天没采到且无标记）。</p>
   <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
     <div style="flex:1;min-width:220px"><label style="margin-top:0">搜索（UID / 手机号片段，可留空）</label><input id="mtQ" placeholder="如 13077105665" style="width:100%"></div>
     <button class="mini" id="mtGo" style="margin-top:0;padding:9px 14px">查单号</button>
@@ -1760,7 +1760,7 @@ $('rbFind').onclick=function(){
     var hh='';
     for(var i=0;i<rs.length;i++){var r=rs[i];
       hh+='<div class="rbit" data-i="'+i+'" style="padding:6px 8px;border:1px solid #e6ebf1;border-radius:8px;margin-bottom:5px;cursor:pointer;background:#fff">'
-        +'<b>'+esc(r.day)+'</b> · '+esc(r.name||'—')+' · '+esc(r.plan||'未标注')
+        +'<b>'+esc(r.day)+'</b>'+(r.at?(' '+esc(String(r.at).slice(11,19))):'')+' · '+esc(r.name||'—')+' · '+esc(r.plan||'未标注')
         +(r.price!=null?(' · '+r.price+' 元'):' · <span style="color:#b06a00">待补价</span>')
         +(r.rb?' <span class="badge b-blue">补</span>':'')
         +(r.alive?' <span class="badge b-green">还在池里</span>':' <span class="badge b-gray">已删除</span>')
@@ -1861,12 +1861,13 @@ function openInfo(i){
   /* 2026-11-17：CK 实时验证结果区（点底部「验证CK」按钮触发，只读不改数据）*/
   +(ROLE==='full'?('<div class="dsec" id="infoCkRes" hidden><i>CK验证</i><span style="color:#888">点下方「验证CK」实时测试当前存的凭证</span></div>'):'')
   /* 2026-11-17（方案 A）：台账购买记录 —— 与「补号查原单」同源（/api/console/findorder，
-     满权限专属，只读口令服务端 403 所以直接不渲染这一段）。按 UID 精确过滤后按单展示，
-     套餐本来就是按单记的，按单看才是它的本体；总有效期永远以上面「有效期」为准。 */
-  +(ROLE==='full'?('<div class="dsec" id="infoLedger"><i>购买记录</i><span style="color:#888">查询中…</span></div>'):'')
+     2026-11-21 起对只读开放：服务端查询口令放宽到 consoleAuth，纯读接口。
+     按 UID 精确过滤后按单展示，套餐本来就是按单记的，按单看才是它的本体；
+     总有效期永远以上面「有效期」为准。 */
+  +('<div class="dsec" id="infoLedger"><i>购买记录</i><span style="color:#888">查询中…</span></div>')
   /* 2026-11-19：登记链接 —— 该号关联的 xx1031.xyz/r/编码 链接（/api/regtoken_list 按 uid/手机号查）。
-     用户拍板：搜索栏不再弹横幅，链接信息统一收进详情弹窗看。 */
-  +(ROLE==='full'?('<div class="dsec" id="infoReg"><i>登记链接</i><span style="color:#888">查询中…</span></div>'):'');
+     用户拍板：搜索栏不再弹横幅，链接信息统一收进详情弹窗看。2026-11-21 起只读也可看。 */
+  +('<div class="dsec" id="infoReg"><i>登记链接</i><span style="color:#888">查询中…</span></div>');
   /* 2026-11-15：编辑按钮动态插进弹窗底部唯一的 row2（模板自带一个关闭）。
      原来在 infoBody 里再拼一行「编辑+关闭」，和模板底部的关闭重复 —— 弹窗出现两个关闭（买家实测）。 */
   if(ROLE==='full'){
@@ -1902,11 +1903,9 @@ function openInfo(i){
   $('infoSub').textContent='该号全部字段；完整标记说明见「标记对照表」';
   $('infoBody').innerHTML=bodyH;
   $('infoModal').hidden=false;
-  /* 2026-11-17（方案 A）：异步补台账购买记录（满权限）。INFO_SEQ 防串：连开两个详情时，
-     慢的旧响应不许写进新弹窗。UID 精确过滤（findorder 是 LIKE 查询，可能带出 uid 里
-     含同片段的其他单）；没有 uid 的老号退化为按 name 精确匹配。 */
-  if(ROLE==='full'){
-    INFO_SEQ=(INFO_SEQ||0)+1;
+  /* 2026-11-21：购买记录 / 登记链接两段查询对只读也执行（不再包在 if(ROLE==='full') 里）。
+     「编辑」「验证CK」按钮仍只给满权限（上面 if(ROLE==='full') 那段没动）。 */
+  INFO_SEQ=(INFO_SEQ||0)+1;
     var _seq=INFO_SEQ,_uid=String(e.uid||''),_nm=String(e.name||'');
     var _tI=JSON.parse(TOKEN||'{}');
     api('/api/console/findorder',{user:_tI.user,pass:_tI.pass,q:(_uid||_nm)}).then(function(o){
@@ -1917,7 +1916,10 @@ function openInfo(i){
       if(!rs.length){el.innerHTML='<i>购买记录</i><span style="color:#888">台账里没有这个号的成交记录</span>';return;}
       var lh='';
       for(var li=0;li<rs.length;li++){var _r=rs[li];
-        lh+='<div style="font-size:12px;color:#444;margin:3px 0">'+esc(String(_r.day||'').slice(0,10))
+        /* 2026-11-21：时间细化到时分秒 —— 台账 at 字段（北京时间 YYYY-MM-DD HH:MM:SS）；
+           老行 at 为空时回落到登记日 day。 */
+        var _tAt=String(_r.at||'');
+        lh+='<div style="font-size:12px;color:#444;margin:3px 0">'+esc(_tAt.length>=19?_tAt.slice(0,19):String(_r.day||'').slice(0,10))
           +' · '+esc(_r.plan||'未标注')
           +' · 到期 '+esc(_r.exp||'永久')
           +(_r.rb?' <span class="badge b-blue">补</span>':'')
@@ -1952,7 +1954,6 @@ function openInfo(i){
       }
       elR.innerHTML='<i>登记链接</i>'+rh;
     }).catch(function(){var elR2=$('infoReg');if(elR2&&INFO_SEQ===_seq)elR2.innerHTML='<i>登记链接</i><span style="color:#a32d2d">网络错误</span>';});
-  }
 }
 $('infoClose').onclick=function(){$('infoModal').hidden=true;};
 function doEdit(pool,e,action){
@@ -2371,9 +2372,10 @@ function mtRenderOne(o){
       +'（'+(a.pool==='hz'?'主群':'定制')+' · uid '+esc(a.uid)+' · '+(Number(a.pub)===1?'公益':'套餐 '+esc(a.plan||'—')+' · 到期 '+esc(a.exp||'—')+'）')
       +' · 邮箱 '+esc(a.email||'（未留）')+'</div>'
       +'<p style="margin:4px 0 8px;font-size:12.5px">'
-      +'重登邮件：<b>'+(a.relogin_at?'<span class="good">已发出 '+mtTime(a.relogin_at)+'</span>':'<span class="muted">从未发出</span>')+'</b>'
+      +((a.dead&&a.dead.length)?'':('重登邮件：<b>'+(a.relogin_at?'<span class="good">已发出 '+mtTime(a.relogin_at)+'</span>':'<span class="muted">从未发出</span>')+'</b>'
       +(a.relogin_at?'':' <button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="relogin2" data-ref="" style="padding:2px 10px;font-size:11px" title="这个号还没发过重登邮件，手动补一封每日重登提醒（走原发信链路，约 30 分钟内发出）">补发重登提醒</button>')
-      +' ｜ 待复核标记：'+(a.suspect_at?esc(String(a.suspect_at).slice(5,16)):'无')
+      +' ｜ '))
+      +'待复核标记：'+(a.suspect_at?esc(String(a.suspect_at).slice(5,16)):'无')
       +(a.dead&&a.dead.length?(' ｜ 删号流水：<b style="color:#a32d2d">'+esc(String(a.dead[0].reason||''))+' '+mtTime(a.dead[0].at)+'</b>'):'')
       +'</p>';
     // 2026-11-17 二期：类型/时间筛选（本机过滤，不耗 D1 配额）—— 服务端一次拉回近 200 条
@@ -2442,27 +2444,31 @@ function mtRenderList(d){
       return false;
     });
   }
-  if(!rs.length)return '<p style="color:#888">'+(selK?'当前筛选条件下没有匹配的号（'+totalAll+' 个失效相关号里没有窗口内发过该类型邮件的）——把类型/时间范围放宽一点试试。':'当前没有任何「已通知重登」或「待复核」的号 —— 失效邮件体系空转中。')+'</p>';
+  if(!rs.length)return '<p style="color:#888">'+(selK?'当前筛选条件下没有匹配的号（'+totalAll+' 个失效相关号里没有窗口内发过该类型邮件的）——把类型/时间范围放宽一点试试。':'时间窗口内没有已删号、也没有待复核的号 —— 失效邮件体系空转中（可把时间范围切大一点试试）。')+'</p>';
   var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;position:sticky;top:0;border-bottom:1px solid #e6e8ec;text-align:left';
   var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
   var h='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px"><thead><tr>'
     +'<th style="'+TH+'">群</th><th style="'+TH+'">账号</th><th style="'+TH+'">UID</th><th style="'+TH+'">邮箱</th>'
-    +'<th style="'+TH+'" title="重登邮件已发时间（run.py 直邮成功后写入 relogin_at）">重登邮件</th>'
+    +'<th style="'+TH+'" title="删号时间与原因（dead_log 流水；11-18 起失效号立即删号，清单以已删号为主体）">删号</th>'
     +'<th style="'+TH+'" title="每天一封的 relogin2 提醒，取最新一条">每日提醒</th>'
-    +'<th style="'+TH+'" title="手动删号通知状态">删号通知</th><th style="'+TH+'">待复核</th><th style="'+TH+'">到期</th><th style="'+TH+'">邮件</th></tr></thead><tbody>';
+    +'<th style="'+TH+'" title="删号通知状态（dead_notice；直邮链路的删号无回执，显示 —）">删号通知</th><th style="'+TH+'">待复核</th><th style="'+TH+'">到期</th><th style="'+TH+'">邮件</th></tr></thead><tbody>';
   for(var i=0;i<rs.length;i++){var r=rs[i];
-    var rel2=r.rel2,nt=r.notice;
+    var rel2=r.rel2,nt=r.notice,dd=r.dead;
     var rel2Txt='—';
     if(rel2){
       rel2Txt=mtMailState(rel2.state)+(rel2.sent_at?(' '+mtTime(rel2.sent_at)):(rel2.created_at?(' 入队 '+mtTime(rel2.created_at)):''))
         +(rel2.skip_reason?(' <span class="muted">'+esc(rel2.skip_reason)+'</span>'):'');
+    }
+    var ddTxt='—';
+    if(dd){
+      ddTxt='<b style="color:#a32d2d">'+mtTime(dd.at)+'</b> <span class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:bottom" title="'+esc(dd.reason||'')+'">'+esc(dd.reason||'')+'</span>';
     }
     h+='<tr'+(i%2?' style="background:#fafbfc"':'')+'>'
       +'<td style="'+TD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
       +'<td style="'+TD+'">'+esc(String(r.name||'—').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</td>'
       +'<td style="'+TD+'" class="num">'+esc(r.uid)+'</td>'
       +'<td style="'+TD+';max-width:150px;overflow:hidden;text-overflow:ellipsis">'+esc(r.email||'（未留）')+'</td>'
-      +'<td style="'+TD+'">'+(r.relogin_at?'<span class="good">'+mtTime(r.relogin_at)+'</span>':'<span class="muted">未发</span>')+'</td>'
+      +'<td style="'+TD+'">'+ddTxt+'</td>'
       +'<td style="'+TD+'">'+rel2Txt+'</td>'
       +'<td style="'+TD+'">'+(nt?(mtMailState(nt.state)+(nt.sent_at?(' '+mtTime(nt.sent_at)):'')):'—')+'</td>'
       +'<td style="'+TD+'">'+(r.suspect_at?esc(String(r.suspect_at).slice(5,16)):'—')+'</td>'
@@ -2470,7 +2476,10 @@ function mtRenderList(d){
       +'<td style="'+TD+'"><button class="mini" data-act="mtopen" data-uid="'+esc(r.uid)+'" style="padding:2px 10px;font-size:11px" title="跳到这个号的邮件明细（类型筛选/补发都在那里）">邮件</button></td>'
     +'</tr>';
   }
-  h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">'+(selK?('筛选后 '+rs.length+' / 共 '+totalAll+' 个失效相关号（类型筛选只在本机过滤已拉回的数据，切换不耗配额）。'):'共 '+rs.length+' 个失效相关号（已通知重登 + 待复核）。')+'每日提醒=最新一封 relogin2 邮件；「未发」重登邮件的号说明判死邮件链路没走到它（还没被采集判死）。</p>';
+  h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">'
+    +(selK?('筛选后 '+rs.length+' / 共 '+totalAll+' 个失效相关号（类型筛选只在本机过滤已拉回的数据，切换不耗配额）。'):('共 '+rs.length+' 个失效相关号（时间窗口内已删号 + 在池待复核）。'))
+    +(d.trunc?'<b style="color:#a32d2d">已删号超过 500 条，只显示最近的 500 条 —— 想看更早的请缩小时间范围。</b>':'')
+    +'每日提醒=最新一封 relogin2 邮件；删号通知一列显示 — 的号走的是系统判死直邮链路（无 dead_notice 回执），发送结果看该号「邮件」明细。</p>';
   return h;
 }
 var MT_LAST=null;   // 最近一次查询结果（含 mode），筛选切换/补发后在本机重渲染，不重复读库
