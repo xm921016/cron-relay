@@ -10205,7 +10205,13 @@ const SNAP650_REPOS = [
   { pool: 'hz', owner: 'xm921016', repo: 'cron-relay', tokenKey: 'GH_TOKEN' },
   { pool: 'dz', owner: 'xm921017', repo: 'dingzhi', tokenKey: 'GH_TOKEN_DZ' },
 ];
-async function dispatchSnap650(onlyPool) {
+// 2026-11-21 口径定死（用户拍板）：快照采集固定北京 09:30 主采 + 12:00 补漏，全部由 CF cron
+// 发令（GitHub schedule 实测延迟 1~8h 甚至整班丢失，弃用）。两仓 snapshot.yml 已删除
+// schedule / workflow_run 触发器，只认 workflow_dispatch —— CF 是唯一发令方。
+//   09:30 主采班 force=true：凡采于当日 09:30 之前的（凌晨 relay 结束班等）全部重采一次；
+//   12:00 补漏班 force=false：snapshot.py already_collected_today 判重，09:30 已成功则空跳过，
+//   失败/超时才补采。两班并发安全：同一时刻同一仓库只有一份快照在工作（concurrency 分组）。
+async function dispatchSnap650(onlyPool, force) {
   const c = await cfg();
   const jobs = SNAP650_REPOS.filter(r => !onlyPool || onlyPool === 'all' || r.pool === onlyPool);
   const out = [];
@@ -10224,14 +10230,15 @@ async function dispatchSnap650(onlyPool) {
       continue;
     }
     try {
+      // workflow_dispatch 成功返回 204 且 body 为空；boolean input 走 REST API 必须传字符串
+      const body = force ? { ref: 'main', inputs: { force: 'true' } } : { ref: 'main' };
       const resp = await fetch('https://api.github.com/repos/' + r.owner + '/' + r.repo +
         '/actions/workflows/snapshot.yml/dispatches', {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + tok, Accept: 'application/vnd.github+json',
                    'User-Agent': 'cron-relay-worker', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ref: 'main' }),
+        body: JSON.stringify(body),
       });
-      // workflow_dispatch 成功返回 204 且 body 为空
       out.push({ pool: r.pool, status: resp.status, ok: resp.status === 204,
                  message: resp.ok ? '' : (await resp.text()).slice(0, 120) });
     } catch (e) {
@@ -10240,8 +10247,8 @@ async function dispatchSnap650(onlyPool) {
   }
   // 只留最后一次触发记录（1 周过期），控制台/排障时可直接查它到底有没有被调起来
   try {
-    await POOL.put('cron:snap650:last', JSON.stringify({ at: new Date().toISOString(), out }),
-                   { expirationTtl: 604800 });
+    await POOL.put('cron:snap650:last', JSON.stringify({ at: new Date().toISOString(),
+                   force: !!force, out }), { expirationTtl: 604800 });
   } catch (e) { /* 记录失败不影响触发本身 */ }
   return { ok: out.every(x => x.ok), jobs: out };
 }
@@ -10268,6 +10275,12 @@ const MAIL_CRONS = ['5 * * * *'];
 // Limits 文档），免费版才是 5——此前挂靠每小时邮件 cron 是保守做法。⚠ 必须在 scheduled()
 // 里先于「主 cron 全量路径」分流，否则每 10 分钟会把快照采集/到期清理全跑一遍。
 const BRIDGE_CRONS = ['*/10 * * * *'];
+// 2026-11-21：快照采集发令腿（用户拍板口径，CF 是唯一发令方，GitHub schedule 弃用）。
+// 30 1 * * * = 北京 09:30 主采（force 重采，覆盖当日 09:30 前采过的全部旧值）；
+// 0 4 * * *  = 北京 12:00 补漏（不 force，判重跳过/漏采才补）。原 10 2 主 cron 的
+// snap650 派发同步移除（10:10 采一次又 12:00 补一次的旧三重链路作废）。
+const SNAP_MAIN_CRON = ['30 1 * * *'];       // 北京 09:30
+const SNAP_FALLBACK_CRON = ['0 4 * * *'];    // 北京 12:00
 const MAIL_REPO = { owner: 'xm921016', repo: 'cron-relay', workflow: 'notify-mail.yml' };
 const BACKUP_REPOS = [
   { pool: 'hz', owner: 'xm921016', repo: 'cron-relay', tokenKey: 'GH_TOKEN' },
@@ -14168,8 +14181,17 @@ export default {
       ctx.waitUntil(bridgeHealthProbe().catch(() => {}));
       return;
     }
-    ctx.waitUntil(dispatchSnap650('all').catch(() => {}));
-    // 2026-11-09：主 cron 也刷新一次额度水位（每天 1 次，兜住 scheduled 分支变动）。
+    // 2026-11-21：快照 09:30 主采班（force 重采）与 12:00 补漏班（判重补），只发令不干别的。
+    if (SNAP_MAIN_CRON.indexOf(_cron) >= 0) {
+      ctx.waitUntil(dispatchSnap650('all', true).catch(() => {}));
+      return;
+    }
+    if (SNAP_FALLBACK_CRON.indexOf(_cron) >= 0) {
+      ctx.waitUntil(dispatchSnap650('all', false).catch(() => {}));
+      return;
+    }
+    // 主 cron（10 2 * * *）：2026-11-21 起 snap650 派发已移出（挪到 09:30/12:00 两条独立腿），
+    // 此处只保留到期清理 / 元数据补全 / 额度水位等每日杂务。
     ctx.waitUntil(d1QuotaProbe(true).catch(() => {}));
     // 2026-10-29：到期号清理挪进每日 cron。
     // 以前 pruneExpired 全项目只有 /api/pool（旧「号池管理后台」页面）一个调用点 ——
