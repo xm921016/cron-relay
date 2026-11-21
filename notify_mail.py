@@ -175,7 +175,8 @@ def main():
                 elif kind == "relogin2":
                     # 2026-11-15 新增：网易官方波动口径的重登引导（ref=日期，仅用于去重）。
                     # 队列行由人工/控制台按需插入（worker 不会自动产生这个 kind）。
-                    ok = notify.notify_relogin2(t.get("email"), "", who)
+                    # 2026-11-21：队列行带群号（mail_pending 现查 reg_cfg），relogin2 也补「售后群：」行
+                    ok = notify.notify_relogin2(t.get("email"), "", who, t.get("group") or "")
                 elif kind == "feenote":
                     # 2026-11-16 新增：登记歌是 VIP 试听类（fee>0）零入账的换歌引导
                     # （ref=歌曲 id，歌名由 worker mail_pending 附带；队列行人工入队）
