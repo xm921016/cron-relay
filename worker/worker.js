@@ -6800,6 +6800,65 @@ async function handle(request) {
       if (listS9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
       return json({ ok: true, stats: stS9, cards: listS9, today: beijingDate() }, 200, CORS_S);
     }
+    /* 数据清理：管理接口（口令=ADMIN_PASS，CORS 同上，给本地管理 HTML 用）。
+       scope='unused'：删除全部未售卡密（status='unused'，均为空壳行）。
+       scope='test'：删除测试买家——note='自测导入20261122'（首批种子）或
+         email 以 @example.com 结尾（example.com 是保留域名，真实买家不可能用），
+         连带删除这些 uid 的 sign_logs 签到记录。
+       绝不碰 status='active' 且邮箱正常的真实买家。计数=删前 COUNT-删后 COUNT
+       （d1All 只回 results，DELETE 不用 RETURNING 避免大结果）。 */
+    if (url.pathname === '/api/sign/purge' && request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '86400',
+      } });
+    }
+    if (url.pathname === '/api/sign/purge' && request.method === 'POST') {
+      const CORS_P = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
+      let bP1;
+      try { bP1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400, CORS_P); }
+      const cP1 = await cfg();
+      if (!cP1.adminPass) return json({ ok: false, message: '未配置管理口令' }, 503, CORS_P);
+      if ((bP1.pass || '') !== cP1.adminPass) return json({ ok: false, message: '管理口令错误' }, 403, CORS_P);
+      const scopeP = String(bP1.scope || '');
+      if (scopeP !== 'unused' && scopeP !== 'test') {
+        return json({ ok: false, message: 'scope 必须是 unused 或 test' }, 400, CORS_P);
+      }
+      let delUs = 0, delLg = 0;
+      if (scopeP === 'unused') {
+        const c1P = await d1All("SELECT COUNT(*) n FROM sign_users WHERE status='unused'");
+        if (c1P === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_P);
+        const okP1 = await d1Run("DELETE FROM sign_users WHERE status='unused'");
+        if (!okP1) return json({ ok: false, message: '删除失败（' + (_d1LastErr || 'D1 异常') + '）' }, 503, CORS_P);
+        const c2P = await d1All("SELECT COUNT(*) n FROM sign_users WHERE status='unused'");
+        if (c2P === null) return json({ ok: false, message: '已执行删除，但复核失败，请刷新统计确认' }, 503, CORS_P);
+        delUs = Math.max(0, Number((c1P[0] && c1P[0].n) || 0) - Number((c2P[0] && c2P[0].n) || 0));
+        console.log('签到产品清理: unused 删除 ' + delUs + ' 张');
+        return json({ ok: true, scope: scopeP, deleted: delUs }, 200, CORS_P);
+      }
+      /* scope=test：先取测试买家 uid 清单（≤100/批 铁律5）→ 删 sign_logs → 删 sign_users */
+      const tU = await d1All("SELECT uid FROM sign_users WHERE note='自测导入20261122' OR email LIKE '%@example.com'");
+      if (tU === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_P);
+      if (tU.length) {
+        const uidsP = tU.map(function (x) { return String(x.uid); });
+        for (let pi = 0; pi < uidsP.length; pi += 100) {
+          const chP = uidsP.slice(pi, pi + 100);
+          const lcP = await d1All('SELECT COUNT(*) n FROM sign_logs WHERE uid IN (%s)'.replace('%s', chP.map(function () { return '?'; }).join(',')), chP);
+          if (lcP !== null) delLg += Number((lcP[0] && lcP[0].n) || 0);
+          const okP2 = await d1Run('DELETE FROM sign_logs WHERE uid IN (%s)'.replace('%s', chP.map(function () { return '?'; }).join(',')), chP);
+          if (!okP2) return json({ ok: false, message: '清理签到记录失败（' + (_d1LastErr || 'D1 异常') + '），买家数据未动，请重试' }, 503, CORS_P);
+        }
+        for (let pj = 0; pj < uidsP.length; pj += 100) {
+          const chQ = uidsP.slice(pj, pj + 100);
+          const okP3 = await d1Run('DELETE FROM sign_users WHERE uid IN (%s)'.replace('%s', chQ.map(function () { return '?'; }).join(',')), chQ);
+          if (!okP3) return json({ ok: false, message: '清理测试买家失败（' + (_d1LastErr || 'D1 异常') + '），请重试' }, 503, CORS_P);
+        }
+      }
+      console.log('签到产品清理: test 买家 ' + tU.length + ' 个，签到记录 ' + delLg + ' 条');
+      return json({ ok: true, scope: scopeP, deleted: tU.length, logs: delLg }, 200, CORS_P);
+    }
     /* ================= 方案C：网页自助扫码登记 ================= */
     /* 买家页面：/r/<8 位码>。不走 PAGE_ROUTES 口令（那是内部成员页，不能发给买家）。 */
     if (url.pathname.indexOf('/r/') === 0 && request.method === 'GET') {
