@@ -10142,14 +10142,16 @@ async function handle(request) {
                 if (Number(ex[0].active) !== 1) {
                   await d1Run('UPDATE blacklist SET active=1, refcnt=?, at=?, reason=? WHERE id=?',
                     [cN, bjStamp(), '退款 ' + cN + ' 次（自动）', ex[0].id]);
-                  blMsg = '；该身份已重新拉入黑名单（退款 ' + cN + ' 次 ≥ 阈值 ' + thr + '）';
+                  blMsg = '；该身份已重新拉入黑名单（退款 ' + cN + ' 次 ≥ 阈值 ' + thr + '）'
+                    + await blDemoteAccounts(_bu, _bn);
                 } else {
                   await d1Run('UPDATE blacklist SET refcnt=? WHERE id=?', [cN, ex[0].id]);
                 }
               } else {
                 await d1Run('INSERT INTO blacklist (uid,name,refcnt,reason,src,at,active) VALUES (?,?,?,?,?,? ,1)',
                   [_bu, _bn, cN, '退款 ' + cN + ' 次（自动）', 'auto', bjStamp()]);
-                blMsg = '；该身份已自动拉入黑名单（退款 ' + cN + ' 次 ≥ 阈值 ' + thr + '），此后无法登记';
+                blMsg = '；该身份已自动拉入黑名单（退款 ' + cN + ' 次 ≥ 阈值 ' + thr + '），此后无法登记'
+                  + await blDemoteAccounts(_bu, _bn);
               }
             } else if (!on && cN < thr) {
               const ex = await d1All("SELECT id FROM blacklist WHERE (uid=? OR name=?) AND active=1 AND src='auto'", [_bu, _bn]);
@@ -10336,6 +10338,52 @@ async function blRefundCount(uid, name) {
   if (!u && !n) return 0;
   const r = await d1All("SELECT COUNT(*) n FROM ledger WHERE COALESCE(refunded,0)=1 AND ((uid<>'' AND uid=?) OR (name<>'' AND name=?))", [u, n]);
   return (r && r.length) ? (Number(r[0].n) || 0) : -1;
+}
+// 2026-11-22（用户口径）：自动拉黑达成时，把该身份名下在池的号一并转「永久公益号」。
+//   完整链路：标退款→扣有效期（下限=登记日）→到期自动降公益（11-05 已有）→再买再退满阈值→拉黑→立即转公益。
+//   转公益后：号留在池里继续帮别人听、不占登记名额、不发提醒；该身份再登记/续费被黑名单拦。
+//   取消退款解除黑名单后号不会自动恢复 —— 续费一次即恢复普通号（11-09 口径，pub 随登记自然归 0）。
+//   hz 号本地直写（pruneExpired 同款语义：pub=1/exp=forever/清email，KV+D1 双写）；dz 号走 peer/entry 转发。
+//   读失败/没找到/转发失败 → 只返回提示文案（拼进标退款返回消息），不影响拉黑本身。
+async function blDemoteAccounts(uid, name) {
+  if (!d1ok()) return '；号池不可读，转公益未执行';
+  const u = String(uid || ''), n = String(name || '');
+  if (!u && !n) return '';
+  const rows = await d1All("SELECT pool,uid,name,pub FROM accounts WHERE (uid<>'' AND uid=?) OR (name<>'' AND name=?)", [u, n]);
+  if (rows === null) return '；号池读取失败，转公益未执行';
+  if (!rows.length) return '';
+  const done = [], fail = [];
+  for (const row of rows) {
+    const tag = String(row.name || row.uid || '?');
+    if (Number(row.pub) === 1) continue;                    // 已是公益号，跳过
+    try {
+      if (String(row.pool) === POOL_NAME) {
+        const er = await d1All('SELECT * FROM accounts WHERE pool=? AND uid=?', [String(row.pool), String(row.uid || '')]);
+        if (!er || !er.length) { fail.push(tag); continue; }
+        const e = d1RowToEntry(er[0]);
+        e.pub = 1; e.exp = 'forever'; e.email = '';         // pruneExpired 同款语义
+        try { await POOL.put(entryKeyOf(e), JSON.stringify(e)); }
+        catch (er2) { console.error('转公益 KV 写失败（继续走 D1）:', e && (e.name || e.uid)); }
+        if (!(await d1Upsert(e))) { fail.push(tag); continue; }
+        done.push(tag);
+      } else {
+        // dz 号：经跨群对穿转发（与有效期自动扣减同一条通道、同一个口令）
+        const c3 = await cfg();
+        const peerUrl = (cleanKV(await POOL.get('PEER_URL')) || PEER_DEFAULT).replace(/\/+$/, '');
+        const fwdPass = (await peerKey()) || c3.groupPass;
+        if (!fwdPass) { fail.push(tag); continue; }
+        const rF = await fetch(peerUrl + '/api/peer/entry', { method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'User-Agent': 'cron-relay-worker' },
+          body: JSON.stringify({ pass: fwdPass, action: 'update', uid: String(row.uid || ''), pub: true }) });
+        if (rF.status === 200) done.push(tag); else fail.push(tag);
+      }
+    } catch (e) { fail.push(tag); }
+  }
+  if (done.length) { try { await ccBust(); } catch (e) {} try { await refreshPoolSnap(); } catch (e) {} }
+  let msg = '';
+  if (done.length) msg += '；已转永久公益号：' + done.join('、');
+  if (fail.length) msg += '；转公益失败（请到编辑弹窗手动改）：' + fail.join('、');
+  return msg;
 }
 // ---- 2026-10-23：两仓库最近一次 run.yml 作业状态（供控制台「运行状态」横条）----
 // 以前「今晚 38/38 到底成没成」只能人工去 GitHub 翻，job 绿但分片静默失败也看不出来。
