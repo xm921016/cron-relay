@@ -2471,6 +2471,14 @@ async function addEntry(entry) {
   const ekey = entryKeyOf(entry);
   const uidKey = entry.uid != null ? String(entry.uid) : null;
 
+  // 2026-11-22 黑名单拦截：uid 或手机号命中活跃黑名单 → 新登/续费/补登一律拒绝。
+  //   黑名单表两群共用（共享 D1），hz/dz 两份 addEntry 都查；读失败放行（见 blFind 注释）。
+  try {
+    const _bl = await blFind(uidKey, entry.name);
+    if (_bl) return { ok: false, msg: '该账号已被列入黑名单（历史退款 ' + Math.max(1, Number(_bl.refcnt) || 0)
+      + ' 次），无法登记。如有疑问请联系客服处理。' };
+  } catch (e) { console.error('黑名单检查失败（放行）:', e && e.message); }
+
   // ---- D1 快速路径：一次 SELECT 完成查重（原路径要把 213 个 entry 键全读一遍）----
   if (d1ok()) {
     // uid 为空的（用 name 占位的老号）只能按 name 查。不带 uid 时不要拼那个 ? 占位符，
@@ -10099,8 +10107,102 @@ async function handle(request) {
         }
       }
       try { await ccBust(); } catch (e) {}
+      // 2026-11-22 黑名单联动：标退款后统计该身份累计退款单数，达到阈值自动拉入黑名单
+      //   （此后该 uid/手机号任何登记都被拒）；取消退款后重算，低于阈值则自动解除
+      //   「自动拉黑」的行（src=manual 手动拉的不动）。联动失败只少提示，不影响退款标记本身。
+      let blMsg = '';
+      try {
+        const _bu = String(row.uid || ''), _bn = String(row.name || '');
+        if (_bu || _bn) {
+          const cN = await blRefundCount(_bu, _bn);
+          if (cN >= 0) {
+            const thr = (await blCfg()).threshold;
+            if (on && cN >= thr) {
+              const ex = await d1All('SELECT id,active FROM blacklist WHERE uid=? OR name=? LIMIT 1', [_bu, _bn]);
+              if (ex && ex.length) {
+                if (Number(ex[0].active) !== 1) {
+                  await d1Run('UPDATE blacklist SET active=1, refcnt=?, at=?, reason=? WHERE id=?',
+                    [cN, bjStamp(), '退款 ' + cN + ' 次（自动）', ex[0].id]);
+                  blMsg = '；该身份已重新拉入黑名单（退款 ' + cN + ' 次 ≥ 阈值 ' + thr + '）';
+                } else {
+                  await d1Run('UPDATE blacklist SET refcnt=? WHERE id=?', [cN, ex[0].id]);
+                }
+              } else {
+                await d1Run('INSERT INTO blacklist (uid,name,refcnt,reason,src,at,active) VALUES (?,?,?,?,?,? ,1)',
+                  [_bu, _bn, cN, '退款 ' + cN + ' 次（自动）', 'auto', bjStamp()]);
+                blMsg = '；该身份已自动拉入黑名单（退款 ' + cN + ' 次 ≥ 阈值 ' + thr + '），此后无法登记';
+              }
+            } else if (!on && cN < thr) {
+              const ex = await d1All("SELECT id FROM blacklist WHERE (uid=? OR name=?) AND active=1 AND src='auto'", [_bu, _bn]);
+              if (ex && ex.length) {
+                await d1Run('UPDATE blacklist SET active=0 WHERE id IN (' + ex.map(x => '?').join(',') + ')',
+                  ex.map(x => x.id));
+                blMsg = '；退款次数降回阈值以下（' + cN + ' < ' + thr + '），自动拉黑已解除';
+              }
+            }
+          }
+        }
+      } catch (e) { console.error('黑名单联动失败:', e && e.message); }
       return json({ ok: true, expChanged: expChanged,
-        message: (on ? '已标记退款：这一单不计营收、不给客服提成' : '已取消退款标记') + expMsg }, 200, CORS);
+        message: (on ? '已标记退款：这一单不计营收、不给客服提成' : '已取消退款标记') + expMsg + blMsg }, 200, CORS);
+    }
+    // 2026-11-22 黑名单管理：列表 + 阈值（满权限专属，只读口令连看都看不到）
+    if (url.pathname === '/api/console/blacklist' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) return json({ message: '只读口令不能看黑名单' }, 403, CORS);
+      if (!d1ok()) return json({ message: 'D1 不可用' }, 503, CORS);
+      const rows = await d1All('SELECT id,uid,name,refcnt,reason,src,at,active FROM blacklist ORDER BY active DESC, at DESC LIMIT 500');
+      if (rows === null) return json({ message: '黑名单读取失败：' + d1ErrHint() }, 503, CORS);
+      const b = await blCfg();
+      return json({ ok: true, threshold: b.threshold, rows: (rows || []).map(r => ({
+        id: r.id, uid: String(r.uid || ''), name: String(r.name || ''),
+        refcnt: Number(r.refcnt) || 0, reason: String(r.reason || ''),
+        src: String(r.src || ''), at: String(r.at || ''), active: Number(r.active) || 0,
+      })) }, 200, CORS);
+    }
+    if (url.pathname === '/api/console/blacklist_set' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) return json({ message: '只读口令不能改黑名单' }, 403, CORS);
+      if (!d1ok()) return json({ message: 'D1 不可用' }, 503, CORS);
+      const act = String(body.act || '');
+      if (act === 'threshold') {
+        const t = parseInt(body.threshold, 10);
+        if (!(t >= 1 && t <= 20)) return json({ message: '阈值必须是 1~20 的整数' }, 400, CORS);
+        const okW = await d1Run('INSERT OR REPLACE INTO kv_misc (k,v,updated_at) VALUES (?,?,?)',
+          ['blacklist_cfg', JSON.stringify({ threshold: t }), bjStamp()]);
+        if (!okW) return json({ message: '写库失败：' + d1ErrHint() }, 503, CORS);
+        try { await ccBust(); } catch (e) {}
+        return json({ ok: true, message: '黑名单阈值已改为 ' + t + ' 次（下一次标退款生效）' }, 200, CORS);
+      }
+      if (act === 'add') {
+        const u = String(body.uid || '').trim().slice(0, 40);
+        const n = String(body.name || '').trim().slice(0, 40);
+        if (!u && !n) return json({ message: 'UID 和手机号至少填一个' }, 400, CORS);
+        const reason = String(body.reason || '').trim().slice(0, 80) || '手动加入';
+        const ex = await d1All("SELECT id,active FROM blacklist WHERE (uid<>'' AND uid=?) OR (name<>'' AND name=?) LIMIT 1", [u, n]);
+        if (ex === null) return json({ message: '黑名单读取失败：' + d1ErrHint() }, 503, CORS);
+        if (ex.length) return json({ ok: false, message: Number(ex[0].active) === 1
+          ? '这个身份已经在黑名单里了，不用重复加'
+          : '这个身份有一条历史黑名单记录（已解除），如需重新拉黑请先在列表里处理或直接改表' }, 200, CORS);
+        const okW = await d1Run('INSERT INTO blacklist (uid,name,refcnt,reason,src,at,active) VALUES (?,?,?,?,?,?,1)',
+          [u, n, 0, reason, 'manual', bjStamp()]);
+        if (!okW) return json({ message: '写库失败：' + d1ErrHint() }, 503, CORS);
+        try { await ccBust(); } catch (e) {}
+        return json({ ok: true, message: '已加入黑名单：' + (u || n) + '，此后该身份无法登记' }, 200, CORS);
+      }
+      if (act === 'remove') {
+        const idN = parseInt(body.id, 10);
+        if (!idN) return json({ message: '缺少黑名单行 id' }, 400, CORS);
+        const okW = await d1Run('UPDATE blacklist SET active=0 WHERE id=?', [idN]);
+        if (!okW) return json({ message: '写库失败：' + d1ErrHint() }, 503, CORS);
+        try { await ccBust(); } catch (e) {}
+        return json({ ok: true, message: '已解除黑名单（历史记录保留，该身份现在可以正常登记）' }, 200, CORS);
+      }
+      return json({ message: '未知操作' }, 400, CORS);
     }
     // 补号时找原单：按手机号 / 网易 UID / 备注片段搜成交台账。
     // 原号早被删了也能搜到 —— 这正是流水表的意义（accounts 里早没这行了）。
@@ -10183,6 +10285,38 @@ async function consoleAuth(body) {
 // 写接口专用：只认满权限口令
 async function consoleAuthFull(body) {
   return (await consoleRole(body)) === 'full';
+}
+// ---- 2026-11-22 黑名单：退单满 N 次（阈值可配置）自动拉入，登记入口（addEntry）统一拦截 ----
+// 场景：用户登记 7 天加速期刷满后在闲鱼退款，再反复「新登记→退款」薅加速期。
+// 存储：共享 D1 的 blacklist 表（hz/dz 两份 worker 共用，主群/定制群都拦）；
+//       阈值存 kv_misc k='blacklist_cfg'（JSON {"threshold":N}），控制台随时可改。
+// 计数口径：台账里 refunded=1 的单（控制台「标退款」打的标），按 uid 或手机号匹配累计；
+//       「手动删号=退单」不计入 —— 删号有很多正常原因（号主不用了等），不能当退款算。
+// 容错口径：D1 读失败一律放行，不因为基础设施故障把客户挡在外面（与全项目既有口径一致）。
+async function blCfg() {
+  try {
+    const r = await d1All("SELECT v FROM kv_misc WHERE k='blacklist_cfg'");
+    if (r && r.length) {
+      const j = JSON.parse(r[0].v);
+      if (j && Number(j.threshold) >= 1) return { threshold: Math.floor(Number(j.threshold)) };
+    }
+  } catch (e) {}
+  return { threshold: 3 };
+}
+// 命中即返回活跃黑名单行（uid 或 name 任一匹配；两边都空不拦）
+async function blFind(uid, name) {
+  if (!d1ok()) return null;
+  const u = String(uid || ''), n = String(name || '');
+  if (!u && !n) return null;
+  const r = await d1All("SELECT id,uid,name,refcnt,reason,src,at FROM blacklist WHERE active=1 AND ((uid<>'' AND uid=?) OR (name<>'' AND name=?)) LIMIT 1", [u, n]);
+  return (r && r.length) ? r[0] : null;
+}
+// 某身份累计退款单数（refunded=1 的台账行数）；读失败返回 -1（调用方据此不动黑名单）
+async function blRefundCount(uid, name) {
+  const u = String(uid || ''), n = String(name || '');
+  if (!u && !n) return 0;
+  const r = await d1All("SELECT COUNT(*) n FROM ledger WHERE COALESCE(refunded,0)=1 AND ((uid<>'' AND uid=?) OR (name<>'' AND name=?))", [u, n]);
+  return (r && r.length) ? (Number(r[0].n) || 0) : -1;
 }
 // ---- 2026-10-23：两仓库最近一次 run.yml 作业状态（供控制台「运行状态」横条）----
 // 以前「今晚 38/38 到底成没成」只能人工去 GitHub 翻，job 绿但分片静默失败也看不出来。
@@ -11531,6 +11665,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini gray" id="btnReg" style="display:none" title="生成买家自助登记链接；续费/补登必须选原单，类型定在链接上" data-page-node-id="JqzT5fuKCyCteGDQJKQloy">登记链接</button>
     <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限/只读都可看，纯读不改数据）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
     <button class="mini gray" id="btnMailTrace" style="display:none" title="失效号邮件提醒查询（满权限可见，实时读 D1）：查某个失效号的重登邮件/删号通知/每日提醒到底发没发、什么时候发的；也可一键列出全部失效号的邮件状态">邮件提醒</button>
+    <button class="mini gray" id="btnBlk" style="display:none" title="黑名单管理（满权限专属）：退单满 N 次自动拉黑、登记入口自动拦截；可手动加入/解除，阈值随时可调">黑名单</button>
     <button class="mini gray" id="btnOut" data-page-node-id="JfDeJt5vbASdRoOMC7tVaS">退出</button>
   </div>
   <!-- ===== 2026-11-15 方案④：手机端筛选面板 / 遮罩 / 工具抽屉（桌面 display:none）=====
@@ -11776,6 +11911,23 @@ body:has(.modal:not([hidden])){overflow:hidden}
   <div class="row2"><button class="gray" id="mtClose">关闭</button></div>
   <div class="msg" id="mtm"></div>
 </div></div>
+<!-- ===== 2026-11-22 黑名单面板（满权限专属）：阈值配置 / 手动加入 / 解除防误操作 ===== -->
+<div class="modal" id="blModal" hidden><div class="mbox" style="width:900px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
+  <h3>黑名单</h3>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">退单满 <b>阈值</b> 次自动拉入黑名单，之后该账号（按网易 UID 或手机号匹配）无法登记 —— 防「登记 7 天加速期 → 刷满 → 闲鱼退款 → 再登记」的反复薅羊毛。退款计数只算<b>「标退款」打过的单</b>（购买记录/月度结算里的退款标记），手动删号不计入；标退款时自动判黑，取消退款次数降回阈值以下时自动解除（手动加的不受影响）。解除后立即可正常登记，历史记录保留。</p>
+  <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
+    <div style="width:130px"><label style="margin-top:0">退款拉黑阈值</label><input id="blThr" type="number" min="1" max="20" style="width:100%"></div>
+    <button class="mini" id="blThrSave" style="margin-top:0;padding:9px 14px">保存阈值</button>
+    <div style="width:160px"><label style="margin-top:0">手动加入（UID）</label><input id="blUid" placeholder="网易 UID，可留空" style="width:100%"></div>
+    <div style="width:160px"><label style="margin-top:0">手动加入（手机号）</label><input id="blName" placeholder="手机号，可留空" style="width:100%"></div>
+    <div style="width:150px"><label style="margin-top:0">原因（可留空）</label><input id="blReason" placeholder="如：闲鱼恶意退款" style="width:100%"></div>
+    <button class="mini" id="blAdd" style="margin-top:0;padding:9px 14px">加入黑名单</button>
+    <button class="mini gray" id="blRefresh" style="margin-top:0;padding:9px 14px">刷新</button>
+  </div>
+  <div id="blBody" style="margin-top:12px;font-size:13px;flex:1;min-height:0;overflow:auto"></div>
+  <div class="row2"><button class="gray" id="blClose">关闭</button></div>
+  <div class="msg" id="blm"></div>
+</div></div>
 <!-- ===== 2026-11-15 方案④：账号详情弹窗（满权限账号表的「详情」按钮）=====
      只读展示该行全部字段（数据源 render 时的 window.ROWS[i]），满权限时给「编辑」按钮走原 openEdit。 -->
 <div class="modal" id="infoModal" hidden data-page-node-id="6HpiU5UmfrPZ8lUIWiN2Kj"><div class="mbox" id="infoBox" data-page-node-id="JPeAYz32g1x6exQUKltOJi">
@@ -11957,6 +12109,7 @@ function applyRole(role){
   var brs=$('btnRescue');if(brs)brs.style.display='';
   // 2026-11-17：邮件提醒查询（涉及买家邮箱，满权限专属，服务端同拦）
   var bmt=$('btnMailTrace');if(bmt)bmt.style.display=full?'':'none';
+  var bb=$('btnBlk');if(bb)bb.style.display=full?'':'none';
   var t=$('ptitle');
   if(t){
     var old=document.getElementById('roTag');
@@ -13849,6 +14002,83 @@ $('btnMailTrace').onclick=function(){
   $('mtModal').hidden=false;
   mtQuery('list');   // 打开先看失效号清单（最常用）；输号回车即查单号
 };
+/* ===== 2026-11-22 黑名单面板（满权限专属）：阈值 / 手动加入 / 解除 ===== */
+var BLROWS=[];
+function blLoad(){
+  var t=JSON.parse(TOKEN||'{}');
+  $('blm').textContent='';$('blm').className='msg';
+  $('blBody').innerHTML='<i style="color:#888">加载中…</i>';
+  api('/api/console/blacklist',{user:t.user,pass:t.pass}).then(function(o){
+    if(!(o.ok&&o.d&&o.d.ok)){$('blBody').innerHTML='<span style="color:#a32d2d">'+esc((o.d&&o.d.message)||'加载失败')+'</span>';return;}
+    $('blThr').value=o.d.threshold;
+    BLROWS=o.d.rows||[];
+    blRender();
+  }).catch(function(){$('blBody').innerHTML='<span style="color:#a32d2d">网络错误</span>';});
+}
+function blRender(){
+  var act=[],his=[];
+  for(var i=0;i<BLROWS.length;i++)(BLROWS[i].active===1?act:his).push(BLROWS[i]);
+  var h='';
+  if(!act.length)h+='<p style="color:#888;margin:4px 0">当前没有拉黑的账号。</p>';
+  else{
+    h+='<table style="width:100%;font-size:12.5px;border-collapse:collapse"><tr>'
+      +'<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee;color:#444">账号（UID / 手机号）</th>'
+      +'<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee;color:#444">退款次数</th>'
+      +'<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee;color:#444">原因</th>'
+      +'<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee;color:#444">来源</th>'
+      +'<th style="text-align:left;padding:6px 8px;border-bottom:1px solid #eee;color:#444">时间</th><th></th></tr>';
+    for(var j=0;j<act.length;j++){var r=act[j];
+      h+='<tr><td style="padding:6px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.uid||'')+(r.uid&&r.name?' / ':'')+esc(r.name||'')+'</td>'
+        +'<td style="padding:6px 8px;border-bottom:1px solid #f2f2f2">'+(r.refcnt||'-')+'</td>'
+        +'<td style="padding:6px 8px;border-bottom:1px solid #f2f2f2">'+esc(r.reason||'')+'</td>'
+        +'<td style="padding:6px 8px;border-bottom:1px solid #f2f2f2">'+(r.src==='auto'?'<span class="badge b-red">自动</span>':'<span class="badge b-gray">手动</span>')+'</td>'
+        +'<td style="padding:6px 8px;border-bottom:1px solid #f2f2f2;color:#888">'+esc(String(r.at||'').slice(0,19))+'</td>'
+        +'<td style="padding:6px 8px;border-bottom:1px solid #f2f2f2"><a href="javascript:void(0)" style="color:#3b6d11;font-size:12px" data-act="blrm" data-id="'+r.id+'">解除</a></td></tr>';
+    }
+    h+='</table>';
+  }
+  if(his.length)h+='<details style="margin-top:10px;font-size:12px;color:#888"><summary>历史记录（已解除 '+his.length+' 条）</summary><p style="line-height:1.8;margin:6px 0 0">'
+    +his.map(function(r){return esc(r.uid||r.name||'')+'（'+esc(r.reason||'')+'，'+esc(String(r.at||'').slice(0,19))+'）';}).join('<br>')+'</p></details>';
+  $('blBody').innerHTML=h;
+}
+function blMsg(t,ok){var m=$('blm');m.textContent=t;m.className='msg'+(ok?' good':' err');}
+$('btnBlk').onclick=function(){$('blm').textContent='';$('blBody').innerHTML='';$('blModal').hidden=false;blLoad();};
+$('blClose').onclick=function(){$('blModal').hidden=true;};
+$('blRefresh').onclick=blLoad;
+$('blThrSave').onclick=function(){
+  var t=JSON.parse(TOKEN||'{}'),v=parseInt($('blThr').value,10);
+  if(!(v>=1&&v<=20)){blMsg('阈值必须是 1~20 的整数');return;}
+  blMsg('保存中…',true);
+  api('/api/console/blacklist_set',{user:t.user,pass:t.pass,act:'threshold',threshold:v}).then(function(o){
+    if(o.ok&&o.d&&o.d.ok){blMsg(o.d.message||'已保存',true);blLoad();}
+    else blMsg((o.d&&o.d.message)||'保存失败');
+  }).catch(function(){blMsg('网络错误');});
+};
+$('blAdd').onclick=function(){
+  var t=JSON.parse(TOKEN||'{}');
+  var u=$('blUid').value.trim(),n=$('blName').value.trim();
+  if(!u&&!n){blMsg('UID 和手机号至少填一个');return;}
+  blMsg('提交中…',true);
+  api('/api/console/blacklist_set',{user:t.user,pass:t.pass,act:'add',uid:u,name:n,reason:$('blReason').value.trim()}).then(function(o){
+    if(o.ok&&o.d&&o.d.ok){blMsg(o.d.message||'已加入',true);$('blUid').value='';$('blName').value='';$('blReason').value='';blLoad();}
+    else blMsg((o.d&&o.d.message)||'加入失败');
+  }).catch(function(){blMsg('网络错误');});
+};
+$('blBody').addEventListener('click',function(ev){
+  var el=ev.target;
+  if(!el||!el.getAttribute||el.getAttribute('data-act')!=='blrm')return;
+  if(el.getAttribute('data-armed')!=='1'){   // 两段确认：第一下变红，再点一下才真解除（防误点）
+    el.setAttribute('data-armed','1');el.textContent='确认解除?';el.style.color='#a32d2d';
+    setTimeout(function(){if(el.parentNode){el.setAttribute('data-armed','0');el.textContent='解除';el.style.color='';}},4000);
+    return;
+  }
+  var t=JSON.parse(TOKEN||'{}');
+  el.textContent='处理中…';el.style.color='#888';
+  api('/api/console/blacklist_set',{user:t.user,pass:t.pass,act:'remove',id:el.getAttribute('data-id')}).then(function(o){
+    if(o.ok&&o.d&&o.d.ok){blMsg(o.d.message||'已解除',true);blLoad();}
+    else{blMsg((o.d&&o.d.message)||'解除失败');blLoad();}
+  }).catch(function(){blMsg('网络错误');blLoad();});
+});
 /* 2026-11-15：一键跳到删号记录区 —— 号池几百行，滚到底太累（用户反馈）。
    展开并平滑滚过去；数据还没回来（hidden）也先摘掉 hidden，loadData 回填列表。 */
 
@@ -14341,7 +14571,7 @@ function mDeployMobile(){
   if(MOV.length)return;
   var fids=['fagent','fplan','dr'],fs=$('fpSlot');   // 2026-11-18：'sort' 已删
   if(fs){fids.forEach(function(id){var el=mGrab(id);if(el)fs.appendChild(el);});}
-  var tids=['btnCsv','btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnMailTrace','btnOut'],ts=$('tdSlot');
+  var tids=['btnCsv','btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnMailTrace','btnBlk','btnOut'],ts=$('tdSlot');
   if(ts){tids.forEach(function(id){var el=mGrab(id);if(el)ts.appendChild(el);});}
   var kp=$('kjP');
   if(kp&&!$('kjWrap')){
