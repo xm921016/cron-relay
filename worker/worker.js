@@ -6622,6 +6622,12 @@ async function handle(request) {
         }));
         const bRp2 = await d1Batch(stmtsRp);
         if (!bRp2) return json({ ok: false, message: '写 sign_logs 失败（' + (_d1LastErr || 'D1 异常') + '）' }, 503);
+        // 2026-11-22：同步刷新 last_ok_day（首跑发现落库后该列永远为空），只刷本次 ok=1 的 uid
+        const okUidsRp = logsRp.filter(x => x && x.ok && x.uid).map(x => String(x.uid).slice(0, 64));
+        if (okUidsRp.length) {
+          const uStsRp = okUidsRp.map(u => ({ sql: 'UPDATE sign_users SET last_ok_day=? WHERE uid=?', params: [dayRp, u] }));
+          await d1Batch(uStsRp);
+        }
       }
       let deadK = 0;
       for (const du of deadRp) {
