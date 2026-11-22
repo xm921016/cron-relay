@@ -30,6 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # 2026-11-22 首跑实测：runner 缺 Crypto 模块，signin.py 需要 pycryptodome。
+      # 补领模式不出图，不装 pillow/CJK 字体（notes.py 才用）。
+      - run: pip install -q pycryptodome requests
       - name: claim-only（P4 云贝任务 + P6 VIP 成长值，只领不签不判死）
         env:
           CF_TOKEN: ${{ secrets.CF_TOKEN }}
