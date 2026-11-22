@@ -6458,8 +6458,8 @@ async function handle(request) {
         },
       });
     }
-    /* 新登记第一步：收邮箱 → 一次性会话 token（KV，2 小时）。
-       无卡公开链接，靠 IP 频控 + token 一次性防刷。 */
+    /* 新登记第一步：一次性会话 token（KV，2 小时）。2026-11-22 单页版：进页即建会话，
+       邮箱/协议在提交步（submit/csubmit）服务端强校验——这里只做 IP 频控 + 发 token。 */
     if (url.pathname === '/api/s/new' && request.method === 'POST') {
       let bN;
       try { bN = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
@@ -6467,8 +6467,9 @@ async function handle(request) {
       const nN = await d1Hit('snew', ipN + ':' + beijingDate());
       if (nN !== null && nN > 20) return json({ ok: false, message: '今天登记次数太多，请明天再试或联系客服' }, 429);
       const emN = String(bN.email || '').trim();
-      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emN) || emN.length > 120) return json({ ok: false, message: '邮箱格式不对，检查一下' }, 400);
-      if (bN.agree !== true) return json({ ok: false, message: '请先勾选同意服务说明' }, 400);
+      if (emN && (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emN) || emN.length > 120)) {
+        return json({ ok: false, message: '邮箱格式不对，检查一下' }, 400);
+      }
       const tN = signRand(24).toLowerCase();
       try {
         await POOL.put('sign:tok:' + tN, JSON.stringify({ email: emN, state: 'new', at: Date.now() }), { expirationTtl: 7200 });
@@ -6567,7 +6568,12 @@ async function handle(request) {
       if (nS2 !== null && nS2 > 30) return json({ ok: false, message: '今天提交次数太多，请明天再试或联系客服' }, 429);
       const stS2 = String(bS.st || '').trim();
       const muS = String(bS.mu || '').trim();
+      const emS2 = String(bS.email || '').trim();
       if (!muS) return json({ ok: false, message: '没有拿到登录凭证，请重新扫码' }, 400);
+      if (bS.agree !== true) return json({ ok: false, message: '请先勾选同意服务说明' }, 400);
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emS2) || emS2.length > 120) {
+        return json({ ok: false, message: '请先填写正确的邮箱' }, 400);
+      }
       const tokS = await signTokGet(stS2);
       if (tokS === undefined) return json({ ok: false, message: '系统正在忙，请 1 分钟后再试' }, 503);
       if (!tokS || tokS.state !== 'new') return json({ ok: false, message: '会话已过期，请刷新页面重新开始' }, 410);
@@ -6583,10 +6589,10 @@ async function handle(request) {
       const upS = await d1Run("INSERT INTO sign_users (uid,name,ck,email,reg_code,status,added_at,last_ok_day,dead_notified_day,note) " +
         "VALUES (?,?,?,?,?,'active',?,'','','') " +
         "ON CONFLICT(uid) DO UPDATE SET ck=excluded.ck, name=excluded.name, email=excluded.email, status='active', dead_notified_day=''",
-        [uidS, String(vS.nick || ''), 'MUSIC_U=' + muS, String(tokS.email || ''), codeS, bjStamp()]);
+        [uidS, String(vS.nick || ''), 'MUSIC_U=' + muS, emS2, codeS, bjStamp()]);
       if (!upS) return json({ ok: false, message: '数据库暂时繁忙，登记没有完成，请稍后再试一次' }, 503);
-      try { await POOL.put('sign:tok:' + stS2, JSON.stringify({ email: String(tokS.email || ''), state: 'used', at: Date.now() }), { expirationTtl: 600 }); } catch (e) {}
-      try { await mailEnqueue('sign', uidS, 'signreg', beijingDate(), String(tokS.email || ''), String(vS.nick || ''), '', codeS); }
+      try { await POOL.put('sign:tok:' + stS2, JSON.stringify({ email: emS2, state: 'used', at: Date.now() }), { expirationTtl: 600 }); } catch (e) {}
+      try { await mailEnqueue('sign', uidS, 'signreg', beijingDate(), emS2, String(vS.nick || ''), '', codeS); }
       catch (e) { console.error('signreg 邮件入队失败:', e && e.message); }
       console.log('签到产品登记成功: uid=' + uidS + ' code=' + codeS);
       return json({ ok: true, code: codeS }, 200, { 'Cache-Control': 'no-store' });
@@ -6629,8 +6635,13 @@ async function handle(request) {
       const codeC5 = regNormCode(bC5.code);
       const stC5 = String(bC5.st || '').trim();
       const muC5 = String(bC5.mu || '').trim();
+      const emC5 = String(bC5.email || '').trim();
       if (!codeC5) return json({ ok: false, message: '卡密缺失，请从卡密链接进入' }, 400);
       if (!muC5) return json({ ok: false, message: '没有拿到登录凭证，请重新扫码' }, 400);
+      if (bC5.agree !== true) return json({ ok: false, message: '请先勾选同意服务说明' }, 400);
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emC5) || emC5.length > 120) {
+        return json({ ok: false, message: '请先填写正确的邮箱' }, 400);
+      }
       const tokC5 = await signTokGet(stC5);
       if (tokC5 === undefined) return json({ ok: false, message: '系统正在忙，请 1 分钟后再试' }, 503);
       if (!tokC5 || tokC5.state !== 'new') return json({ ok: false, message: '会话已过期，请刷新页面重新开始' }, 410);
@@ -6651,11 +6662,11 @@ async function handle(request) {
       if (exC5.length) return json({ ok: false, message: '这个账号已经登记过签到服务，不需要再兑换卡密' }, 400);
       const uC5 = await d1All("UPDATE sign_users SET uid=?, ck=?, name=?, email=?, status='active', added_at=?, last_ok_day='', dead_notified_day='' " +
         "WHERE reg_code=? AND status='unused' AND uid LIKE 'card:%' RETURNING uid",
-        [uidC5, 'MUSIC_U=' + muC5, String(vC5.nick || ''), String(tokC5.email || ''), bjStamp(), codeC5]);
+        [uidC5, 'MUSIC_U=' + muC5, String(vC5.nick || ''), emC5, bjStamp(), codeC5]);
       if (uC5 === null) return json({ ok: false, message: '数据库暂时繁忙，兑换没有完成，请稍后再试一次' }, 503);
       if (!uC5.length) return json({ ok: false, message: '这张卡密刚刚被使用了，如非本人操作请联系客服' }, 409);
-      try { await POOL.put('sign:tok:' + stC5, JSON.stringify({ email: String(tokC5.email || ''), state: 'used', at: Date.now() }), { expirationTtl: 600 }); } catch (e) {}
-      try { await mailEnqueue('sign', uidC5, 'signreg', beijingDate(), String(tokC5.email || ''), String(vC5.nick || ''), '', codeC5); }
+      try { await POOL.put('sign:tok:' + stC5, JSON.stringify({ email: emC5, state: 'used', at: Date.now() }), { expirationTtl: 600 }); } catch (e) {}
+      try { await mailEnqueue('sign', uidC5, 'signreg', beijingDate(), emC5, String(vC5.nick || ''), '', codeC5); }
       catch (e) { console.error('signreg 邮件入队失败:', e && e.message); }
       console.log('签到产品卡密兑换成功: uid=' + uidC5 + ' code=' + codeC5);
       return json({ ok: true, code: codeC5 }, 200, { 'Cache-Control': 'no-store' });
@@ -6718,18 +6729,27 @@ async function handle(request) {
     }
     /* 卡密批量生成：管理接口（口令=ADMIN_PASS）。count 1~500/次，unused 总库存上限 5000。
        卡密=预建 unused 行：uid 占位 'card:'+码，reg_code=卡密码（UNIQUE 天然防重），
-       码='C'+9 位无歧义字符（signRand 同字符集，regNormCode 上限 12 位兼容）。 */
+       码='C'+9 位无歧义字符（signRand 同字符集，regNormCode 上限 12 位兼容）。
+       2026-11-22 加 CORS：本地卡密管理 HTML（file://）直接调，口令仍强校验。 */
+    if (url.pathname === '/api/sign/gencards' && request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      } });
+    }
     if (url.pathname === '/api/sign/gencards' && request.method === 'POST') {
+      const CORS_G = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
       let bG1;
-      try { bG1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      try { bG1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400, CORS_G); }
       const cG1 = await cfg();
-      if (!cG1.adminPass) return json({ ok: false, message: '未配置管理口令（KV 键 ADMIN_PASS）' }, 503);
-      if ((bG1.pass || '') !== cG1.adminPass) return json({ ok: false, message: '管理口令错误' }, 403);
+      if (!cG1.adminPass) return json({ ok: false, message: '未配置管理口令（KV 键 ADMIN_PASS）' }, 503, CORS_G);
+      if ((bG1.pass || '') !== cG1.adminPass) return json({ ok: false, message: '管理口令错误' }, 403, CORS_G);
       const cntG = Math.min(500, Math.max(1, parseInt(bG1.count, 10) || 0));
       const invG = await d1All("SELECT COUNT(*) n FROM sign_users WHERE status='unused'");
-      if (invG === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503);
+      if (invG === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_G);
       if (Number((invG[0] && invG[0].n) || 0) + cntG > 5000) {
-        return json({ ok: false, message: '未使用卡密库存已达上限（5000），请先清理再生成' }, 400);
+        return json({ ok: false, message: '未使用卡密库存已达上限（5000），请先清理再生成' }, 400, CORS_G);
       }
       const stmtsG = [];
       const codesG = [];
@@ -6742,11 +6762,32 @@ async function handle(request) {
         });
       }
       const bG2 = await d1Batch(stmtsG);
-      if (!bG2) return json({ ok: false, message: '写库失败（' + (_d1LastErr || 'D1 异常') + '）' }, 503);
+      if (!bG2) return json({ ok: false, message: '写库失败（' + (_d1LastErr || 'D1 异常') + '）' }, 503, CORS_G);
       /* d1Batch 全批原子且回 true（丢弃逐条结果）：true=整批插入成功
          （UNIQUE 撞码会整批抛错，31^9 撞码概率≈0），故 made=cntG，不逐条数 changes。 */
       console.log('签到产品卡密生成: 请求=' + cntG + ' 成功=' + cntG);
-      return json({ ok: true, made: cntG, codes: codesG }, 200, { 'Cache-Control': 'no-store' });
+      return json({ ok: true, made: cntG, codes: codesG }, 200, CORS_G);
+    }
+    /* 卡密库存/明细查询：管理接口（口令=ADMIN_PASS，CORS 同 gencards，给本地管理 HTML 用）。 */
+    if (url.pathname === '/api/sign/cardstat' && request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      } });
+    }
+    if (url.pathname === '/api/sign/cardstat' && request.method === 'POST') {
+      const CORS_S = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
+      let bS9;
+      try { bS9 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400, CORS_S); }
+      const cS9 = await cfg();
+      if (!cS9.adminPass) return json({ ok: false, message: '未配置管理口令' }, 503, CORS_S);
+      if ((bS9.pass || '') !== cS9.adminPass) return json({ ok: false, message: '管理口令错误' }, 403, CORS_S);
+      const stS9 = await d1All('SELECT status, COUNT(*) n FROM sign_users GROUP BY status');
+      if (stS9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
+      const listS9 = await d1All("SELECT reg_code, status, uid, name, email, added_at, last_ok_day FROM sign_users WHERE note='card' ORDER BY added_at DESC LIMIT 500");
+      if (listS9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
+      return json({ ok: true, stats: stS9, cards: listS9, today: beijingDate() }, 200, CORS_S);
     }
     /* ================= 方案C：网页自助扫码登记 ================= */
     /* 买家页面：/r/<8 位码>。不走 PAGE_ROUTES 口令（那是内部成员页，不能发给买家）。 */
@@ -11639,6 +11680,7 @@ button:disabled { opacity: 0.5; }
 .faq p { font-size: 13px; color: #555; line-height: 1.7; }
 .terms { display: none; font-size: 12px; color: #666; line-height: 1.8; margin-top: 10px;
   border-top: 1px dashed #d8dbe0; padding-top: 10px; }
+.mini { font-size: 12px; color: #888; line-height: 1.6; margin-top: 10px; text-align: center; }
 </style>
 </head>
 <body>
@@ -11647,26 +11689,26 @@ button:disabled { opacity: 0.5; }
   <p class="sub">每天自动完成打卡 / 云贝 / VIP 签到，掉线自动邮件提醒</p>
   <div id="modeTag" class="tag" style="display:none">重新扫码 · 恢复你的签到</div>
 
-  <div id="stepEmail" class="card">
-    <label>接收通知的邮箱</label>
-    <input id="email" type="email" autocomplete="email" placeholder="用于接收登记回执和掉线提醒">
-    <label class="agree"><input id="agree" type="checkbox">
-      <span>我已阅读并同意 <b onclick="toggleTerms()">服务说明</b>：本服务只用你的账号执行网易云官方的签到类操作，不需要你的密码，不会发布任何内容、不会消耗你的资产。</span></label>
-    <div id="terms" class="terms">
-      1. 服务范围：每日打卡、云贝签到、云贝任务领取、VIP 签到与等级奖励、音乐人云豆（如你是音乐人）。<br>
-      2. 账号安全：登记使用的是扫码产生的登录凭证（Cookie），不是密码；可随时在网易云 App「设置-账号与安全-登录设备管理」里下线我们，服务即停止。<br>
-      3. 失效处理：登录凭证偶尔会被网易云失效（正常现象），失效后系统发邮件提醒，点邮件里的链接重新扫码即可恢复。<br>
-      4. 责任说明：本服务仅提供签到辅助，不对账号本身的安全性作担保；因网易平台策略调整导致的服务变化，以协商为准。
+  <div class="card">
+    <div id="rowEmail">
+      <label>第一步：填邮箱</label>
+      <input id="email" type="email" autocomplete="email" placeholder="用于接收登记回执和掉线提醒">
+      <label class="agree"><input id="agree" type="checkbox">
+        <span>我已阅读并同意 <b onclick="toggleTerms()">服务说明</b>：本服务只用你的账号执行网易云官方的签到类操作，不需要你的密码，不会发布任何内容、不会消耗你的资产。</span></label>
+      <div id="terms" class="terms">
+        1. 服务范围：每日打卡、云贝签到、云贝任务领取、VIP 签到与等级奖励、音乐人云豆（如你是音乐人）。<br>
+        2. 账号安全：登记使用的是扫码产生的登录凭证（Cookie），不是密码；可随时在网易云 App「设置-账号与安全-登录设备管理」里下线我们，服务即停止。<br>
+        3. 失效处理：登录凭证偶尔会被网易云失效（正常现象），失效后系统发邮件提醒，点邮件里的链接重新扫码即可恢复。<br>
+        4. 责任说明：本服务仅提供签到辅助，不对账号本身的安全性作担保；因网易平台策略调整导致的服务变化，以协商为准。
+      </div>
+      <div id="emailErr" class="err"></div>
     </div>
-    <button id="btnEmail" onclick="startReg()">下一步：扫码登记</button>
-    <div id="emailErr" class="err"></div>
-  </div>
-
-  <div id="stepQr" class="card" style="display:none">
-    <div id="qrTip" class="tip">请用 <b>网易云音乐 App</b> 扫一扫下面的码</div>
+    <label id="qrLabel">第二步：扫码</label>
     <img id="qrImg" alt="二维码">
+    <div id="qrTip" class="tip">请用 <b>网易云音乐 App</b> 扫一扫下面的码</div>
     <button onclick="newKey()">换一张</button>
     <div id="qrErr" class="err"></div>
+    <p class="mini">邮箱填好、勾上同意、扫完码，会自动完成登记，不用再点按钮。</p>
   </div>
 
   <div id="stepDone" class="card" style="display:none">
@@ -11692,6 +11734,8 @@ var DEV = '';
 var POLL = null;
 var KEYCOUNT = 0;
 var DONE = false;
+var MU = '';
+var HOLD = false;
 
 function $(id) { return document.getElementById(id); }
 function setErr(id, msg) {
@@ -11724,27 +11768,37 @@ function getJson(u, cb) {
     .then(function (d) { cb(d || { ok: false, message: '响应异常' }); })
     .catch(function () { cb({ ok: false, message: '' }); });
 }
-function startReg() {
-  if (MODE === 're') { showQr(); return; }
-  setErr('emailErr', '');
+function emailOk() {
   var em = $('email').value.trim();
-  if (em.indexOf('@') < 1 || em.indexOf('.') < em.indexOf('@') + 2) {
-    setErr('emailErr', '邮箱格式不对，检查一下'); return;
-  }
-  if (!$('agree').checked) { setErr('emailErr', '请先勾选同意服务说明'); return; }
-  $('btnEmail').disabled = true;
-  postJson('/api/s/new', { email: em, agree: true }, function (d) {
-    $('btnEmail').disabled = false;
-    if (!d.ok) { setErr('emailErr', d.message || '创建失败，请重试'); return; }
-    T = d.t;
-    showQr();
-  });
+  return em.indexOf('@') > 0 && em.indexOf('.') > em.indexOf('@') + 1 && em.length <= 120;
 }
-function showQr() {
-  $('stepEmail').style.display = 'none';
-  $('stepQr').style.display = 'block';
-  $('stepDone').style.display = 'none';
-  newKey();
+function gotMu(mu) {
+  MU = mu;
+  HOLD = false;
+  tryFinish();
+}
+function tryFinish() {
+  if (DONE || !MU || MODE === 're' || HOLD) return;
+  if (!emailOk() || !$('agree').checked) {
+    var miss = !emailOk() ? '还差一步：把邮箱填对' : '还差一步：勾选同意服务说明';
+    $('qrTip').textContent = '扫码成功！' + miss + '，补好后自动完成登记';
+    return;
+  }
+  stopPoll();
+  $('qrTip').textContent = '验证中…';
+  var em = $('email').value.trim();
+  if (MODE === 'card') {
+    postJson('/api/s/csubmit', { code: CODE, st: T, mu: MU, email: em, agree: true }, subCb);
+  } else {
+    postJson('/api/s/submit', { st: T, mu: MU, email: em, agree: true }, subCb);
+  }
+}
+function subCb(d) {
+  if (d.ok) { showDone(d); return; }
+  var m = String(d.message || '');
+  setErr('qrErr', m || '提交失败');
+  $('qrTip').textContent = '请用 网易云音乐 App 扫一扫下面的码';
+  HOLD = !(m.indexOf('邮箱') >= 0 || m.indexOf('同意') >= 0);
 }
 function newKey() {
   if (!DEV) DEV = mkDev();
@@ -11776,30 +11830,22 @@ function startPoll() {
         else setErr('qrErr', '二维码多次过期，请稍后再试，或联系客服');
         return;
       }
-      if (d.code === 803 && d.mu) { stopPoll(); submitMu(d.mu); }
+      if (d.code === 803 && d.mu) {
+        stopPoll();
+        if (MODE === 're') {
+          $('qrTip').textContent = '验证中…';
+          postJson('/api/s/rsubmit', { code: CODE, mu: d.mu }, function (d2) {
+            if (d2.ok) { showDone(d2); }
+            else { setErr('qrErr', d2.message || '提交失败'); $('qrTip').textContent = '请用 网易云音乐 App 扫一扫下面的码'; }
+          });
+        } else {
+          gotMu(d.mu);
+        }
+      }
     });
   }, 2500);
 }
 function stopPoll() { if (POLL) { clearInterval(POLL); POLL = null; } }
-function submitMu(mu) {
-  $('qrTip').textContent = '验证中…';
-  if (MODE === 're') {
-    postJson('/api/s/rsubmit', { code: CODE, mu: mu }, function (d) {
-      if (d.ok) showDone(d);
-      else { $('qrTip').innerHTML = '请用 <b>网易云音乐 App</b> 扫一扫下面的码'; setErr('qrErr', d.message || '提交失败'); }
-    });
-  } else if (MODE === 'card') {
-    postJson('/api/s/csubmit', { code: CODE, st: T, mu: mu }, function (d) {
-      if (d.ok) showDone(d);
-      else { $('qrTip').innerHTML = '请用 <b>网易云音乐 App</b> 扫一扫下面的码'; setErr('qrErr', d.message || '提交失败'); }
-    });
-  } else {
-    postJson('/api/s/submit', { st: T, mu: mu }, function (d) {
-      if (d.ok) showDone(d);
-      else { $('qrTip').innerHTML = '请用 <b>网易云音乐 App</b> 扫一扫下面的码'; setErr('qrErr', d.message || '提交失败'); }
-    });
-  }
-}
 function showDone(d) {
   DONE = true;
   $('stepQr').style.display = 'none';
@@ -11819,14 +11865,24 @@ function showDone(d) {
     $('doneBody').textContent = '上面是你的登记码，已经发到你的邮箱。以后掉线时，点邮件里的链接重新扫码即可恢复，不用找客服。';
   }
 }
+$('email').addEventListener('input', tryFinish);
+$('agree').addEventListener('change', tryFinish);
 if (MODE === 're') {
+  $('rowEmail').style.display = 'none';
+  $('qrLabel').textContent = '扫码恢复';
   $('modeTag').textContent = '重新扫码 · 恢复你的签到';
   $('modeTag').style.display = 'block';
-  showQr();
-}
-if (MODE === 'card') {
-  $('modeTag').textContent = '卡密兑换 · 扫码激活你的签到服务';
-  $('modeTag').style.display = 'block';
+  newKey();
+} else {
+  if (MODE === 'card') {
+    $('modeTag').textContent = '卡密兑换 · 扫码激活你的签到服务';
+    $('modeTag').style.display = 'block';
+  }
+  postJson('/api/s/new', { email: '', agree: true }, function (d) {
+    if (!d.ok) { setErr('qrErr', d.message || '初始化失败，请刷新重试'); return; }
+    T = d.t;
+    newKey();
+  });
 }
 </script>
 </body>
