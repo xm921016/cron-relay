@@ -3001,6 +3001,25 @@ function bjStamp(ms) {
 // 不会出现「删了但不知道通没通知」的空白行。
 async function d1QueueNotice(e, kind) {
   if (!d1ok() || !e) return false;
+  // 2026-11-22（用户口径）：退单号静默处理 —— 台账存在 refunded=1 的单（uid+name 同一身份）
+  //   判死删号不再给号主发「重新登记」信（退款客户已走人，发信只会骚扰）；仍入队一条
+  //   skip_refund 供控制台审计（派发只取 state='pending'，skip_* 永不发出）。
+  //   读失败≠读到空：查不到时按老行为放行入队，不因镜像故障吞掉正常通知。
+  //   按 uid+name 双匹配：防「退款后转卖同 uid 换手机号」的新买家被误伤（其 name 不同查不到退款行）。
+  try {
+    const _uidK = String(e.uid != null ? e.uid : '');
+    const _nameK = String(e.name || '');
+    let _rf = null;
+    if (_uidK && _nameK) _rf = await d1All('SELECT COUNT(*) AS n FROM ledger WHERE pool=? AND uid=? AND name=? AND COALESCE(refunded,0)=1', [POOL_NAME, _uidK, _nameK]);
+    else if (_uidK) _rf = await d1All('SELECT COUNT(*) AS n FROM ledger WHERE pool=? AND uid=? AND COALESCE(refunded,0)=1', [POOL_NAME, _uidK]);
+    else if (_nameK) _rf = await d1All('SELECT COUNT(*) AS n FROM ledger WHERE pool=? AND name=? AND COALESCE(refunded,0)=1', [POOL_NAME, _nameK]);
+    if (_rf && _rf.length && Number(_rf[0].n) > 0) {
+      const skipIns = await d1Run('INSERT OR IGNORE INTO dead_notice (pool,uid,name,email,agent,removed_at,state,kind,skip_reason) VALUES (?,?,?,?,?,?,?,?,?)',
+        [POOL_NAME, _uidK, _nameK, String(e.email || '').trim(), String(e.agent || ''), bjStamp(), 'skip_refund', String(kind || ''), '台账有退款标记，静默处理不发信']);
+      console.log('退单号静默删号（不入发信队列）:', _nameK || _uidK, 'refunded单数=', _rf[0].n, '入队skip_refund=', skipIns ? 'yes' : 'no');
+      return false;
+    }
+  } catch (_erf) { console.error('退单号静默检查失败（放行老行为）:', _erf && _erf.message); }
   // 2026-11-21：入队时补存客服归属（agent）—— dead_pending 发信时按 reg_cfg 现查群号，
   // 让「账号信息过期」直邮也能像 mail_queue 那样带「售后群：」行（用户 11-21 反馈邮件无群号）。
   // 表尚未加列时新 INSERT 会 Unknown column 失败（d1Run 回 false）→ 退化成不带 agent 的老写法。
