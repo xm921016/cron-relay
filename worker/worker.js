@@ -2963,7 +2963,7 @@ async function histTables() {
   if (!d1ok()) return null;
   const [acc, led, dead, notice] = await Promise.all([
     d1All('SELECT pool,uid,name,email,pub,exp,added,agent,plan,relogin_at FROM accounts'),
-    d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,remark,src FROM ledger'),
+    d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,refunded,remark,src FROM ledger'),
     d1All('SELECT id,pool,uid,name,reason,at FROM dead_log ORDER BY at DESC'),
     d1All('SELECT pool,uid,name,email,removed_at,state,kind,sent_at,skip_reason FROM dead_notice'),
   ]);
@@ -9665,7 +9665,8 @@ async function handle(request) {
       const priceOfR = u => {
         const r = lastLedR[u];
         if (!r) return null;                                   // 台账无记录：显示「无台账」不计金额
-        if (Number(r.rb) === 1 || histIsGift(r.name)) return 0; // 补号/赠号不产生挽回金额
+        // 2026-11-22：补号/赠号/已退款单都不产生挽回金额（退款单的钱已经退了，不算流失营收）
+        if (Number(r.rb) === 1 || histIsGift(r.name) || Number(r.refunded) === 1) return 0;
         return r.price == null ? null : Number(r.price);
       };
       const noticeOfR = (pool, uid) => {
@@ -9762,17 +9763,26 @@ async function handle(request) {
       //   客户没为它付钱，必须从「有效单」里剔出去单列，否则提成被免费号抬高。
       //   同时 unpriced 排除这类号：公益号没价格是正常的，不该显示成「待补价」诱导去定价。
       const GIFT = "(name LIKE 'name:%' OR name LIKE 'manual:%' OR name LIKE '%公益%')";
+      /* 2026-11-22：台账「已退款」标记（refunded 列）。多客服场景：客服A卖出→平台退款→客服B再卖，
+         A 的旧单要整单剔除（不计营收、不给提成），与「手动删号=退单」互补 —— 那条链路要求号已删，
+         这里专治「退款了但号还在池里（转卖给别人/被下一单续上）」。
+         口径：money/unpriced 一律排除 refunded=1；refCnt/refValidCnt/refMoney 单列，
+         供结算图例展示与有效单（提成）扣减。COALESCE 兼容加列前的老行。 */
+      const R0 = "COALESCE(refunded,0)=0";
       const AGG = "COUNT(*) cnt, SUM(CASE WHEN rb=1 THEN 1 ELSE 0 END) rbCnt, " +
         "SUM(CASE WHEN " + GIFT + " THEN 1 ELSE 0 END) giftCnt, " +
-        "SUM(CASE WHEN rb=0 AND price IS NOT NULL THEN price ELSE 0 END) money, " +
-        "SUM(CASE WHEN rb=0 AND price IS NULL AND NOT " + GIFT + " THEN 1 ELSE 0 END) unpriced";
+        "SUM(CASE WHEN COALESCE(refunded,0)=1 THEN 1 ELSE 0 END) refCnt, " +
+        "SUM(CASE WHEN COALESCE(refunded,0)=1 AND rb=0 AND NOT " + GIFT + " THEN 1 ELSE 0 END) refValidCnt, " +
+        "SUM(CASE WHEN COALESCE(refunded,0)=1 AND price IS NOT NULL THEN price ELSE 0 END) refMoney, " +
+        "SUM(CASE WHEN rb=0 AND price IS NOT NULL AND " + R0 + " THEN price ELSE 0 END) money, " +
+        "SUM(CASE WHEN rb=0 AND price IS NULL AND NOT " + GIFT + " AND " + R0 + " THEN 1 ELSE 0 END) unpriced";
       const [byPlan, byAgent, byPool, bySrc, rows, cfgNow, byAgentAll, accRows, goneRows, deadRows, pubRows] = await Promise.all([
         d1All('SELECT plan, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY plan ORDER BY cnt DESC', params),
         d1All('SELECT agent, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY agent ORDER BY cnt DESC', params),
         d1All('SELECT pool, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY pool', params),
         // 2026-11-10：按「登记类型」分组（src）。老数据 src 全是 'reg'，统计时归到「新登记」。
         d1All('SELECT src, ' + AGG + ' FROM ledger WHERE ' + W + ' GROUP BY src', params),
-        d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,remark,src FROM ledger WHERE ' +
+        d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,refunded,remark,src FROM ledger WHERE ' +
               W + ' ORDER BY rb, day DESC, id DESC LIMIT 1200', params),
         regCfg().catch(() => REG_CFG_DEFAULT),
         // 下拉框要用「这个人之外还有谁」，所以客服列表不带 agent 过滤
@@ -9788,7 +9798,7 @@ async function handle(request) {
         // 远离 D1 五万行红线；展示用的 rows 有 LIMIT 1200，这张表没有，金额不会因截断算少。
         // ⚠ LEFT JOIN 仍走 accounts 主键 (pool,uid)：accounts 没有单独 uid 索引，
         //   写成 `a.uid=l.uid` 会全表扫，11-05 就是这么把 D1 额度打光的（见下面注释）。
-        d1All('SELECT l.pool, l.uid, l.day, l.rb, l.price, l.name, ' +
+        d1All('SELECT l.pool, l.uid, l.day, l.rb, l.price, l.name, l.refunded, ' +
           'CASE WHEN l.rb=0 AND l.price IS NOT NULL THEN 1 ELSE 0 END priced ' +
           'FROM ledger l LEFT JOIN accounts a ON a.pool=l.pool AND a.uid=l.uid ' +
           'WHERE ' + WL + ' AND a.uid IS NULL', params),
@@ -9800,7 +9810,7 @@ async function handle(request) {
           [month + '-01']),
         // 2026-11-15 口径 1：在池公益号涉及的本月成交单（逐单取出，用于判「付费期内手动转公益」）。
         // JOIN 走 accounts 主键 (pool,uid)，行数 = 本月成交且现在 pub=1 的单（通常 0~几行），远离五万红线。
-        d1All('SELECT l.pool, l.uid, l.day, l.rb, l.price, l.name, l.exp, ' +
+        d1All('SELECT l.pool, l.uid, l.day, l.rb, l.price, l.name, l.exp, l.refunded, ' +
           'CASE WHEN l.rb=0 AND l.price IS NOT NULL THEN 1 ELSE 0 END priced ' +
           'FROM ledger l JOIN accounts a ON a.pool=l.pool AND a.uid=l.uid ' +
           'WHERE ' + WL + ' AND a.pub=1', params),
@@ -9825,14 +9835,17 @@ async function handle(request) {
         plan: r.plan, agent: r.agent, pool: r.pool,
         price: r.plan !== undefined ? planPrice(cfgNow, r.plan) : undefined,
         cnt: num(r.cnt), rbCnt: num(r.rbCnt), giftCnt: num(r.giftCnt),
+        refCnt: num(r.refCnt), refMoney: Math.round(num(r.refMoney) * 100) / 100,
         money: Math.round(num(r.money) * 100) / 100, unpriced: num(r.unpriced),
       }));
-      const t = { cnt: 0, rbCnt: 0, giftCnt: 0, money: 0, unpriced: 0 };
+      const t = { cnt: 0, rbCnt: 0, giftCnt: 0, money: 0, unpriced: 0, refCnt: 0, refMoney: 0, refValidCnt: 0 };
       for (const r of (byPool || [])) {
         t.cnt += num(r.cnt); t.rbCnt += num(r.rbCnt); t.giftCnt += num(r.giftCnt);
         t.money += num(r.money); t.unpriced += num(r.unpriced);
+        t.refCnt += num(r.refCnt); t.refMoney += num(r.refMoney); t.refValidCnt += num(r.refValidCnt);
       }
       t.money = Math.round(t.money * 100) / 100;
+      t.refMoney = Math.round(t.refMoney * 100) / 100;
       const isGift = (nm) => /^name:|^manual:/.test(String(nm || '')) || String(nm || '').indexOf('公益') >= 0;
       /* 2026-11-13：号已删的单按【谁删的】分流 —— 本次结算口径的核心改动。
          用户 11-13 定的口径：
@@ -9874,6 +9887,7 @@ async function handle(request) {
         const u = String(r.uid == null ? '' : r.uid);
         if (!aliveSet.has(u) || !pubSet.has(u)) return false;
         if (num(r.rb) === 1) return false;
+        if (Number(r.refunded) === 1) return false;   // 2026-11-22：已退款单不再按公益终止重复扣（AGG money 已剔除）
         if (isGift(r.name)) return false;
         const arr = deadMap[String(r.pool == null ? '' : r.pool) + '|' + u] || [];
         const dd = String(r.day || '').slice(0, 10);
@@ -9894,6 +9908,7 @@ async function handle(request) {
           price: (r.price === null || r.price === undefined) ? null : Number(r.price),
           day: String(r.day || ''), start: String(r.start || ''), exp: String(r.exp || ''),
           rb: num(r.rb), rbFrom: num(r.rb_from), remark: String(r.remark || ''), src: String(r.src || ''),
+          refunded: num(r.refunded),
           gift: isGift(r.name) ? 1 : 0, alive: al ? 1 : 0,
           deadReason: al ? '' : deadReasonOf(r.pool, r.uid, r.day),
           pubKill: al ? (pubKillOf(r) ? 1 : 0) : 0,
@@ -9904,6 +9919,9 @@ async function handle(request) {
       let refundCnt = 0, refundMoney = 0, refundValid = 0;
       let killedCnt = 0, killedMoney = 0, unknownCnt = 0, unknownMoney = 0;
       for (const r of (goneRows || [])) {
+        /* 2026-11-22：已退款的单跳过金额分流 —— AGG 的 money 已把它剔除，
+           这里再算一遍就会从 realMoney 里扣两遍（钱凭空变少）。 */
+        if (Number(r.refunded) === 1) { t.gone++; continue; }
         const m = (Number(r.priced) === 1) ? (Number(r.price) || 0) : 0;
         const rb = num(r.rb) === 1;
         const reason = deadReasonOf(r.pool, r.uid, r.day);
@@ -9944,8 +9962,9 @@ async function handle(request) {
       t.goneValid = refundValid;
       // 2026-11-13：有效单（算提成）= 总单 − 补号单 − 赠号/手动号 − 【手动删的】退单。
       // 2026-11-15 口径 1 再减：付费期内手动转公益的退单（到期自动降公益的不扣）。
+      // 2026-11-22 再减：台账「已退款」标记的单（refValidCnt 只数 rb=0 非赠号的退款单，防与上面两类重复扣）。
       // CK 失效判死的单不扣：订单生效，客服该拿的提成照给。
-      t.valid = Math.max(0, t.cnt - t.rbCnt - t.giftCnt - t.goneValid - t.pubValid);
+      t.valid = Math.max(0, t.cnt - t.rbCnt - t.giftCnt - t.goneValid - t.pubValid - t.refValidCnt);
       /* 2026-11-10：按登记类型汇总，回答「这个月开了多少新单 / 收了多少续费 / 免费补了多少号」。
          src 取值：new=新登记 / renew=续费 / fix=补号（rb=1）。
          历史数据 src 全是 'reg'（旧代码只写这一个值，分不出新/续），一律归到「新登记」，
@@ -9997,6 +10016,92 @@ async function handle(request) {
         message: '已按当前配置价补齐 ' + fixed + ' 单'
           + (left.length ? '；这些档位配置里也没定价，补不了：' + left.join('、') : '') }, 200, CORS);
     }
+    /* ===== 2026-11-22：台账单笔「已退款」标记 =====
+       多客服场景（用户拍板）：客服A卖出→平台退款→客服B再卖。A 的旧单整单剔除（不计营收、
+       不给提成），B 的新单照常计费。与「手动删号=退单」互补：那条链路要求号已删（dead_log
+       reason=manual），这里专治「退款了但号还在池里（转卖给别人/被下一单续上）」。
+       ⚠ 必须按台账行 id 精确改单 —— 不能复用 ledgerMarkRebind（它只认「最近一笔」，
+         要退的是 A 的旧单、最近一笔是 B 的新单，复用必改错行）。
+       自动扣有效期（2026-11-22 用户拍板）：标退款就地把这笔单买的天数（ledger.days）从号上
+       有效期减掉，管理员不用再手动改。护栏（缺一不扣，防双重修正/误伤）：
+         ① 号还在池里且 exp 是日期（非 forever / 非 relogin 行）；
+         ② 这单不是补号（rb=1 本来就免费，没往有效期上加过天数）；
+         ③ days>0；
+         ④ 号上当前 exp == 台账最新一单的 exp —— 说明登记后没人手动改过有效期；
+           被手动改过（19538588955 案例）→ 只标记不扣减，返回信息里明确说明。
+       扣减走正规编辑路径（applyEntryEdit：KV 权威 + D1 镜像 + 快照同步）；
+       dz 号转发对端 /api/peer/entry（同控制台编辑转发口径）。下限保护：扣到低于该单登记日
+       说明这是唯一一单（整单退光），有效期就停在登记日（过期号按既定口径删除+直邮）。 */
+    if (url.pathname === '/api/console/ledger_refund' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) return json({ message: '只读口令不能改账' }, 403, CORS);
+      if (!d1ok()) return json({ message: 'D1 不可用' }, 503, CORS);
+      const idN = parseInt(body.id, 10);
+      const on = (body.on === false || body.on === 0 || body.on === '0') ? 0 : 1;
+      if (!idN) return json({ message: '缺少台账行 id' }, 400, CORS);
+      const rq = await d1All('SELECT id,pool,uid,name,agent,plan,price,days,day,exp,rb,remark,refunded FROM ledger WHERE id=?', [idN]);
+      if (rq === null) return json({ message: '台账读取失败：' + d1ErrHint() }, 503, CORS);
+      if (!rq.length) return json({ message: '台账里没有这笔单（id=' + idN + '）' }, 404, CORS);
+      const row = rq[0];
+      if (Number(row.refunded || 0) === on) {
+        return json({ ok: true, expChanged: false,
+          message: '这一单' + (on ? '已经是「已退款」状态' : '本来就没有退款标记') + '，无需重复操作' }, 200, CORS);
+      }
+      // remark 追加/移除 [已退款] 标注（保留原备注原文；CSV/明细里可见，审计用）
+      const TAG = '[已退款]';
+      let rmk = String(row.remark || '');
+      if (on) { if (rmk.indexOf(TAG) < 0) rmk = (rmk ? rmk + ' ' : '') + TAG; }
+      else { rmk = rmk.split(TAG).join('').replace(/\s+/g, ' ').trim(); }
+      const okU = await d1Run('UPDATE ledger SET refunded=?, remark=? WHERE id=?', [on, rmk, idN]);
+      if (!okU) return json({ message: '写库失败：' + d1ErrHint() }, 503, CORS);
+      let expMsg = '', expChanged = false;
+      if (on && Number(row.rb) !== 1) {
+        const poolK = String(row.pool || POOL_NAME);
+        const uidK = String(row.uid || '');
+        const daysN = Number(row.days) || 0;
+        const aq = uidK ? await d1All('SELECT exp FROM accounts WHERE pool=? AND uid=?', [poolK, uidK]) : null;
+        if (aq === null) expMsg = '；号池读取失败：' + d1ErrHint() + '，有效期未扣减';
+        else if (aq.length) {
+          const curExp = String(aq[0].exp || '');
+          const lastQ = await d1All('SELECT exp FROM ledger WHERE pool=? AND uid=? ORDER BY day DESC, id DESC LIMIT 1', [poolK, uidK]);
+          const lastExp = (lastQ && lastQ.length) ? String(lastQ[0].exp || '') : '';
+          if (daysN > 0 && /^\d{4}-\d{2}-\d{2}/.test(curExp) && curExp.slice(0, 10) === lastExp.slice(0, 10)) {
+            const floorD = String(row.day || '').slice(0, 10);
+            let fin = dateMinusN(curExp.slice(0, 10), daysN);
+            if (floorD && fin < floorD) fin = floorD;
+            const edBody = { action: 'update', uid: uidK, exp: fin };
+            let edOk = false;
+            if (poolK === 'dz') {
+              try {
+                const c3 = await cfg();
+                const peerUrl = (cleanKV(await POOL.get('PEER_URL')) || PEER_DEFAULT).replace(/\/+$/, '');
+                const fwdPass = (await peerKey()) || c3.groupPass;
+                if (!fwdPass) expMsg = '；定制群对穿口令未配置，有效期未扣减（请手动改）';
+                else {
+                  const rF = await fetch(peerUrl + '/api/peer/entry', { method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'User-Agent': 'cron-relay-worker' },
+                    body: JSON.stringify(Object.assign({ pass: fwdPass }, edBody)) });
+                  edOk = rF.status === 200;
+                  if (!edOk) expMsg = '；定制群有效期扣减失败（HTTP ' + rF.status + '），请手动改';
+                }
+              } catch (e) { expMsg = '；定制群有效期扣减失败：' + ((e && e.message) || e); }
+            } else {
+              const rH = await applyEntryEdit(edBody);
+              edOk = rH && rH.status === 200;
+              if (!edOk) expMsg = '；有效期自动扣减未成功（写入失败），请到编辑弹窗手动改';
+            }
+            if (edOk) { expChanged = true; expMsg = '；有效期已自动从 ' + curExp.slice(0, 10) + ' 调整为 ' + fin; }
+          } else if (daysN > 0) {
+            expMsg = '；有效期近期被手动改过（或号不在池/已是永久），未自动扣减 —— 如需调整请在编辑弹窗手动改';
+          }
+        }
+      }
+      try { await ccBust(); } catch (e) {}
+      return json({ ok: true, expChanged: expChanged,
+        message: (on ? '已标记退款：这一单不计营收、不给客服提成' : '已取消退款标记') + expMsg }, 200, CORS);
+    }
     // 补号时找原单：按手机号 / 网易 UID / 备注片段搜成交台账。
     // 原号早被删了也能搜到 —— 这正是流水表的意义（accounts 里早没这行了）。
     if (url.pathname === '/api/console/findorder' && request.method === 'POST') {
@@ -10011,7 +10116,7 @@ async function handle(request) {
       const q = String(body.q || '').trim().slice(0, 40);
       if (q.length < 4) return json({ message: '至少输入 4 位（手机号 / UID / 备注片段）' }, 400, CORS);
       const like = '%' + q + '%';
-      const rows = await d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,remark,at ' +
+      const rows = await d1All('SELECT id,pool,uid,name,agent,plan,price,day,start,exp,rb,rb_from,refunded,remark,at ' +
         'FROM ledger WHERE name LIKE ? OR uid LIKE ? OR remark LIKE ? ORDER BY day DESC, id DESC LIMIT 20',
         [like, like, like]);
       // 2026-11-06：读失败（rows=null）以前会被下面 `(rows || [])` 变成空列表，
@@ -10039,6 +10144,7 @@ async function handle(request) {
         price: (r.price === null || r.price === undefined) ? null : Number(r.price),
         day: String(r.day || ''), start: String(r.start || ''), exp: String(r.exp || ''),
         rb: Number(r.rb) || 0, rbFrom: Number(r.rb_from) || 0, remark: String(r.remark || ''),
+        refunded: Number(r.refunded) || 0,
         /* 2026-11-21：at = 台账写入时刻（北京时间，精确到秒）。老行有可能为空 → 前端回落到 day。 */
         at: String(r.at || ''),
         alive: !!alive[String(r.pool) + '|' + String(r.uid)],
@@ -11615,7 +11721,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
 <!-- ===== 2026-11-05：月度结算 ===== -->
 <div class="modal" id="lgModal" hidden data-page-node-id="BoYUT3Xge9plC5bYuwubxZ"><div class="mbox" style="width:980px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column" data-page-node-id="a7O9OC6D5MHjkuJCRLmaKB">
   <h3 data-page-node-id="UdrTq5hoC9RfjVUBIquDRK">月度结算</h3>
-  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65" data-page-node-id="3TFYezCB0MGSGo36avOkie">按<b data-page-node-id="6UyW2vCWsKY8NRRHcZrJgp">登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br data-page-node-id="9YzFOhi1QS8oPY6upw2EZ7"><b data-page-node-id="14WCYpTA89Dzh9ixWJEZ7W">退单</b>只认「控制台<b data-page-node-id="aKApDulKctDRDJk7xMHD3B">手动删号</b>」（钱退客户、服务没做完），不计收入不计提成；<b data-page-node-id="iidunKIQeoEzZwNXXVUbdb">CK 失效被自动判死</b>的号钱已经收了、没有任何退款动作，订单照常生效，<b data-page-node-id="WElPBBCjI8xiBoIUfV1KH2">照算收入与提成</b>。补号单、公益赠号/手动号也都不计营收、不计提成，各自单列。</p>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65" data-page-node-id="3TFYezCB0MGSGo36avOkie">按<b data-page-node-id="6UyW2vCWsKY8NRRHcZrJgp">登记月</b>算：谁在哪个月录的号、买了什么套餐、一共多少钱。跟这个号现在还在不在、套餐后来有没有改过都无关（底账是成交流水，登记那一刻就固定了）。<br data-page-node-id="9YzFOhi1QS8oPY6upw2EZ7"><b data-page-node-id="14WCYpTA89Dzh9ixWJEZ7W">退单</b>只认「控制台<b data-page-node-id="aKApDulKctDRDJk7xMHD3B">手动删号</b>」（钱退客户、服务没做完），不计收入不计提成；<b data-page-node-id="iidunKIQeoEzZwNXXVUbdb">CK 失效被自动判死</b>的号钱已经收了、没有任何退款动作，订单照常生效，<b data-page-node-id="WElPBBCjI8xiBoIUfV1KH2">照算收入与提成</b>。补号单、公益赠号/手动号也都不计营收、不计提成，各自单列。<br>2026-11-22 新增<b>台账·退款</b>：详情弹窗「购买记录」里可对单笔订单标「已退款」（多客服场景：客服A卖出→平台退款→客服B再卖）—— 标了退款的整单不计营收不计提成，标记时号上有效期自动扣减（有效期近期被手动改过则只标记不扣）。</p>
   <div style="display:flex;gap:10px;align-items:flex-end;margin-top:10px;flex-wrap:wrap" data-page-node-id="N6NHtQR494Bfr2cTMAc9gr">
     <div data-page-node-id="CDytaEmtjzABvoQSu8cUwh"><label style="margin-top:0" data-page-node-id="A28TlLhyU9ASWeKB9oPSt2">月份</label><input type="month" id="lgMonth" style="width:150px" data-page-node-id="58dfCeoi6FlPd5AyG3eMs6"></div>
     <div data-page-node-id="LvVn47Kikc1M8daxH8aVi9"><label style="margin-top:0" data-page-node-id="EFucejLN8iq2yeNHoYN8X8">群</label><select id="lgPool" style="width:130px" data-page-node-id="qgescWIkh0lDTnGQRzaZXj"><option value="hz" selected data-page-node-id="t4EZu2ZhtXtcLyD2YwgkCR">主群</option><option value="" data-page-node-id="AD2WxhM03XoOKCyYIjlM8e">全部（含定制群）</option><option value="dz" data-page-node-id="1JnBSWhG86KaV7iABGdFxP">定制群</option></select></div>
@@ -13011,30 +13117,13 @@ function openInfo(i){
   $('infoBody').innerHTML=bodyH;
   $('infoModal').hidden=false;
   /* 2026-11-21：购买记录 / 登记链接两段查询对只读也执行（不再包在 if(ROLE==='full') 里）。
-     「编辑」「验证CK」按钮仍只给满权限（上面 if(ROLE==='full') 那段没动）。 */
+     「编辑」「验证CK」按钮仍只给满权限（上面 if(ROLE==='full') 那段没动）。
+     2026-11-22：购买记录改走 ledFetchInfo（每行客服名前缀 + 已退款标记 + 满权限退款入口），
+     序列用独立的 LED_SEQ，不再和下面的登记链接查询共用 INFO_SEQ。 */
   INFO_SEQ=(INFO_SEQ||0)+1;
     var _seq=INFO_SEQ,_uid=String(e.uid||''),_nm=String(e.name||'');
     var _tI=JSON.parse(TOKEN||'{}');
-    api('/api/console/findorder',{user:_tI.user,pass:_tI.pass,q:(_uid||_nm)}).then(function(o){
-      var el=$('infoLedger');if(!el||INFO_SEQ!==_seq)return;
-      var rs=(o.ok&&o.d&&o.d.ok)?(o.d.rows||[]):null;
-      if(!rs){el.innerHTML='<i>购买记录</i><span style="color:#a32d2d">'+esc((o.d&&o.d.message)||'查询失败')+'</span>';return;}
-      rs=rs.filter(function(x){return _uid?String(x.uid||'')===_uid:(!!_nm&&String(x.name||'')===_nm);});
-      if(!rs.length){el.innerHTML='<i>购买记录</i><span style="color:#888">台账里没有这个号的成交记录</span>';return;}
-      var lh='';
-      for(var li=0;li<rs.length;li++){var _r=rs[li];
-        /* 2026-11-21：时间细化到时分秒 —— 台账 at 字段（北京时间 YYYY-MM-DD HH:MM:SS）；
-           老行 at 为空时回落到登记日 day。 */
-        var _tAt=String(_r.at||'');
-        lh+='<div style="font-size:12px;color:#444;margin:3px 0">'+esc(_tAt.length>=19?_tAt.slice(0,19):String(_r.day||'').slice(0,10))
-          +' · '+esc(_r.plan||'未标注')
-          +' · 到期 '+esc(_r.exp||'永久')
-          +(_r.rb?' <span class="badge b-blue">补</span>':'')
-          +(li===0?' <span class="badge b-green" title="台账按登记日倒序，第一行就是最近一单（「最近购买」的来源）">最近</span>':'')
-          +'</div>';
-      }
-      el.innerHTML='<i>购买记录</i>'+lh;
-    }).catch(function(){var el2=$('infoLedger');if(el2&&INFO_SEQ===_seq)el2.innerHTML='<i>购买记录</i><span style="color:#a32d2d">网络错误</span>';});
+    ledFetchInfo(_uid,_nm);
     /* 2026-11-19：登记链接查询（与购买记录同一套 INFO_SEQ 防串）。
        ⚠ 后端 q 口径只有 token/phone 双 LIKE、不含 uid —— 所以必须用账号名（手机号）查，
        12:58 实测按 uid 查永远「无记录」。没有账号名的极端老号才退化为 uid（命中不了就显示无记录）。 */
@@ -13101,6 +13190,60 @@ $('eCancel').onclick=function(){$('modal').hidden=true;};
 // 口径：按 ledger 成交流水的 day（登记日）分月。补号单 rb=1 单列，不计营收/提成。
 // 只读口令看不到这个按钮（applyRole 会隐藏），服务端也会 403。
 var LGDATA=null;
+/* ===== 2026-11-22：详情弹窗「购买记录」独立渲染 + 单笔退款标记 =====
+   ledFetchInfo：查询 + 渲染（序列 LED_SEQ 独立于 INFO_SEQ，退款后重查不影响登记链接段）。
+   ledRowHtml：每行 = 客服名 · 时间 · 套餐 · 到期 + 徽章；满权限追加 [标退款/取消退款] 入口。
+   ledRefundAct：确认框说明口径（改账本 + 自动扣有效期；有效期近期被手动改过则只标记），
+   调 /api/console/ledger_refund（后端按 id 精确改单），成功后重新拉取列表。 */
+var LED_SEQ=0, LED_CUR=null;
+function ledRowHtml(_r,li){
+  var _tAt=String(_r.at||'');
+  var rf=Number(_r.refunded)===1;
+  var act='';
+  if(ROLE==='full')act=' <a href="javascript:void(0)" style="color:'+(rf?'#3b6d11':'#a32d2d')+';font-size:11px" onclick="ledRefundAct('+li+')">['+(rf?'取消退款':'标退款')+']</a>';
+  return '<div style="font-size:12px;color:'+(rf?'#aaa':'#444')+';margin:3px 0">'
+    +(String(_r.agent||'')?esc(_r.agent)+' · ':'<span style="color:#999">未标客服</span> · ')
+    +esc(_tAt.length>=19?_tAt.slice(0,19):String(_r.day||'').slice(0,10))
+    +' · '+esc(_r.plan||'未标注')
+    +' · 到期 '+esc(_r.exp||'永久')
+    +(rf?' <span class="badge b-red" title="已退款：这一单不计营收、不给客服提成；标记时号上有效期已自动扣减（若近期被手动改过则只标记不扣）">退</span>':'')
+    +(_r.rb?' <span class="badge b-blue">补</span>':'')
+    +(li===0&&!rf?' <span class="badge b-green" title="台账按登记日倒序，第一行就是最近一单（「最近购买」的来源）">最近</span>':'')
+    +act+'</div>';
+}
+function ledFetchInfo(_uid,_nm){
+  LED_SEQ=(LED_SEQ||0)+1;
+  var _seq=LED_SEQ;
+  var _tI=JSON.parse(TOKEN||'{}');
+  var el=$('infoLedger');if(!el)return;
+  el.innerHTML='<i>购买记录</i><span style="color:#888">查询中…</span>';
+  api('/api/console/findorder',{user:_tI.user,pass:_tI.pass,q:(_uid||_nm)}).then(function(o){
+    if(!el||LED_SEQ!==_seq)return;
+    var rs=(o.ok&&o.d&&o.d.ok)?(o.d.rows||[]):null;
+    if(!rs){el.innerHTML='<i>购买记录</i><span style="color:#a32d2d">'+esc((o.d&&o.d.message)||'查询失败')+'</span>';return;}
+    rs=rs.filter(function(x){return _uid?String(x.uid||'')===_uid:(!!_nm&&String(x.name||'')===_nm);});
+    if(!rs.length){el.innerHTML='<i>购买记录</i><span style="color:#888">台账里没有这个号的成交记录</span>';return;}
+    LED_CUR={rows:rs,uid:_uid,nm:_nm};
+    var lh='';
+    for(var li=0;li<rs.length;li++)lh+=ledRowHtml(rs[li],li);
+    el.innerHTML='<i>购买记录</i>'+lh;
+  }).catch(function(){if(el&&LED_SEQ===_seq)el.innerHTML='<i>购买记录</i><span style="color:#a32d2d">网络错误</span>';});
+}
+function ledRefundAct(li){
+  if(!LED_CUR||!LED_CUR.rows||!LED_CUR.rows[li])return;
+  var _r=LED_CUR.rows[li];
+  var on=Number(_r.refunded)===1?0:1;
+  var msg=on?
+    ('把这一单（'+String(_r.day||'')+' · '+String(_r.agent||'未标客服')+' · '+String(_r.plan||'')+'）标记为「已退款」？\\n\\n· 台账：这一单不计营收、不给客服提成（月度结算立即生效）\\n· 有效期：自动把这一单买的天数从号上扣掉；若有效期近期被手动改过，则只标记不扣减（提示里会说明）\\n· 只影响这一单，其他单不变'):
+    '取消这一单的「已退款」标记？\\n\\n注意：之前扣掉的有效期不会自动加回来，需要的话请在编辑弹窗手动改。';
+  if(!confirm(msg))return;
+  var _tI=JSON.parse(TOKEN||'{}');
+  api('/api/console/ledger_refund',{user:_tI.user,pass:_tI.pass,id:Number(_r.id),on:on}).then(function(o){
+    var d=(o&&o.d)||{};
+    if(o.ok&&d.ok){alert(d.message||'已保存');if(LED_CUR)ledFetchInfo(LED_CUR.uid,LED_CUR.nm);}
+    else alert((d&&d.message)||'操作失败');
+  }).catch(function(){alert('网络错误，稍后再试');});
+}
 function lgMoney(v){return (Math.round((Number(v)||0)*100)/100).toFixed(2);}
 // 2026-11-10：明细里的「登记类型」标签。补号优先（rb=1），其次看 src。
 function lgKind(r){
@@ -13168,6 +13311,7 @@ function lgRender(o){
     +lgStat('有效单（算提成）',(t.valid||0),false,'判死不扣')
     +lgStat('成交单数',(t.cnt||0),false,(t.gone||0)>0?('含已删号 '+t.gone+' 单'):'全部有效')
     +lgStat('退单·手动删',(t.refund||0),(t.refund||0)>0,lgMoney(t.refundMoney)+' 元')
+    +lgStat('台账·退款',(t.refCnt||0),(t.refCnt||0)>0,lgMoney(t.refMoney)+' 元')
     +lgStat('公益·提前终止',(t.pubRefund||0),(t.pubRefund||0)>0,lgMoney(t.pubRefundMoney)+' 元')
     +lgStat('判死·仍计费',(t.killed||0),false,lgMoney(t.killedMoney)+' 元')
     +lgStat('删除原因未知',(t.unknownDead||0),(t.unknownDead||0)>0,lgMoney(t.unknownMoney)+' 元')
@@ -13209,6 +13353,13 @@ function lgRender(o){
       +'<span style="color:#a32d2d">■ 公益·提前终止</span>（'+(t.pubRefund||0)+' 单 '+lgMoney(t.pubRefundMoney)+' 元）：号还在池里但已被<b>手动转成公益号</b>（删号流水里没有「到期降级」记录），且这单的套餐<b>还没到期</b> —— 服务提前终止，按退单算：<b>不计收入、不计提成</b>。<br>'
       +'<span style="color:#777">到期自动降公益的号不在此列：那是客户把买的服务期用完了，订单照常生效、照算提成。</span></p>';
   }
+  // 2026-11-22：台账「已退款」标记的单 —— 多客服场景（客服A卖出→平台退款→客服B再卖），
+  // A 的旧单在详情弹窗「购买记录」里手动标退，整单剔除（号还活着，「手动删=退单」链路覆盖不到）。
+  if((t.refCnt||0)>0){
+    h+='<p style="font-size:11.5px;color:#a32d2d;margin:0 0 8px;line-height:1.7">'
+      +'<span style="color:#a32d2d">■ 台账·退款</span>（'+(t.refCnt||0)+' 单 '+lgMoney(t.refMoney)+' 元）：详情弹窗「购买记录」里手动标的「已退款」单 —— <b>不计收入、不计提成</b>；标记时号上有效期已自动扣减（有效期近期被手动改过的只标记不扣）。'
+      +'<span style="color:#777">取消标记请在购买记录里点「取消退款」（已扣的时长不自动加回）。</span></p>';
+  }
   h+='<p style="font-size:11.5px;color:#777;margin:0 0 8px">成交 '+t.cnt+' 单 / 账面 '+lgMoney(t.money)+' 元，扣掉退单'+((t.pubRefund||0)>0?'与公益提前终止':'')+'后：实际收入 <b>'+lgMoney(t.realMoney)+' 元</b>、有效单 <b>'+(t.valid||0)+'</b> 单。</p>';
   // 2026-11-05：三张分组表改并排（原来一张一行，竖向占掉大半屏，害得整个弹窗要滚）。
   // 并排后高度只取决于最高的那张，弹窗外层不再出滚动条，只有下面的成交明细自己滚。
@@ -13236,11 +13387,12 @@ function lgRender(o){
     +'<th style="text-align:left;'+MH+'">备注</th></tr></thead><tbody>';
   for(var i=0;i<rows.length;i++){
     var r=rows[i];
-    h+='<tr'+(r.rb?' style="background:#f7fafd"':'')+'>'
+    h+='<tr'+(r.refunded?' style="background:#fdf7f7"':(r.rb?' style="background:#f7fafd"':''))+'>'
       +'<td style="'+MD+'">'+lgKind(r)+'</td>'
       +'<td style="'+MD+'">'+esc(r.day)+'</td>'
       +'<td style="'+MD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
       +'<td style="'+MD+';max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.name||r.uid)+'">'      +esc(String(r.name||r.uid||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))
+        +(r.refunded?' <span class="badge b-red" title="台账已标记退款：不计收入、不计提成；标记时号上有效期已自动扣减">退</span>':'')
         +(r.pubKill?' <span class="badge b-red" title="号仍在池里但已被手动转成公益号，且本单套餐未到期：按退单算，不计收入、不计提成">公益·退单</span>':(r.alive?'':(r.deadReason==='manual'
           ?' <span class="badge b-red" title="控制台手动删号：判定退单，不计收入、不计提成">退单</span>'
           :(r.deadReason==='cookie_invalid'
@@ -13250,7 +13402,7 @@ function lgRender(o){
       +'</td>'
       +'<td style="'+MD+'">'+esc(r.agent||'—')+'</td>'
       +'<td style="'+MD+'">'+esc(r.plan||'未标注')+'</td>'
-      +'<td style="'+MD+';text-align:right">'+(r.rb?'<span class="badge b-blue">补</span> 0.00':(r.gift?'<span style="color:#999">赠号</span>':(r.price==null?'<span style="color:#b06a00">待补价</span>':lgMoney(r.price))))+'</td>'
+      +'<td style="'+MD+';text-align:right">'+(r.refunded?'<span class="badge b-red">退</span> 0.00':(r.rb?'<span class="badge b-blue">补</span> 0.00':(r.gift?'<span style="color:#999">赠号</span>':(r.price==null?'<span style="color:#b06a00">待补价</span>':lgMoney(r.price)))))+'</td>'
       +'<td style="'+MD+';color:#777;max-width:220px;overflow:hidden;text-overflow:ellipsis" title="'+esc(r.remark||'')+'">'+esc(r.remark||'')+'</td></tr>';
   }
   h+='</tbody></table></div></details>';
@@ -13287,12 +13439,12 @@ $('lgPool').onchange=lgLoad;
 if($('lgAgent'))$('lgAgent').onchange=lgLoad;
 $('lgCsv').onclick=function(){
   if(!LGDATA||!LGDATA.rows||!LGDATA.rows.length){$('lgm').textContent='还没有数据，先点查询';$('lgm').className='msg err';return;}
-  var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','删除情况','备注']];
+  var out=[['登记日','群','账号','UID','客服','套餐','金额','是否补号','退款','删除情况','备注']];
   for(var i=0;i<LGDATA.rows.length;i++){var r=LGDATA.rows[i];
     out.push([r.day,r.pool==='hz'?'主群':'定制群',String(r.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'),r.uid,r.agent,r.plan,
-      r.rb?'0':(r.gift?'赠号':(r.price==null?'':r.price)),r.rb?'补号':'',
+      r.refunded?'0':(r.rb?'0':(r.gift?'赠号':(r.price==null?'':r.price))),r.rb?'补号':'',r.refunded?'已退款':'',
       r.pubKill?'公益·退单':(r.alive?'':(r.deadReason==='manual'?'退单':(r.deadReason==='cookie_invalid'?'判死·仍计费':'删除·未知'))),
-      r.remark]);}
+      (r.refunded?'[已退款] ':'')+r.remark]);}
   var csv='\\ufeff'+out.map(function(a){return a.map(function(v){return '"'+String(v==null?'':v).replace(/"/g,'""')+'"';}).join(',');}).join('\\r\\n');
   var a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
