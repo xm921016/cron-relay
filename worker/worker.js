@@ -6429,6 +6429,35 @@ async function handle(request) {
         },
       });
     }
+    /* 卡密兑换页：/sign/c/<卡密码>。卡密=预建 unused 行（note='card'），
+       兑换成功后卡密码即成为该买家的登记码（/sign/r/<码> 重登原样可用）。
+       服前先验卡：无效/已用直接给错误页，不让买家白扫码。 */
+    if (url.pathname.indexOf('/sign/c/') === 0 && request.method === 'GET') {
+      const codeCd = regNormCode(decodeURIComponent(url.pathname.slice(8)));
+      let cardOkCd = false;
+      if (codeCd && codeCd.length >= 8) {
+        const rCd = await d1All("SELECT status FROM sign_users WHERE reg_code=? AND note='card' LIMIT 1", [codeCd]);
+        if (rCd && rCd.length && String(rCd[0].status || '') === 'unused') cardOkCd = true;
+      }
+      if (!cardOkCd) {
+        return new Response(CARD_ERR_HTML, {
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'X-Frame-Options': 'DENY',
+            'Referrer-Policy': 'no-referrer',
+          },
+        });
+      }
+      return new Response(SIGN_HTML, {
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Frame-Options': 'DENY',
+          'Referrer-Policy': 'no-referrer',
+        },
+      });
+    }
     /* 新登记第一步：收邮箱 → 一次性会话 token（KV，2 小时）。
        无卡公开链接，靠 IP 频控 + token 一次性防刷。 */
     if (url.pathname === '/api/s/new' && request.method === 'POST') {
@@ -6588,6 +6617,49 @@ async function handle(request) {
       console.log('签到产品重登成功: uid=' + String(rowR[0].uid));
       return json({ ok: true }, 200, { 'Cache-Control': 'no-store' });
     }
+    /* 卡密兑换提交：卡密（预建 unused 行）+ 会话 token（邮箱）+ 扫码 CK。
+       原子抢占：UPDATE WHERE status='unused' AND uid LIKE 'card:%' + RETURNING，
+       并发双兑只有一方拿到行（d1Run 不回 meta，走 d1All 拿 RETURNING 行数）。 */
+    if (url.pathname === '/api/s/csubmit' && request.method === 'POST') {
+      let bC5;
+      try { bC5 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const ipC5 = request.headers.get('cf-connecting-ip') || '0';
+      const nC5 = await d1Hit('scsub', ipC5 + ':' + beijingDate());
+      if (nC5 !== null && nC5 > 30) return json({ ok: false, message: '今天兑换次数太多，请明天再试或联系客服' }, 429);
+      const codeC5 = regNormCode(bC5.code);
+      const stC5 = String(bC5.st || '').trim();
+      const muC5 = String(bC5.mu || '').trim();
+      if (!codeC5) return json({ ok: false, message: '卡密缺失，请从卡密链接进入' }, 400);
+      if (!muC5) return json({ ok: false, message: '没有拿到登录凭证，请重新扫码' }, 400);
+      const tokC5 = await signTokGet(stC5);
+      if (tokC5 === undefined) return json({ ok: false, message: '系统正在忙，请 1 分钟后再试' }, 503);
+      if (!tokC5 || tokC5.state !== 'new') return json({ ok: false, message: '会话已过期，请刷新页面重新开始' }, 410);
+      const rowC5 = await d1All("SELECT status FROM sign_users WHERE reg_code=? AND note='card' LIMIT 1", [codeC5]);
+      if (rowC5 === null) return json({ ok: false, message: '系统正在忙，请 1 分钟后再试' }, 503);
+      if (!rowC5.length) return json({ ok: false, message: '卡密无效，请核对链接是否完整或联系客服' }, 404);
+      if (String(rowC5[0].status || '') !== 'unused') {
+        return json({ ok: false, message: '这张卡密已经被使用过了，如非本人操作请联系客服' }, 409);
+      }
+      const vC5 = await validateCookie(muC5);
+      if (!vC5.ok) return json({ ok: false, message: vC5.msg || '登录凭证已失效，请重新扫码' }, 400);
+      if (vC5.provisional) return json({ ok: false, message: '网易校验接口暂时不可达，请稍后重试' }, 503);
+      if (vC5.restricted) return json({ ok: false, message: '网易这次没认这个号的登录校验，请等几分钟重试一次' }, 503);
+      const uidC5 = String(vC5.uid || '');
+      if (!uidC5) return json({ ok: false, message: '没拿到账号信息，请重新扫码' }, 400);
+      const exC5 = await d1All('SELECT reg_code FROM sign_users WHERE uid=? LIMIT 1', [uidC5]);
+      if (exC5 === null) return json({ ok: false, message: '系统正在忙，请 1 分钟后再试' }, 503);
+      if (exC5.length) return json({ ok: false, message: '这个账号已经登记过签到服务，不需要再兑换卡密' }, 400);
+      const uC5 = await d1All("UPDATE sign_users SET uid=?, ck=?, name=?, email=?, status='active', added_at=?, last_ok_day='', dead_notified_day='' " +
+        "WHERE reg_code=? AND status='unused' AND uid LIKE 'card:%' RETURNING uid",
+        [uidC5, 'MUSIC_U=' + muC5, String(vC5.nick || ''), String(tokC5.email || ''), bjStamp(), codeC5]);
+      if (uC5 === null) return json({ ok: false, message: '数据库暂时繁忙，兑换没有完成，请稍后再试一次' }, 503);
+      if (!uC5.length) return json({ ok: false, message: '这张卡密刚刚被使用了，如非本人操作请联系客服' }, 409);
+      try { await POOL.put('sign:tok:' + stC5, JSON.stringify({ email: String(tokC5.email || ''), state: 'used', at: Date.now() }), { expirationTtl: 600 }); } catch (e) {}
+      try { await mailEnqueue('sign', uidC5, 'signreg', beijingDate(), String(tokC5.email || ''), String(vC5.nick || ''), '', codeC5); }
+      catch (e) { console.error('signreg 邮件入队失败:', e && e.message); }
+      console.log('签到产品卡密兑换成功: uid=' + uidC5 + ' code=' + codeC5);
+      return json({ ok: true, code: codeC5 }, 200, { 'Cache-Control': 'no-store' });
+    }
     /* 跑批领片：GitHub 小号 signin.py 按 rowid 取模分片领买家。
        口令只认独立键 ASSIGN_PASS（与 /api/assign 同源）。读失败≠读到空：null 一律 503。 */
     if (url.pathname === '/api/sign/assign' && request.method === 'GET') {
@@ -6643,6 +6715,40 @@ async function handle(request) {
         catch (e) { console.error('signdead 邮件入队失败:', e && e.message); }
       }
       return json({ ok: true, logs: logsRp.length, dead: deadK }, 200, { 'Cache-Control': 'no-store' });
+    }
+    /* 卡密批量生成：管理接口（口令=ADMIN_PASS）。count 1~500/次，unused 总库存上限 5000。
+       卡密=预建 unused 行：uid 占位 'card:'+码，reg_code=卡密码（UNIQUE 天然防重），
+       码='C'+9 位无歧义字符（signRand 同字符集，regNormCode 上限 12 位兼容）。 */
+    if (url.pathname === '/api/sign/gencards' && request.method === 'POST') {
+      let bG1;
+      try { bG1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const cG1 = await cfg();
+      if (!cG1.adminPass) return json({ ok: false, message: '未配置管理口令（KV 键 ADMIN_PASS）' }, 503);
+      if ((bG1.pass || '') !== cG1.adminPass) return json({ ok: false, message: '管理口令错误' }, 403);
+      const cntG = Math.min(500, Math.max(1, parseInt(bG1.count, 10) || 0));
+      const invG = await d1All("SELECT COUNT(*) n FROM sign_users WHERE status='unused'");
+      if (invG === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503);
+      if (Number((invG[0] && invG[0].n) || 0) + cntG > 5000) {
+        return json({ ok: false, message: '未使用卡密库存已达上限（5000），请先清理再生成' }, 400);
+      }
+      const stmtsG = [];
+      const codesG = [];
+      for (let g1 = 0; g1 < cntG; g1++) {
+        const cd1 = 'C' + signRand(9);
+        codesG.push(cd1);
+        stmtsG.push({
+          sql: "INSERT INTO sign_users (uid,name,ck,email,reg_code,status,added_at,last_ok_day,dead_notified_day,note) VALUES (?,?,?,?,?,'unused',?,'','','card')",
+          params: ['card:' + cd1, '', '', '', cd1, bjStamp()],
+        });
+      }
+      const bG2 = await d1Batch(stmtsG);
+      if (!bG2) return json({ ok: false, message: '写库失败（' + (_d1LastErr || 'D1 异常') + '）' }, 503);
+      let madeG = 0;
+      for (let g2 = 0; g2 < bG2.length; g2++) {
+        if (bG2[g2] && bG2[g2].meta && Number(bG2[g2].meta.changes) > 0) madeG++;
+      }
+      console.log('签到产品卡密生成: 请求=' + cntG + ' 成功=' + madeG);
+      return json({ ok: madeG > 0, made: madeG, codes: codesG }, 200, { 'Cache-Control': 'no-store' });
     }
     /* ================= 方案C：网页自助扫码登记 ================= */
     /* 买家页面：/r/<8 位码>。不走 PAGE_ROUTES 口令（那是内部成员页，不能发给买家）。 */
@@ -11580,8 +11686,8 @@ button:disabled { opacity: 0.5; }
   </div>
 </div>
 <script>
-var MODE = location.pathname.indexOf('/sign/r/') === 0 ? 're' : 'new';
-var CODE = MODE === 're' ? decodeURIComponent(location.pathname.slice(8)) : '';
+var MODE = location.pathname.indexOf('/sign/r/') === 0 ? 're' : (location.pathname.indexOf('/sign/c/') === 0 ? 'card' : 'new');
+var CODE = MODE === 'new' ? '' : decodeURIComponent(location.pathname.slice(8));
 var T = '';
 var KEY = '';
 var DEV = '';
@@ -11684,6 +11790,11 @@ function submitMu(mu) {
       if (d.ok) showDone(d);
       else { $('qrTip').innerHTML = '请用 <b>网易云音乐 App</b> 扫一扫下面的码'; setErr('qrErr', d.message || '提交失败'); }
     });
+  } else if (MODE === 'card') {
+    postJson('/api/s/csubmit', { code: CODE, st: T, mu: mu }, function (d) {
+      if (d.ok) showDone(d);
+      else { $('qrTip').innerHTML = '请用 <b>网易云音乐 App</b> 扫一扫下面的码'; setErr('qrErr', d.message || '提交失败'); }
+    });
   } else {
     postJson('/api/s/submit', { st: T, mu: mu }, function (d) {
       if (d.ok) showDone(d);
@@ -11698,6 +11809,11 @@ function showDone(d) {
   if (MODE === 're') {
     $('doneTitle').textContent = '重登成功';
     $('doneBody').textContent = '明天的签到会自动恢复，不用做别的。';
+  } else if (MODE === 'card') {
+    $('doneTitle').textContent = '激活成功';
+    $('doneCode').textContent = d.code || CODE;
+    $('doneCode').style.display = 'block';
+    $('doneBody').textContent = '你的签到服务已激活，明天开始每天自动签到。掉线时系统会发邮件提醒，点邮件里的链接重新扫码即可恢复。';
   } else {
     $('doneTitle').textContent = '登记成功';
     $('doneCode').textContent = d.code || '';
@@ -11706,10 +11822,39 @@ function showDone(d) {
   }
 }
 if (MODE === 're') {
+  $('modeTag').textContent = '重新扫码 · 恢复你的签到';
   $('modeTag').style.display = 'block';
   showQr();
 }
+if (MODE === 'card') {
+  $('modeTag').textContent = '卡密兑换 · 扫码激活你的签到服务';
+  $('modeTag').style.display = 'block';
+}
 </script>
+</body>
+</html>`;
+
+/* 2026-11-22 卡密兑换：无效/已用卡密的错误页（/sign/c/<码> 服前验卡不过时返回）。 */
+const CARD_ERR_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>卡密无效 · 网易云每日签到</title>
+<style>
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #f5f6f8; color: #222; padding: 60px 16px; text-align: center; }
+.wrap { max-width: 420px; margin: 0 auto; background: #fff; border: 1px solid #e3e5e8;
+  border-radius: 12px; padding: 28px 20px; }
+h1 { font-size: 18px; color: #c0392b; margin-bottom: 10px; }
+p { font-size: 14px; color: #555; line-height: 1.8; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>卡密无效</h1>
+  <p>这张卡密不存在、或已经被使用过了。<br>请核对卡密链接是否完整（要一整条复制），<br>如果有疑问请联系客服。</p>
+</div>
 </body>
 </html>`;
 
