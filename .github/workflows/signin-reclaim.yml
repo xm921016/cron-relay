@@ -4,6 +4,8 @@
 # 当天 0 点重置，隔天无法补领 → 白天完成的奖励一直挂着（11-22 大号实测）。
 # 只领取、幂等（无可领取=no-op）、不签到不判死、不碰 /api/assign。
 name: signin reclaim
+# 2026-11-22：contents API 新增的 workflow 不注册 workflow_dispatch（dispatch 404），
+# 需经 git 协议重推一次才生效 —— 本行注释即为此重推载体，请保留。
 on:
   workflow_dispatch:
   schedule:
