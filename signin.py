@@ -30,6 +30,12 @@ BASE_URL = "https://music.163.com"
 # 2026-10-28：失效上报用（本来只有 run.py 读，signin 也需要，口径统一）
 WORKER_URL = (os.environ.get("WORKER_URL") or "").rstrip("/")
 REPORT_PASS = os.environ.get("ADMIN_PASS", "").strip() or os.environ.get("NB_PASS", "").strip()
+# 2026-11-22：白天补领模式（signin_reclaim.py 白天班次触发）。
+# 背景：00:20 班次的 P4/P6 领取跑在凌晨，而「听歌30分钟」等每日任务白天才完成；
+# 任务 period=1 当天 0 点重置，隔天无法补领 → 白天完成的奖励一直挂着。
+# 补领模式只跑 P4（云贝任务领取）+ P6（VIP 成长值领取），幂等（无可领取=no-op）；
+# 不签到（00:20 班次已签）、不判死、不删号（判死由播放链路负责）。
+CLAIM_ONLY = (os.environ.get("SIGNIN_CLAIM_ONLY") or "").strip().lower() in ("1", "true", "yes")
 
 # ---------- crypto A ----------
 _MODULUS = (
@@ -532,8 +538,8 @@ class NeteaseClient:
 def main():
     cfg = None
     try:
-        wait_seconds = random.randint(30, 300)
-        logger.info(f"随机等待 {wait_seconds} 秒后开始签到...")
+        wait_seconds = random.randint(10, 60) if CLAIM_ONLY else random.randint(30, 300)
+        logger.info(f"随机等待 {wait_seconds} 秒后开始{'补领' if CLAIM_ONLY else '签到'}...")
         time.sleep(wait_seconds)
 
         # 2026-11-15：支持 SIGNIN_CONFIG 指定配置文件（缺省仍读 accounts.json，行为不变）。
@@ -595,6 +601,25 @@ def main():
                 dead_emails[aname] = acc.get("email") or ""
                 dead_nick[aname] = getattr(client, "nickname", "") or ""
                 fail_count += 1
+                continue
+
+            # 2026-11-22：白天补领模式 —— 只领 P4 云贝任务 + P6 VIP 成长值，跳过其余步骤。
+            if CLAIM_ONLY:
+                claimed = client.p4_claim(aname)
+                if claimed:
+                    results.append(f"  P4 已领取: {', '.join(claimed)}")
+                else:
+                    results.append("  P4: 无可领取")
+                try:
+                    ok, msg = client.p6_claim(aname)
+                except Exception as e:
+                    msg = f"P6 异常（已跳过）: {str(e)[:100]}"
+                    logger.warning(f"[{aname}] {msg}")
+                logger.info(f"[{aname}] {msg}")
+                results.append(f"  {msg}")
+                success_count += 1
+                all_results.extend(results)
+                time.sleep(random.uniform(2, 5))
                 continue
 
             time.sleep(random.uniform(1, 3))

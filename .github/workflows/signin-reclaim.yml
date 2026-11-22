@@ -1,0 +1,35 @@
+# 2026-11-22：白天补领班次。
+# 背景：run.yml 的 daily signin 跑在 00:20，P4 云贝任务领取 / P6 VIP 成长值领取
+# 在凌晨时任务还没完成（听歌30分钟等每日任务白天才做完），而任务 period=1
+# 当天 0 点重置，隔天无法补领 → 白天完成的奖励一直挂着（11-22 大号实测）。
+# 只领取、幂等（无可领取=no-op）、不签到不判死、不碰 /api/assign。
+name: signin reclaim
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub schedule 实测延迟 4~8h 且偶发整班丢失（见 run.yml 头注释），
+    # 所以放 4 个班次对冲。名义上北京 12:20 / 15:20 / 18:20 / 21:20
+    # （UTC 04:20 / 07:20 / 10:20 / 13:20）。补领幂等，班次多跑/抖动无害；
+    # 抖到次日 0 点后任务重置，也只是空跑一轮。
+    - cron: "20 4 * * *"
+    - cron: "20 7 * * *"
+    - cron: "20 10 * * *"
+    - cron: "20 13 * * *"
+
+concurrency:
+  group: signin-reclaim
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  reclaim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: claim-only（P4 云贝任务 + P6 VIP 成长值，只领不签不判死）
+        env:
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: python3 signin_reclaim.py
