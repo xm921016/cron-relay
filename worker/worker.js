@@ -6796,9 +6796,62 @@ async function handle(request) {
       if ((bS9.pass || '') !== cS9.adminPass) return json({ ok: false, message: '管理口令错误' }, 403, CORS_S);
       const stS9 = await d1All('SELECT status, COUNT(*) n FROM sign_users GROUP BY status');
       if (stS9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
-      const listS9 = await d1All("SELECT reg_code, status, uid, name, email, added_at, last_ok_day FROM sign_users WHERE note='card' ORDER BY added_at DESC LIMIT 500");
+      /* 卡密来源的已售数（active+dead 且 note='card'）：明细被 LIMIT 截断，
+         这个计数必须从统计口径取，不能拿明细子集数（2026-11-22 修「明细未售显示 500」bug）。 */
+      const soldS9 = await d1All("SELECT status, COUNT(*) n FROM sign_users WHERE note='card' AND status!='unused' GROUP BY status");
+      if (soldS9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
+      /* 今日签到概况（所有买家，不限卡密来源） */
+      const tdS9 = await d1All('SELECT COUNT(*) n, COALESCE(SUM(ok),0) okn FROM sign_logs WHERE day=?', [beijingDate()]);
+      if (tdS9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
+      /* 明细筛选：q=搜卡密码/买家账号/昵称/邮箱；status=状态过滤。LIKE 参数 4 个（铁律5 内）。 */
+      const qS9 = String(bS9.q || '').trim().slice(0, 40);
+      let fS9 = String(bS9.status || '');
+      if (fS9 !== '' && fS9 !== 'unused' && fS9 !== 'active' && fS9 !== 'dead') fS9 = '';
+      let wS9 = "SELECT reg_code, status, uid, name, email, added_at, last_ok_day FROM sign_users WHERE note='card'";
+      const pS9 = [];
+      if (fS9) { wS9 += ' AND status=?'; pS9.push(fS9); }
+      if (qS9) {
+        const likeS9 = '%' + qS9.replace(/[%_]/g, function (m) { return '\\' + m; }) + '%';
+        wS9 += " AND (reg_code LIKE ? ESCAPE '\\' OR uid LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\')";
+        pS9.push(likeS9, likeS9, likeS9, likeS9);
+      }
+      wS9 += ' ORDER BY added_at DESC LIMIT 500';
+      const listS9 = await d1All(wS9, pS9);
       if (listS9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
-      return json({ ok: true, stats: stS9, cards: listS9, today: beijingDate() }, 200, CORS_S);
+      let soldN = 0;
+      for (let s9 = 0; s9 < soldS9.length; s9++) soldN += Number(soldS9[s9].n || 0);
+      return json({ ok: true, stats: stS9, cards: listS9, sold: soldN,
+        today: beijingDate(), todayN: Number((tdS9[0] && tdS9[0].n) || 0), todayOk: Number((tdS9[0] && tdS9[0].okn) || 0),
+        listLimited: listS9.length >= 500 }, 200, CORS_S);
+    }
+    /* 单张卡密作废：管理接口。只允许作废未售（unused）卡——已兑换的卡绑定着买家，
+       页面上不提供删除买家的能力（防误删客源）。 */
+    if (url.pathname === '/api/sign/voidcard' && request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '86400',
+      } });
+    }
+    if (url.pathname === '/api/sign/voidcard' && request.method === 'POST') {
+      const CORS_V = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
+      let bV1;
+      try { bV1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400, CORS_V); }
+      const cV1 = await cfg();
+      if (!cV1.adminPass) return json({ ok: false, message: '未配置管理口令' }, 503, CORS_V);
+      if ((bV1.pass || '') !== cV1.adminPass) return json({ ok: false, message: '管理口令错误' }, 403, CORS_V);
+      const cdV = regNormCode(bV1.code);
+      if (!cdV) return json({ ok: false, message: '卡密码格式不对' }, 400, CORS_V);
+      const c1V = await d1All("SELECT COUNT(*) n FROM sign_users WHERE reg_code=? AND status='unused'", [cdV]);
+      if (c1V === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_V);
+      if (!Number((c1V[0] && c1V[0].n) || 0)) {
+        return json({ ok: false, message: '这张卡不存在或已被使用——已使用的卡绑定了买家，不能作废删除' }, 404, CORS_V);
+      }
+      const okV1 = await d1Run("DELETE FROM sign_users WHERE reg_code=? AND status='unused'", [cdV]);
+      if (!okV1) return json({ ok: false, message: '删除失败（' + (_d1LastErr || 'D1 异常') + '）' }, 503, CORS_V);
+      console.log('签到产品卡密作废: ' + cdV);
+      return json({ ok: true, code: cdV }, 200, CORS_V);
     }
     /* 数据清理：管理接口（口令=ADMIN_PASS，CORS 同上，给本地管理 HTML 用）。
        scope='unused'：删除全部未售卡密（status='unused'，均为空壳行）。
