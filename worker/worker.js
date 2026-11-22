@@ -6743,12 +6743,10 @@ async function handle(request) {
       }
       const bG2 = await d1Batch(stmtsG);
       if (!bG2) return json({ ok: false, message: '写库失败（' + (_d1LastErr || 'D1 异常') + '）' }, 503);
-      let madeG = 0;
-      for (let g2 = 0; g2 < bG2.length; g2++) {
-        if (bG2[g2] && bG2[g2].meta && Number(bG2[g2].meta.changes) > 0) madeG++;
-      }
-      console.log('签到产品卡密生成: 请求=' + cntG + ' 成功=' + madeG);
-      return json({ ok: madeG > 0, made: madeG, codes: codesG }, 200, { 'Cache-Control': 'no-store' });
+      /* d1Batch 全批原子且回 true（丢弃逐条结果）：true=整批插入成功
+         （UNIQUE 撞码会整批抛错，31^9 撞码概率≈0），故 made=cntG，不逐条数 changes。 */
+      console.log('签到产品卡密生成: 请求=' + cntG + ' 成功=' + cntG);
+      return json({ ok: true, made: cntG, codes: codesG }, 200, { 'Cache-Control': 'no-store' });
     }
     /* ================= 方案C：网页自助扫码登记 ================= */
     /* 买家页面：/r/<8 位码>。不走 PAGE_ROUTES 口令（那是内部成员页，不能发给买家）。 */
