@@ -350,6 +350,55 @@ def notify_relogin2(email, nickname, name, group=""):
 
 
 # ---------------------------------------------------------------------------
+# 2026-11-22 新增：签到独立产品买家版邮件（闲鱼引流，买家池 sign_users，与 650 号池完全隔离）。
+# 与 650 号主版的两条刻意差别：
+#   · 正文必须带重登链接（/sign/r/<登记码>）——买家版设计就是「掉线→收邮件→自己重扫」，
+#     全程无卖家介入；650 号主「正文不出现网址」的红线不适用于本产品（架构不同）。
+#   · 一期无售后群：文案引导「联系下单的店铺客服」，不套 _group_line（那是 650 群口径）。
+# kind: signreg=登记成功 / signdead=登录失效需重登；notify_mail.py 按 kind 分发，
+# 登记码由 worker 写在队列行 exp 列（mail_queue 无多余列，复用口径同 650 的 exp 用法）。
+# ---------------------------------------------------------------------------
+
+def notify_signreg(email, who, code=""):
+    """签到产品登记成功信：报喜 + 交付登记码和重登链接。"""
+    if not (email or "").strip():
+        return False
+    base = (os.environ.get("WORKER_URL") or "https://xx1031.xyz").rstrip("/")
+    subject = "【网易云每日签到】登记成功，明天起每天自动帮你签到"
+    body = (
+        "你好" + (("" if not (who or "").strip() else "，" + str(who))) + "：\n\n"
+        "你的账号已经登记成功，明天起每天会自动完成网易云的签到任务\n"
+        "（每日打卡、云贝签到、云贝任务领取、VIP 签到等），你正常使用 APP 就行。\n\n"
+        "请保管好你的登记码：" + str(code or "") + "\n"
+        "如果哪天登录失效，打开下面这个链接，用同一个账号再扫一次码就恢复了：\n"
+        + base + "/sign/r/" + str(code or "") + "\n\n"
+        "说明：偶尔掉线重登是正常现象，收到「重新扫码」邮件后按链接操作即可，\n"
+        "不用找客服。重扫成功后第二天的签到会自动恢复。\n\n"
+        "——" + SIGN
+    )
+    return send_user_email(email, subject, body)
+
+
+def notify_signdead(email, who, code=""):
+    """签到产品登录失效信：附重登链接，买家自己重扫，无卖家介入。"""
+    if not (email or "").strip():
+        return False
+    base = (os.environ.get("WORKER_URL") or "https://xx1031.xyz").rstrip("/")
+    subject = "【网易云每日签到】登录已失效，点链接重新扫码就能恢复"
+    body = (
+        "你好" + (("" if not (who or "").strip() else "，" + str(who))) + "：\n\n"
+        "跟你说一声：你这个账号在网易云这边的登录信息刚刚失效了，"
+        "今天的签到可能没有完成。账号本身没有任何问题，不用担心。\n\n"
+        "处理办法（一步）：打开下面这个链接，用同一个账号扫一次码：\n"
+        + base + "/sign/r/" + str(code or "") + "\n\n"
+        "重扫成功后，第二天的签到会自动恢复，不用做别的。\n"
+        "如果链接打不开或扫码不成功，联系你下单的店铺客服。\n\n"
+        "——" + SIGN
+    )
+    return send_user_email(email, subject, body)
+
+
+# ---------------------------------------------------------------------------
 # 2026-11-06 新增：登记成功通知 + 到期提醒（邮件队列 mail_queue → notify_mail.py 派发）。
 # 群号在 worker 侧按 reg_cfg 现查后随队列下发（row["group"]）；这里拿到的 group 为空时
 # 说明该客服没配群号（default_group 也没配），降级成「联系客服获取」，绝不写死群号。

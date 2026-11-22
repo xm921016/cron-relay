@@ -37,6 +37,18 @@ REPORT_PASS = os.environ.get("ADMIN_PASS", "").strip() or os.environ.get("NB_PAS
 # 不签到（00:20 班次已签）、不判死、不删号（判死由播放链路负责）。
 CLAIM_ONLY = (os.environ.get("SIGNIN_CLAIM_ONLY") or "").strip().lower() in ("1", "true", "yes")
 
+# 2026-11-22：签到独立产品（SIGN_USERS=1）——买家池模式，与 650 号池完全隔离。
+# 数据源/回传都走 worker 的 /api/sign/*（口令=SIGN_PASS，对应 KV 键 ASSIGN_PASS），
+# 不读 accounts.json、不走 roles 过滤、不调 _report_dead（绝不碰 650 号池删号链路）；
+# 判死买家由 worker 标 sign_users.status='dead' 并入队重登邮件（kind=signdead）。
+SIGN_USERS = (os.environ.get("SIGN_USERS") or "").strip().lower() in ("1", "true", "yes")
+SIGN_PASS = os.environ.get("SIGN_PASS", "").strip()
+SIGN_SHARD_I = int(os.environ.get("SIGN_I", "0") or 0)
+SIGN_SHARD_N = int(os.environ.get("SIGN_N", "1") or 1)
+# 调 xx1031.xyz 必带浏览器 UA（铁律 6），console/data/assign 同口径
+_SIGN_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
 # ---------- crypto A ----------
 _MODULUS = (
     "00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7"
@@ -535,6 +547,121 @@ class NeteaseClient:
             return False, "P7 失败", results
 
 
+def _beijing_today():
+    return time.strftime("%Y-%m-%d", time.gmtime(time.time() + 8 * 3600))
+
+
+def main_sign():
+    """买家池签到主流程（SIGN_USERS=1 专用）。
+
+    与 650 号池 main() 的三个本质区别：
+      1. 号单来自 /api/sign/assign 分片（rowid 取模），不是 accounts.json；
+      2. 判死不删号、不发号主邮件 —— 统一回传 worker，由 worker 标记 + 入队买家重登信；
+      3. 买家号不做 P7（音乐人云豆）：一期不采集 is_musician，二期再做。
+    """
+    try:
+        wait_seconds = random.randint(10, 60)
+        logger.info("随机等待 %d 秒后开始签到（买家池 分片 %d/%d）...",
+                    wait_seconds, SIGN_SHARD_I, SIGN_SHARD_N)
+        time.sleep(wait_seconds)
+
+        if not (WORKER_URL and SIGN_PASS):
+            logger.error("SIGN_USERS 模式需要 WORKER_URL 和 SIGN_PASS 环境变量")
+            sys.exit(1)
+
+        r = requests.get(WORKER_URL + "/api/sign/assign",
+                         params={"pass": SIGN_PASS, "i": SIGN_SHARD_I, "n": SIGN_SHARD_N},
+                         headers={"User-Agent": _SIGN_UA}, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+        if not data.get("ok"):
+            logger.error("领片失败: %s", data.get("message", ""))
+            sys.exit(1)
+        users = data.get("users") or []
+        logger.info("领片成功: 本片 %d 个买家（shard %s/%s）",
+                    len(users), data.get("shard", SIGN_SHARD_I), data.get("total", SIGN_SHARD_N))
+        if not users:
+            logger.info("本片没有买家，收工")
+            return
+
+        day = _beijing_today()
+        logs = []
+        deads = []
+        ok_count = 0
+        for u in users:
+            aname = (u.get("name") or ("qr:" + str(u.get("uid") or "")))[:40]
+            cookie = u.get("ck") or ""
+            uid = str(u.get("uid") or "")
+            results = []
+            alive = "unknown"
+            try:
+                client = NeteaseClient(cookie)
+                chk = client.login_check(aname)
+                if chk is None:
+                    logger.warning("[%s] 网络异常，本轮不定生死", aname)
+                elif chk is False:
+                    if _confirm_expired(cookie, aname):
+                        logger.error("[%s] 复核确认失效，报 dead", aname)
+                        alive = "dead"
+                        deads.append(uid)
+                        results.append("登录失效，已通知重登")
+                    else:
+                        logger.warning("[%s] 复核未确认失效，本轮跳过", aname)
+                else:
+                    alive = "alive"
+                    time.sleep(random.uniform(1, 3))
+                    ok, msg = client.p1_do(aname)
+                    results.append(msg)
+                    logger.info("[%s] %s", aname, msg)
+                    time.sleep(random.uniform(1, 2))
+                    ok, msg = client.p2_do(aname)
+                    results.append(msg)
+                    logger.info("[%s] %s", aname, msg)
+                    time.sleep(random.uniform(1, 2))
+                    claimed = client.p4_claim(aname)
+                    if claimed:
+                        results.append("P4 已领取: " + ", ".join(claimed))
+                    else:
+                        results.append("P4: 无可领取")
+                    time.sleep(random.uniform(1, 2))
+                    try:
+                        ok, msg = client.p5_do(aname)
+                    except Exception as e:
+                        msg = "P5 异常（已跳过）: " + str(e)[:100]
+                    results.append(msg)
+                    logger.info("[%s] %s", aname, msg)
+                    time.sleep(random.uniform(1, 2))
+                    try:
+                        ok, msg = client.p6_claim(aname)
+                    except Exception as e:
+                        msg = "P6 异常（已跳过）: " + str(e)[:100]
+                    results.append(msg)
+                    logger.info("[%s] %s", aname, msg)
+                    ok_count += 1
+            except Exception as e:
+                logger.error("[%s] 签到异常: %s", aname, e)
+                results.append("异常: " + str(e)[:120])
+            logs.append({"uid": uid, "ok": 1 if alive == "alive" else 0,
+                         "alive": alive, "detail": "\n".join(results)[:1900]})
+            time.sleep(random.uniform(2, 5))
+
+        logger.info("买家池签到完成: 成功 %d / 判死 %d / 共 %d", ok_count, len(deads), len(logs))
+        rr = requests.post(WORKER_URL + "/api/sign/report",
+                           json={"pass": SIGN_PASS, "day": day, "logs": logs, "dead": deads},
+                           headers={"User-Agent": _SIGN_UA}, timeout=60)
+        rr.raise_for_status()
+        rep = rr.json()
+        if rep.get("ok"):
+            logger.info("回传成功: logs=%s dead=%s", rep.get("logs"), rep.get("dead"))
+        else:
+            logger.error("回传失败: %s", rep.get("message", ""))
+            sys.exit(1)
+    except Exception as e:
+        logger.error("买家池签到异常: %s", e)
+        traceback.print_exc()
+        sys.exit(1)
+
+
 def main():
     cfg = None
     try:
@@ -721,4 +848,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if SIGN_USERS:
+        main_sign()
+    else:
+        main()
