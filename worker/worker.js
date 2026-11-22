@@ -6727,7 +6727,8 @@ async function handle(request) {
       }
       return json({ ok: true, logs: logsRp.length, dead: deadK }, 200, { 'Cache-Control': 'no-store' });
     }
-    /* 卡密批量生成：管理接口（口令=ADMIN_PASS）。count 1~500/次，unused 总库存上限 5000。
+    /* 卡密批量生成：管理接口（口令=ADMIN_PASS）。count 1~10000/次（>1000 自动分批写库），
+       unused 总库存上限 50000。
        卡密=预建 unused 行：uid 占位 'card:'+码，reg_code=卡密码（UNIQUE 天然防重），
        码='C'+9 位无歧义字符（signRand 同字符集，regNormCode 上限 12 位兼容）。
        2026-11-22 加 CORS：本地卡密管理 HTML（file://）直接调，口令仍强校验。 */
@@ -6745,11 +6746,11 @@ async function handle(request) {
       const cG1 = await cfg();
       if (!cG1.adminPass) return json({ ok: false, message: '未配置管理口令（KV 键 ADMIN_PASS）' }, 503, CORS_G);
       if ((bG1.pass || '') !== cG1.adminPass) return json({ ok: false, message: '管理口令错误' }, 403, CORS_G);
-      const cntG = Math.min(500, Math.max(1, parseInt(bG1.count, 10) || 0));
+      const cntG = Math.min(10000, Math.max(1, parseInt(bG1.count, 10) || 0));
       const invG = await d1All("SELECT COUNT(*) n FROM sign_users WHERE status='unused'");
       if (invG === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_G);
-      if (Number((invG[0] && invG[0].n) || 0) + cntG > 5000) {
-        return json({ ok: false, message: '未使用卡密库存已达上限（5000），请先清理再生成' }, 400, CORS_G);
+      if (Number((invG[0] && invG[0].n) || 0) + cntG > 50000) {
+        return json({ ok: false, message: '未使用卡密库存已达上限（50000），请先清理再生成' }, 400, CORS_G);
       }
       const stmtsG = [];
       const codesG = [];
@@ -6761,11 +6762,21 @@ async function handle(request) {
           params: ['card:' + cd1, '', '', '', cd1, bjStamp()],
         });
       }
-      const bG2 = await d1Batch(stmtsG);
-      if (!bG2) return json({ ok: false, message: '写库失败（' + (_d1LastErr || 'D1 异常') + '）' }, 503, CORS_G);
-      /* d1Batch 全批原子且回 true（丢弃逐条结果）：true=整批插入成功
-         （UNIQUE 撞码会整批抛错，31^9 撞码概率≈0），故 made=cntG，不逐条数 changes。 */
-      console.log('签到产品卡密生成: 请求=' + cntG + ' 成功=' + cntG);
+      /* D1 单 batch ≤1000 条（铁律5）：>1000 张自动分批。分批后非全批原子——
+         中途某批失败时前面批次已入库（均为未激活空卡=可用库存），报错里注明即可。 */
+      const doneG = { batches: 0, rows: 0 };
+      for (let gb2 = 0; gb2 < stmtsG.length; gb2 += 1000) {
+        const bG2 = await d1Batch(stmtsG.slice(gb2, gb2 + 1000));
+        if (!bG2) {
+          return json({ ok: doneG.rows > 0, made: doneG.rows,
+            message: '写库失败在第 ' + (doneG.batches + 1) + ' 批（' + (_d1LastErr || 'D1 异常') + '）；' +
+              (doneG.rows > 0 ? '前 ' + doneG.rows + ' 张已入库，可重新生成剩余数量' : '未写入任何卡密，请重试') },
+            503, CORS_G);
+        }
+        doneG.batches++;
+        doneG.rows = Math.min(stmtsG.length, doneG.batches * 1000);
+      }
+      console.log('签到产品卡密生成: 请求=' + cntG + ' 批次=' + doneG.batches);
       return json({ ok: true, made: cntG, codes: codesG }, 200, CORS_G);
     }
     /* 卡密库存/明细查询：管理接口（口令=ADMIN_PASS，CORS 同 gencards，给本地管理 HTML 用）。 */
