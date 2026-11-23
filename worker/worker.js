@@ -13198,6 +13198,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <!-- 2026-11-18：删掉「排序」下拉（用户拍板没用）。行内「较昨日」列本身可点表头排序的话另行处理，这里先直接移除 -->
     <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
     <button class="mini mOnly" id="btnMore" title="工具箱（月度结算/客服名单/设备授权/登记链接/历史登记/退出）" data-page-node-id="Z0TBa6mm2C5i5J4wMmUIVm">工具</button>
+    <button class="mini" id="btnSignAdm" style="display:none" title="签到卡密管理（网页版，满权限专属）：生成卡密/查看买家/删除买家/售后群号设置，换电脑也能用，口令=ADMIN_PASS" onclick="window.open('/signadmin','_blank')">签到管理</button>
     <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
     <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成" data-page-node-id="KG7uyWeMOO4hHWeiVUB4Li">月度结算</button>
     <button class="mini gray" id="btnCfg" style="display:none" data-page-node-id="fyixyeXAj1IGBnB0XxPYrp">客服名单</button>
@@ -13206,7 +13207,6 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限/只读都可看，纯读不改数据）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
     <button class="mini gray" id="btnMailTrace" style="display:none" title="失效号邮件提醒查询（满权限可见，实时读 D1）：查某个失效号的重登邮件/删号通知/每日提醒到底发没发、什么时候发的；也可一键列出全部失效号的邮件状态">邮件提醒</button>
     <button class="mini gray" id="btnBlk" style="display:none" title="黑名单管理（满权限专属）：退单满 N 次自动拉黑、登记入口自动拦截；可手动加入/解除，阈值随时可调">黑名单</button>
-    <button class="mini" id="btnSignAdm" title="签到卡密管理（网页版）：生成卡密/查看买家/删除买家/售后群号设置，换电脑也能用，口令=ADMIN_PASS" onclick="window.open('/signadmin','_blank')">签到管理</button>
     <button class="mini gray" id="btnOut" data-page-node-id="JfDeJt5vbASdRoOMC7tVaS">退出</button>
   </div>
   <!-- ===== 2026-11-15 方案④：手机端筛选面板 / 遮罩 / 工具抽屉（桌面 display:none）=====
@@ -13651,6 +13651,9 @@ function applyRole(role){
   // 2026-11-17：邮件提醒查询（涉及买家邮箱，满权限专属，服务端同拦）
   var bmt=$('btnMailTrace');if(bmt)bmt.style.display=full?'':'none';
   var bb=$('btnBlk');if(bb)bb.style.display=full?'':'none';
+  // 2026-11-23：签到卡密管理（/signadmin）满权限专属——买家/卡密/口令是另一条产品线，
+  // 只读口令（发给客服/合作方看的）不该知道它的存在。服务端无关碍：/signadmin 页面本身要 ADMIN_PASS。
+  var bsa=$('btnSignAdm');if(bsa)bsa.style.display=full?'':'none';
   var t=$('ptitle');
   if(t){
     var old=document.getElementById('roTag');
