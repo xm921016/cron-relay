@@ -6644,17 +6644,19 @@ async function handle(request) {
       const bcQ2 = await qrBridgeCfg();
       const brsQ2 = qrBridges(bcQ2);
       if (!brsQ2.length) return json({ ok: false, message: '出码通道未就绪，请稍后再试或联系客服' }, 502);
+      /* 2026-11-23 同 /api/r/qrkey：主桥断联标记热期间倒序先走备桥（无缝切换），平时主桥优先。 */
+      const ordS = (await qrPriDown()) ? brsQ2.slice().reverse() : brsQ2;
       let jbQ = null;
-      for (let i = 0; i < brsQ2.length; i++) {
+      for (let i = 0; i < ordS.length; i++) {
         try {
-          const rQ = await fetch(brsQ2[i].url + '/qrnew', { headers: { 'X-Bridge-Key': brsQ2[i].key }, signal: AbortSignal.timeout(20000) });
+          const rQ = await fetch(ordS[i].url + '/qrnew', { headers: { 'X-Bridge-Key': ordS[i].key }, signal: AbortSignal.timeout(20000) });
           jbQ = await rQ.json().catch(() => null);
         } catch (e) {
           jbQ = null;
           try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'sign qrnew 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
         }
-        if (jbQ && jbQ.code === 429 && i < brsQ2.length - 1) continue;   // 主桥满载 → 试备桥分摊
-        if (jbQ) { qrTkBind(jbQ.token, i + 1); break; }
+        if (jbQ && jbQ.code === 429 && i < ordS.length - 1) continue;   // 主桥满载 → 试备桥分摊
+        if (jbQ) { qrTkBind(jbQ.token, ordS[i].idx); break; }
       }
       if (!jbQ) return json({ ok: false, message: '出码通道繁忙，请点「换一张」重试；多次不行请联系客服' }, 502);
       if (jbQ.code === 429) return json({ ok: false, message: '当前登记人数较多，请 1 分钟后再点「换一张」' }, 429);
@@ -7180,12 +7182,17 @@ async function handle(request) {
          sDeviceId 不再参与网易请求），bag 恒为空串，页面逻辑无需改动。 */
       const bc = await qrBridgeCfg();
       const brs = qrBridges(bc);
+      /* 2026-11-23 高峰分流/无缝切换：主桥断联标记(QRPRI_DOWN)热期间出码倒序（备桥先上），
+         与 qrpoll 口径一致，买家不再每张新码白等主桥 20s 超时；平时仍主桥优先，
+         主桥 429(满载) 自动落到本机备桥分摊（如 7 单并发：笔记本 6 实例吃 6 单，
+         第 7 张自动走本机）。绑定 idx 必须用桥自带 idx（倒序后循环位置≠桥编号）。 */
+      const ordK = (await qrPriDown()) ? brs.slice().reverse() : brs;
       if (brs.length) {
         let jb = null;
-        for (let i = 0; i < brs.length; i++) {
+        for (let i = 0; i < ordK.length; i++) {
           try {
-            const r = await fetch(brs[i].url + '/qrnew', {
-              headers: { 'X-Bridge-Key': brs[i].key },
+            const r = await fetch(ordK[i].url + '/qrnew', {
+              headers: { 'X-Bridge-Key': ordK[i].key },
               signal: AbortSignal.timeout(20000),
             });
             jb = await r.json().catch(() => null);
@@ -7194,8 +7201,8 @@ async function handle(request) {
             console.error('qrkey bridge 请求失败:', e && e.message);
             try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrnew 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
           }
-          if (jb && jb.code === 429 && i < brs.length - 1) continue;   // 主桥满载 → 试备桥分摊
-          if (jb) { qrTkBind(jb.token, i + 1); break; }
+          if (jb && jb.code === 429 && i < ordK.length - 1) continue;   // 主桥满载 → 试备桥分摊
+          if (jb) { qrTkBind(jb.token, ordK[i].idx); break; }
         }
         if (!jb) {
           return json({ ok: false, message: '出码通道繁忙，请点「换一张」重试；多次不行请联系客服' }, 502);
