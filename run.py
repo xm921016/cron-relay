@@ -1055,11 +1055,13 @@ def main():
             try:
                 _j = r.json() or {}
                 deleted = [str(x) for x in (_j.get("deleted") or [])]
-            except Exception:
-                deleted = []
                 # 2026-11-21：回执带 name→售后群号（worker 按 reg_cfg 现查），直邮时补「售后群：」行
+                # 2026-11-23 修复：这段原来误缩进进 except 分支 —— JSON 解析成功时永远不执行，
+                # dead_groups 恒为空 ⇒ 判死直邮全部降级「联系你的客服获取」（13763367763 实锤）。
                 for _gn, _gv in ((_j.get("groups") or {}).items()):
                     if _gv: dead_groups[str(_gn)] = str(_gv)
+            except Exception:
+                deleted = []
         except Exception as e:
             print(f"[slice {slice_idx}] 失效账号清理上报失败(不影响任务): {e}")
         for nm in deleted:
