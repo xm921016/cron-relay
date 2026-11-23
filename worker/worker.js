@@ -10180,7 +10180,7 @@ async function handle(request) {
       }
       return mtRespond({ rows: rows, trunc: dlRows.length >= 500 }, 'list');
     }
-    /* ---- 2026-11-17 二期：邮件补发 /api/console/mailresend（满权限，写 mail_queue）----
+    /* ---- 2026-11-17 二期：邮件补发 /api/console/mailresend（满权限，写 mail_queue；2026-11-23 起 dn=1 分支支持 dead_notice 删号通知补发）----
        场景：①某封提醒邮件没发出去（dropped/skipped）或号主说没收到 —— 重发已有队列记录；
              ②判死链路还没走到、但号主已经找上来的号（13077105665 教训）—— 凭空补发一封
                relogin2 每日重登提醒（仅此 kind 允许无历史记录时入队，别的 kind 凭空入队
@@ -10203,6 +10203,20 @@ async function handle(request) {
       const kindR = String(bodyR.kind || '').trim().toLowerCase();
       const refR = String(bodyR.ref == null ? '' : bodyR.ref).trim().slice(0, 80);
       if (!uidR || !/^[a-z0-9_]{1,24}$/.test(kindR)) return json({ ok: false, message: '参数不完整（uid/kind）' }, 400, CORS);
+      // 2026-11-23（用户要求补发按钮覆盖全部类型）：dn=1 → dead_notice 删号通知补发分支。
+      // 重置该行为 pending，由主群 notify_dead.py 兜底链路（12 小时一班）补发；
+      // 3 天放弃窗口照旧生效（判死超 3 天的行下一班会被标 skip_giveup，所以超窗直接拒绝并说明）。
+      if (String(bodyR.dn || '') === '1') {
+        const rowsD = await d1All('SELECT email,name,state,skip_reason,removed_at FROM dead_notice WHERE pool=? AND uid=? AND removed_at=? LIMIT 1', [poolR, uidR, refR]);
+        if (rowsD === null) return json({ ok: false, message: '数据库读取失败（D1 异常）' }, 503, CORS);
+        if (!rowsD.length) return json({ ok: false, message: '没找到这条删号通知记录（可能已被清理）' }, 404, CORS);
+        if (!String(rowsD[0].email || '').trim()) return json({ ok: false, message: '这条删号通知没留邮箱，发不了' }, 400, CORS);
+        const giveupC = bjStamp(Date.now() - 3 * 86400000);
+        if (String(refR || '') <= giveupC) return json({ ok: false, message: '该删号已超过 3 天放弃窗口（判死超 3 天视为永久退信，补发会被自动跳过）；如需联系号主请走其他渠道' }, 400, CORS);
+        const okD = await d1Run("UPDATE dead_notice SET state='pending',claimed_at=NULL,sent_at=NULL,skip_reason=NULL WHERE pool=? AND uid=? AND removed_at=?", [poolR, uidR, refR]);
+        if (!okD) return json({ ok: false, message: '写入失败（D1 异常），没有入队' }, 503, CORS);
+        return json({ ok: true, action: 'resent', message: '已重置为待发，下一班兜底发信（最长约 12 小时）会补发这封删号通知' }, 200, CORS);
+      }
       const accR = await d1All('SELECT email,name,agent,exp FROM accounts WHERE pool=? AND uid=? LIMIT 1', [poolR, uidR]);
       if (accR === null) return json({ ok: false, message: '数据库读取失败（D1 异常）' }, 503, CORS);
       const exR = await d1All('SELECT email,name,agent,exp FROM mail_queue WHERE pool=? AND uid=? AND kind=? AND ref=? LIMIT 1', [poolR, uidR, kindR, refR]);
@@ -13426,7 +13440,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
 <!-- ===== 2026-11-17：失效号邮件提醒查询（实时读 D1，满权限专属） ===== -->
 <div class="modal" id="mtModal" hidden><div class="mbox" style="width:1040px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
   <h3>失效号邮件提醒查询（实时 + 缓存）</h3>
-  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），默认返回近 <b>30 天</b>全部类型邮件（切大时间范围才多读，省配额），类型筛选在本机过滤不耗配额；每封队列邮件后有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」。<br><b>失效号清单</b>：列出时间范围内<b>删掉的号</b>（每行带删号时间/原因、删号通知发没发/什么时候发的）+ 在池待复核的号（11-18 起失效号立即删号，清单以已删号为主体），每行可点「邮件」直达该号明细。<br><b>异常检查</b>：按 2026-11-18 拍板口径「今天播了明天就得有播放量」，列三类异常 —— 播放无效（生效数=0）/ 播放量停滞（近30日播放持平）/ 缺采（当天没采到且无标记）。</p>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），默认返回近 <b>30 天</b>全部类型邮件（切大时间范围才多读，省配额），类型筛选在本机过滤不耗配额；每封队列邮件后有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」；2026-11-23 起<b>所有类型邮件（含删号通知）都有「补发」</b>——队列邮件走原发信链路（约 30 分钟内），删号通知重置后走兜底链路（最长约 12 小时内，判死超 3 天的会被放弃窗口自动跳过）。<br><b>失效号清单</b>：列出时间范围内<b>删掉的号</b>（每行带删号时间/原因、删号通知发没发/什么时候发的）+ 在池待复核的号（11-18 起失效号立即删号，清单以已删号为主体），每行可点「邮件」直达该号明细。<br><b>异常检查</b>：按 2026-11-18 拍板口径「今天播了明天就得有播放量」，列三类异常 —— 播放无效（生效数=0）/ 播放量停滞（近30日播放持平）/ 缺采（当天没采到且无标记）。</p>
   <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
     <div style="flex:1;min-width:220px"><label style="margin-top:0">搜索（UID / 手机号片段，可留空）</label><input id="mtQ" placeholder="如 13077105665" style="width:100%"></div>
     <button class="mini" id="mtGo" style="margin-top:0;padding:9px 14px">查单号</button>
@@ -15317,6 +15331,31 @@ function mtTime(v){
   var s=String(v||'');
   return s?esc(s.slice(5,16)):'—';   // MM-DD HH:MM
 }
+// 2026-11-23（用户要求）：邮件类型全部中文标注，格式=中文名(英文代码)；补发按钮覆盖全部类型。
+// 代码口径与 notify_mail.py 分支一一对应；未知代码原样显示（不猜）。
+function mtKindLabel(m){
+  if(!m.__mq){   // dead_notice 行（含手动删号/超时清理/到期转公益三种 kind）
+    var k2=String(m.kind||'');
+    if(k2==='relogin_timeout')return '删号通知(超时清理 relogin_timeout)';
+    if(k2==='expired')return '删号通知(到期转公益 expired)';
+    return '删号通知(dead)';
+  }
+  var k=String(m.kind||'');
+  var MAP={reg:'登记成功',relogin2:'重登提醒',songchange:'已自动换歌',
+    songfix:'换歌提醒·共创冻结',songfix2:'换歌提醒·独唱冻结',songfix3:'换歌提醒·绑错歌',
+    nomus:'非音乐人提醒',songok:'冻结误报澄清',feenote:'VIP锁歌换歌引导',
+    signreg:'签到登记成功',signdead:'签到失效提醒',signdead2:'签到失效二次提醒'};
+  if(MAP[k])return MAP[k]+'('+k+')';
+  if(k.indexOf('exp')===0)return '到期提醒('+k+')';
+  return k;
+}
+// 删号原因中文标注（dead_log 流水口径：cookie_invalid=登录失效 / manual=手动删号）
+function mtDeadReason(r){
+  var v=String(r||'');
+  if(v==='cookie_invalid')return '登录失效(cookie_invalid)';
+  if(v==='manual')return '手动删号(manual)';
+  return v||'';
+}
 function mtRenderOne(o){
   var accs=(o&&o.accs)||[];
   if(!accs.length)return '<p style="color:#888">没查到这个号（accounts 里没有，邮件队列里也没有）。</p>';
@@ -15332,7 +15371,7 @@ function mtRenderOne(o){
       +(a.relogin_at?'':' <button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="relogin2" data-ref="" style="padding:2px 10px;font-size:11px" title="这个号还没发过重登邮件，手动补一封每日重登提醒（走原发信链路，约 30 分钟内发出）">补发重登提醒</button>')
       +' ｜ '))
       +'待复核标记：'+(a.suspect_at?esc(String(a.suspect_at).slice(5,16)):'无')
-      +(a.dead&&a.dead.length?(' ｜ 删号流水：<b style="color:#a32d2d">'+esc(String(a.dead[0].reason||''))+' '+mtTime(a.dead[0].at)+'</b>'):'')
+      +(a.dead&&a.dead.length?(' ｜ 删号流水：<b style="color:#a32d2d">'+esc(mtDeadReason(a.dead[0].reason||''))+' '+mtTime(a.dead[0].at)+'</b>'):'')
       +'</p>';
     // 2026-11-17 二期：类型/时间筛选（本机过滤，不耗 D1 配额）—— 服务端一次拉回近 200 条
     var selK=($('mtKind')?$('mtKind').value:'')||'';
@@ -15366,13 +15405,13 @@ function mtRenderOne(o){
       +'<th style="'+TH+'">入队时间</th><th style="'+TH+'">发出时间</th><th style="'+TH+'">备注</th><th style="'+TH+'">操作</th></tr></thead><tbody>';
     for(var k=0;k<mails.length;k++){var m=mails[k];
       h+='<tr'+(k%2?' style="background:#fafbfc"':'')+'>'
-        +'<td style="'+TD+'">'+esc(m.kind||'—')+'</td>'
+        +'<td style="'+TD+'">'+esc(mtKindLabel(m))+'</td>'
         +'<td style="'+TD+'">'+esc(m.ref||'—')+'</td>'
         +'<td style="'+TD+'">'+mtMailState(m.state)+'</td>'
         +'<td style="'+TD+'">'+mtTime(m.created_at)+'</td>'
         +'<td style="'+TD+'">'+(m.sent_at?('<span class="good">'+mtTime(m.sent_at)+'</span>'):'—')+'</td>'
         +'<td style="'+TD+';color:#777;max-width:220px;overflow:hidden;text-overflow:ellipsis">'+esc(m.skip_reason||'')+'</td>'
-        +(m.__mq?('<td style="'+TD+'"><button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="'+esc(m.kind||'')+'" data-ref="'+esc(m.ref||'')+'" style="padding:2px 10px;font-size:11px" title="把这封邮件重新入队，走原发信链路（约 30 分钟内）发出">补发</button></td>'):'<td style="'+TD+'"></td>')
+        +(('<td style="'+TD+'"><button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="'+esc(m.__mq?(m.kind||''):(m.kind||'dead'))+'" data-ref="'+esc(m.__mq?(m.ref||''):(m.created_at||''))+'"'+(m.__mq?'':' data-dn="1"')+' style="padding:2px 10px;font-size:11px" title="'+(m.__mq?'把这封邮件重新入队，走原发信链路（约 30 分钟内）发出':'把这封删号通知重置为待发，由兜底链路补发（最长约 12 小时内）；判死超 3 天的会被放弃窗口自动跳过')+'">补发</button></td>'))
       +'</tr>';
     }
     h+='</tbody></table>';
@@ -15417,7 +15456,7 @@ function mtRenderList(d){
     }
     var ddTxt='—';
     if(dd){
-      ddTxt='<b style="color:#a32d2d">'+mtTime(dd.at)+'</b> <span class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:bottom" title="'+esc(dd.reason||'')+'">'+esc(dd.reason||'')+'</span>';
+      ddTxt='<b style="color:#a32d2d">'+mtTime(dd.at)+'</b> <span class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:bottom" title="'+esc(dd.reason||'')+'">'+esc(mtDeadReason(dd.reason||''))+'</span>';
     }
     h+='<tr'+(i%2?' style="background:#fafbfc"':'')+'>'
       +'<td style="'+TD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
@@ -15523,14 +15562,14 @@ $('mtBody').addEventListener('click',function(ev){
 });
 function mtResend(btn){
   var t=JSON.parse(TOKEN||'{}');
-  var pool=btn.getAttribute('data-pool'),uid=btn.getAttribute('data-uid'),kind=btn.getAttribute('data-kind'),ref=btn.getAttribute('data-ref');
+  var pool=btn.getAttribute('data-pool'),uid=btn.getAttribute('data-uid'),kind=btn.getAttribute('data-kind'),ref=btn.getAttribute('data-ref'),dn=btn.getAttribute('data-dn');
   if(btn.getAttribute('data-armed')!=='1'){   // 两段确认：第一下变红，再点一下才真发
     btn.setAttribute('data-armed','1');btn.textContent='确认补发?';btn.style.background='#a32d2d';btn.style.color='#fff';btn.style.borderColor='#a32d2d';
     setTimeout(function(){if(btn.parentNode){btn.setAttribute('data-armed','0');btn.textContent='补发';btn.style.background='';btn.style.color='';btn.style.borderColor='';}},4000);
     return;
   }
   btn.disabled=true;btn.textContent='入队中…';
-  api('/api/console/mailresend',{user:t.user,pass:t.pass,pool:pool,uid:uid,kind:kind,ref:ref}).then(function(o){
+  api('/api/console/mailresend',{user:t.user,pass:t.pass,pool:pool,uid:uid,kind:kind,ref:ref,dn:dn||''}).then(function(o){
     if(o.ok&&o.d&&o.d.ok){
       $('mtm').textContent=(o.d.message||'已入队')+' —— 查询缓存已自动失效，下次刷新会重新读库';
       $('mtm').className='msg good';
