@@ -186,6 +186,10 @@ def main():
                     # 2026-11-22 新增：签到产品登录失效→附重登链接（exp=登记码）。
                     # 2026-11-23：群号随队列下发（同 signreg）。
                     ok = notify.notify_signdead(t.get("email"), who, t.get("exp") or "", t.get("group") or "")
+                elif kind == "signdead2":
+                    # 2026-11-23 新增：判死 7 天未重登的第二封提醒（worker signDeadRemind 补排，
+                    # ref=判死日，唯一键天然排重——一个掉线周期最多补一封）。文案复用 signdead。
+                    ok = notify.notify_signdead(t.get("email"), who, t.get("exp") or "", t.get("group") or "")
                 elif kind == "feenote":
                     # 2026-11-16 新增：登记歌是 VIP 试听类（fee>0）零入账的换歌引导
                     # （ref=歌曲 id，歌名由 worker mail_pending 附带；队列行人工入队）

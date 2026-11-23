@@ -3109,6 +3109,29 @@ async function mailEnqueue(pool, uid, kind, ref, email, name, agent, exp) {
      'pending', bjStamp()]);
 }
 
+// 2026-11-23（用户拍板口径）：签到买家判死 7 天仍未重登 → 自动补发第二封提醒。
+// kind=signdead2、ref=判死日：唯一键 (pool,uid,kind,ref) 天然保证一个掉线周期最多补发一封
+// （INSERT OR IGNORE 排重），买家重登转 active 后不再命中；重登后又掉线（新的判死日）才会再补。
+// 文案复用 signdead（掉线重登引导），notify_mail.py 已加 signdead2 分支。每日主 cron（北京 10:00）扫一次。
+async function signDeadRemind() {
+  if (!d1ok()) return 0;
+  const dCut = beijingDatePlus(-7);
+  const rowsR = await d1All("SELECT uid, email, name, reg_code, dead_notified_day FROM sign_users " +
+    "WHERE status='dead' AND email IS NOT NULL AND email!='' AND dead_notified_day IS NOT NULL " +
+    "AND dead_notified_day!='' AND dead_notified_day<=? LIMIT 100", [dCut]);
+  if (!rowsR || !rowsR.length) return 0;
+  let kR = 0;
+  for (const r of rowsR) {
+    try {
+      const okQ = await mailEnqueue('sign', String(r.uid || ''), 'signdead2', String(r.dead_notified_day || ''),
+        String(r.email || ''), String(r.name || ''), '', String(r.reg_code || ''));
+      if (okQ) kR++;
+    } catch (e) { console.error('signdead2 入队失败:', e && e.message); }
+  }
+  if (rowsR.length) console.log('签到判死 7 天未重登补提醒: 命中 ' + rowsR.length + ' 个，入队 ' + kR + ' 封');
+  return kR;
+}
+
 // 2026-11-13：查艺人名下歌曲，挑「本人独创独唱」换歌候选（mail_scan 冻结歌自动处置用）。
 // 接口 POST /weapi/v1/artist/{aid} 为公开艺人页（无需 CK），2026-11-13 本机实测 200。
 // 候选条件：作者仅本人一人、不在 usedSet（池内其他号在用）、不在 excludeList
@@ -6989,6 +7012,16 @@ async function handle(request) {
       /* 今日签到概况（所有买家，不限卡密来源） */
       const tdS9 = await d1All('SELECT COUNT(*) n, COALESCE(SUM(ok),0) okn FROM sign_logs WHERE day=?', [beijingDate()]);
       if (tdS9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
+      /* 2026-11-23：最近 7 天每日签到成功数（管理页小趋势条）。day>= 前缀走 (day,uid) 主键范围。 */
+      const w7S9 = await d1All('SELECT day, COALESCE(SUM(ok),0) okn FROM sign_logs WHERE day>=? GROUP BY day', [beijingDatePlus(-6)]);
+      if (w7S9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
+      const w7map = {};
+      for (const r7 of w7S9) w7map[String(r7.day)] = Number(r7.okn || 0);
+      const wkS9 = [];
+      for (let di = -6; di <= 0; di++) {
+        const dday = beijingDatePlus(di);
+        wkS9.push({ day: dday, ok: w7map[dday] || 0 });
+      }
       /* 明细筛选：q=搜卡密码/买家账号/昵称/邮箱；status=状态过滤。LIKE 参数 4 个（铁律5 内）。 */
       const qS9 = String(bS9.q || '').trim().slice(0, 40);
       let fS9 = String(bS9.status || '');
@@ -7008,6 +7041,7 @@ async function handle(request) {
       for (let s9 = 0; s9 < soldS9.length; s9++) soldN += Number(soldS9[s9].n || 0);
       return json({ ok: true, stats: stS9, cards: listS9, sold: soldN,
         today: beijingDate(), todayN: Number((tdS9[0] && tdS9[0].n) || 0), todayOk: Number((tdS9[0] && tdS9[0].okn) || 0),
+        week7: wkS9,
         listLimited: listS9.length >= 500 }, 200, CORS_S);
     }
     /* 单张卡密作废：管理接口。只允许作废未售（unused）卡——已兑换的卡绑定着买家，
@@ -12354,6 +12388,12 @@ button:disabled { opacity: 0.5; }
 .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
 .stat { background: #eef4fd; border: 1px solid #d7e3f5; border-radius: 8px; padding: 8px 14px; font-size: 13px; }
 .stat b { display: block; font-size: 20px; color: #2c5fb3; }
+.wk { display: flex; gap: 10px; align-items: flex-end; height: 74px; margin-top: 14px; padding: 8px 10px 4px;
+  background: #f7f9fc; border: 1px solid #e6ebf3; border-radius: 8px; }
+.wk .bar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+.wk .bar i { display: block; width: 60%; max-width: 34px; background: #4a7dd6; border-radius: 4px 4px 0 0; min-height: 2px; }
+.wk .bar b { font-size: 11px; color: #2c5fb3; font-weight: 600; margin-bottom: 3px; }
+.wk .bar span { font-size: 10px; color: #8894a4; margin-top: 4px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
 th, td { border-bottom: 1px solid #eceef1; padding: 6px 4px; text-align: left; word-break: break-all; }
 th { color: #666; font-weight: 500; background: #fafbfc; }
@@ -12362,8 +12402,11 @@ th { color: #666; font-weight: 500; background: #fafbfc; }
 .tag.active { background: #e2f6e8; color: #0a7d43; }
 .tag.dead { background: #fdeaea; color: #c0392b; }
 #msg { font-size: 13px; color: #c0392b; margin-top: 8px; min-height: 18px; }
-#out { width: 100%; height: 140px; margin-top: 10px; font-size: 12px; border: 1px solid #d8dbe0;
-  border-radius: 8px; padding: 8px; }
+.blk { margin-top: 10px; }
+.blkhead { font-size: 13px; color: #33506e; margin-bottom: 4px; }
+.blkhead a { color: #4a7dd6; text-decoration: none; margin-left: 12px; cursor: pointer; }
+.blk textarea { width: 100%; height: 118px; font-size: 12px; border: 1px solid #d8dbe0;
+  border-radius: 8px; padding: 8px; box-sizing: border-box; }
 .hint { font-size: 12px; color: #888; line-height: 1.7; margin-top: 8px; }
 .toplink { font-size: 13px; }
 .toplink a { color: #4a7dd6; text-decoration: none; margin-right: 14px; }
@@ -12388,21 +12431,17 @@ th { color: #666; font-weight: 500; background: #fafbfc; }
       <button class="gray" onclick="refresh()">刷新统计</button>
     </div>
     <div id="msg"></div>
-    <div class="hint">生成后：下方框里是「纯链接」（一行一条），点「复制全部」→ 粘贴到闲鱼
-      卖家中心 → 自动发货 → 卡密模式 的卡密库里。文案不带 https://（闲鱼聊天里带协议头的链接常被屏蔽）。
+    <div class="hint">生成后：下方按「每 1000 条一个 txt」自动分块，每块自带复制和下载按钮，
+      一个文件一个文件粘到闲鱼卡密库即可。文案是纯链接不带 https://（闲鱼聊天里带协议头的链接常被屏蔽）。
       已兑换的卡密链接自动变成「重登入口」，买家重复进链接不会报卡密无效。</div>
-    <textarea id="out" readonly placeholder="新生成的链接会出现在这里"></textarea>
-    <div>
-      <button class="gray" onclick="copyOut()">复制全部链接</button>
-      <button class="gray" onclick="saveTxt()">下载 .txt</button>
-    </div>
+    <div id="blocks"><span class="hint" style="display:block;margin-top:6px">新生成的链接会按 1000 条一块出现在这里</span></div>
   </div>
 
   <div class="card">
     <label>售后群设置（登记成功/掉线邮件里自动带上，加红加大；改完立即生效）</label>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <span style="font-size:14px;color:#555">群号：</span>
-      <input id="qqgroup" type="text" placeholder="纯数字 QQ 群号，如 1126395854"
+      <input id="qqgroup" type="text" placeholder="纯数字 QQ 群号"
         style="flex:1;min-width:180px;padding:8px 10px;font-size:15px;border:1px solid #ccd0d6;border-radius:8px;outline:none">
       <button onclick="saveGroup()" style="margin-top:0">保存群号</button>
     </div>
@@ -12426,6 +12465,8 @@ th { color: #666; font-weight: 500; background: #fafbfc; }
   <div class="card">
     <label>库存与买家概况</label>
     <div id="stats" class="stats"><span class="stat">点「刷新统计」加载</span></div>
+    <div id="wkcap" class="hint" style="display:none;margin-top:12px">最近 7 天每日签到成功数</div>
+    <div id="week7" class="wk" style="display:none"></div>
 
     <label style="margin-top:14px">卡密/买家明细（最近 500 条，可筛选）</label>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
@@ -12439,7 +12480,6 @@ th { color: #666; font-weight: 500; background: #fafbfc; }
       </select>
       <button class="gray" style="margin-top:0" onclick="loadList()">筛选</button>
       <button class="gray" style="margin-top:0" onclick="resetFilter()">重置</button>
-      <button class="gray" style="margin-top:0" onclick="exportCsv()">导出 CSV</button>
     </div>
     <div id="flimit" class="hint" style="display:none;color:#b26a00">结果超过 500 条只显示最近 500 条，想看更多请缩小筛选范围</div>
     <table id="tbl">
@@ -12462,11 +12502,24 @@ function getPass() {
   else localStorage.removeItem('signadm_pass');
   return p;
 }
+function passFail(d) {
+  if (d && d.ok === false && String(d.message || '').indexOf('口令') >= 0) {
+    try { localStorage.removeItem('signadm_pass'); } catch (e) {}
+    $('pass').value = '';
+    $('msg').style.color = '#c0392b';
+    $('msg').textContent = '口令不对：已清掉记住的口令，请重新粘贴 ADMIN_PASS（和 650 控制台管理口令同一个），再点一次';
+    return true;
+  }
+  return false;
+}
 function api(path, body, cb) {
   $('msg').textContent = '';
   fetch(W + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(function (r) { return r.json(); })
-    .then(function (d) { cb(d || { ok: false, message: '响应异常' }); })
+    .then(function (d) {
+      d = d || { ok: false, message: '响应异常' };
+      if (!passFail(d)) cb(d);
+    })
     .catch(function () { cb({ ok: false, message: '网络异常，请重试' }); });
 }
 var LAST = [];
@@ -12480,12 +12533,45 @@ function gen() {
   api('/api/sign/gencards', { pass: p, count: n }, function (d) {
     if (!d.ok) { $('msg').textContent = d.message || '生成失败'; return; }
     LAST = (d.codes || []).map(function (c) { return shipText(c); });
-    $('out').value = LAST.join('\\n');
+    renderBlocks();
     $('msg').style.color = '#0a7d43';
-    $('msg').textContent = '已生成 ' + d.made + ' 张，链接在下方框里，复制去闲鱼卡密库粘贴';
-    setTimeout(function () { $('msg').textContent = ''; }, 5000);
+    $('msg').textContent = '已生成 ' + d.made + ' 张，按每 1000 条一个 txt 分成 ' + Math.ceil(LAST.length / 1000) + ' 个文件，逐个复制/下载去闲鱼卡密库粘贴';
+    setTimeout(function () { $('msg').textContent = ''; }, 8000);
     refresh();
   });
+}
+function renderBlocks() {
+  var host = $('blocks');
+  if (!LAST.length) { host.innerHTML = '<span class="hint" style="display:block;margin-top:6px">新生成的链接会按 1000 条一块出现在这里</span>'; return; }
+  var html = '';
+  for (var i = 0; i < LAST.length; i += 1000) {
+    var idx = i / 1000 + 1;
+    var chunk = LAST.slice(i, i + 1000);
+    html += '<div class="blk"><div class="blkhead">文件 ' + idx + '（' + chunk.length + ' 条）' +
+      '<a onclick="copyBlk(' + idx + ')">复制本文件</a>' +
+      '<a onclick="saveBlk(' + idx + ')">下载 .txt</a></div>' +
+      '<textarea id="blk' + idx + '" readonly>' + chunk.join('\\n') + '</textarea></div>';
+  }
+  host.innerHTML = html;
+}
+function copyBlk(idx) {
+  var t = $('blk' + idx); if (!t) return;
+  navigator.clipboard.writeText(t.value).then(function () {
+    $('msg').style.color = '#0a7d43';
+    $('msg').textContent = '已复制文件 ' + idx + '（' + Math.min(1000, LAST.length - (idx - 1) * 1000) + ' 条），去闲鱼粘贴';
+    setTimeout(function () { $('msg').textContent = ''; }, 4000);
+  }, function () {
+    t.select();
+    document.execCommand('copy');
+  });
+}
+function saveBlk(idx) {
+  var t = $('blk' + idx); if (!t) return;
+  var blob = new Blob([t.value], { type: 'text/plain' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '签到卡密_文件' + idx + '_共' + LAST.length + '条.txt';
+  a.click();
 }
 function purge(scope) {
   var p = getPass(); if (!p) return;
@@ -12517,8 +12603,21 @@ function refresh() {
       '<span class="stat"><b>' + active + '</b>已激活买家</span>' +
       '<span class="stat"><b>' + dead + '</b>已判死（等重登）</span>' +
       '<span class="stat"><b>' + (d.todayOk || 0) + '</b>今日签到成功</span>';
+    renderWeek(d);
     renderList(d);
   });
+}
+function renderWeek(d) {
+  var wk = d.week7 || [];
+  if (!wk.length) { $('week7').style.display = 'none'; $('wkcap').style.display = 'none'; return; }
+  var mx = 1;
+  wk.forEach(function (x) { if (Number(x.ok) > mx) mx = Number(x.ok); });
+  $('week7').innerHTML = wk.map(function (x) {
+    var h = Math.max(4, Math.round(40 * Number(x.ok || 0) / mx));
+    return '<div class="bar"><b>' + (x.ok || 0) + '</b><i style="height:' + h + 'px"></i><span>' + String(x.day || '').slice(5) + '</span></div>';
+  }).join('');
+  $('week7').style.display = 'flex';
+  $('wkcap').style.display = 'block';
 }
 function renderList(d) {
   LIST = d.cards || [];
@@ -12583,47 +12682,13 @@ function delUser(code, uid) {
     loadList(); refresh();
   });
 }
-function exportCsv() {
-  if (!LIST.length) { $('pmsg').style.color = '#c0392b'; $('pmsg').textContent = '当前列表为空，没有可导出的数据'; return; }
-  var head = '卡密码,状态,买家账号,昵称,邮箱,登记时间,最近签到\\n';
-  var rows = LIST.map(function (c) {
-    return [c.reg_code, c.status, c.uid || '', c.name || '', c.email || '', c.added_at || '', c.last_ok_day || '']
-      .map(function (v) { return '"' + String(v).replace(/"/g, '""') + '"'; }).join(',');
-  }).join('\\n');
-  var blob = new Blob(['\\uFEFF' + head + rows], { type: 'text/csv' });
-  var a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = '签到卡密明细_' + (currentFilter().status || '全部') + '_' + LIST.length + '条.csv';
-  a.click();
-  $('pmsg').style.color = '#0a7d43';
-  $('pmsg').textContent = '已导出 ' + LIST.length + ' 条（Excel 可直接打开）';
-  setTimeout(function () { $('pmsg').textContent = ''; }, 4000);
-}
-function copyOut() {
-  if (!$('out').value) { $('msg').textContent = '还没有可复制的链接'; return; }
-  navigator.clipboard.writeText($('out').value).then(function () {
-    $('msg').style.color = '#0a7d43';
-    $('msg').textContent = '已复制 ' + LAST.length + ' 条链接，去闲鱼粘贴';
-    setTimeout(function () { $('msg').textContent = ''; }, 4000);
-  }, function () {
-    $('out').select();
-    document.execCommand('copy');
-  });
-}
-function saveTxt() {
-  if (!$('out').value) { $('msg').textContent = '还没有可保存的链接'; return; }
-  var blob = new Blob([$('out').value], { type: 'text/plain' });
-  var a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = '签到卡密_' + LAST.length + '条.txt';
-  a.click();
-}
 function loadGroup() {
   var p = getPass(); if (!p) return;
   fetch(W + '/api/sign/cfg?pass=' + encodeURIComponent(p))
     .then(function (r) { return r.json(); })
     .then(function (d) {
-      if (d.ok) $('qqgroup').value = d.group || '';
+      if (d && d.ok) $('qqgroup').value = d.group || '';
+      else passFail(d);
     })
     .catch(function () {});
 }
@@ -13132,8 +13197,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <input id="q" placeholder="搜索：账号 / 邮箱 / UID / 歌曲ID / 客服 / 登记链接" data-page-node-id="HiY9izWnIWEZm0rKYqM076">
     <!-- 2026-11-18：删掉「排序」下拉（用户拍板没用）。行内「较昨日」列本身可点表头排序的话另行处理，这里先直接移除 -->
     <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
-    <button class="mini mOnly" id="btnMore" title="工具箱（导出CSV/月度结算/客服名单/设备授权/登记链接/历史登记/退出）" data-page-node-id="Z0TBa6mm2C5i5J4wMmUIVm">工具</button>
-    <button class="mini" id="btnCsv" data-page-node-id="1wGeER1qQC3pXjLZx52lK2">导出CSV</button>
+    <button class="mini mOnly" id="btnMore" title="工具箱（月度结算/客服名单/设备授权/登记链接/历史登记/退出）" data-page-node-id="Z0TBa6mm2C5i5J4wMmUIVm">工具</button>
     <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
     <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成" data-page-node-id="KG7uyWeMOO4hHWeiVUB4Li">月度结算</button>
     <button class="mini gray" id="btnCfg" style="display:none" data-page-node-id="fyixyeXAj1IGBnB0XxPYrp">客服名单</button>
@@ -13142,7 +13206,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限/只读都可看，纯读不改数据）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
     <button class="mini gray" id="btnMailTrace" style="display:none" title="失效号邮件提醒查询（满权限可见，实时读 D1）：查某个失效号的重登邮件/删号通知/每日提醒到底发没发、什么时候发的；也可一键列出全部失效号的邮件状态">邮件提醒</button>
     <button class="mini gray" id="btnBlk" style="display:none" title="黑名单管理（满权限专属）：退单满 N 次自动拉黑、登记入口自动拦截；可手动加入/解除，阈值随时可调">黑名单</button>
-    <button class="mini gray" id="btnSignAdm" title="签到卡密管理（网页版）：生成卡密/查看买家/删除买家/售后群号设置，换电脑也能用，口令=ADMIN_PASS" onclick="window.open('/signadmin','_blank')">签到管理</button>
+    <button class="mini" id="btnSignAdm" title="签到卡密管理（网页版）：生成卡密/查看买家/删除买家/售后群号设置，换电脑也能用，口令=ADMIN_PASS" onclick="window.open('/signadmin','_blank')">签到管理</button>
     <button class="mini gray" id="btnOut" data-page-node-id="JfDeJt5vbASdRoOMC7tVaS">退出</button>
   </div>
   <!-- ===== 2026-11-15 方案④：手机端筛选面板 / 遮罩 / 工具抽屉（桌面 display:none）=====
@@ -16011,24 +16075,7 @@ $('cSave').onclick=function(){
     else{$('cm').textContent=(o.d&&o.d.message)||'保存失败';$('cm').className='msg err';}
   }).catch(function(){$('cSave').disabled=false;$('cm').textContent='网络错误';$('cm').className='msg err';});
 };
-$('btnCsv').onclick=function(){
-  var rows=[[ '池','账号','客服','套餐','UID','歌曲ID','时长(秒)',
-    '昨进度','今进度','日环比',
-    '近30日播放','入池','有效期','邮箱','标记','补号','备注']];
-  buildRows().forEach(function(r){
-    var e=r.e;
-    var dur=(DATA.durs||{})[r.pool+'|'+e.uid]||(DATA.durs||{})[e.uid]||((r.a&&r.a.dur)||'');
-    rows.push([r.pool==='hz'?'主群':'定制群',e.name,e.agent||'',e.plan||'',e.uid||'',e.song||'',dur,
-      r.p&&r.p.rate!=null?r.p.rate:'',r.a&&r.a.rate!=null?r.a.rate:'',r.delta==null?'':r.delta,
-      r.a&&r.a.rpc30!=null?r.a.rpc30:'',e.added||'',e.exp||'永久',e.email||'',e.pub?'公益号':(e.noListen?'只收':''),
-      e.rb?'补号':'',e.note||'']);
-  });
-  var csv='\\ufeff'+rows.map(function(r){return r.map(function(v){return '"'+String(v).replace(/"/g,'""')+'"';}).join(',');}).join('\\r\\n');
-  var a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
-  a.download='650控制台_'+(DATA?DATA.date:todayBJ())+'.csv';
-  document.body.appendChild(a);a.click();document.body.removeChild(a);
-};
+/* ===== 2026-11-23：导出CSV 按钮已按用户要求取消（按钮+本处理函数一并移除）===== */
 /* ===== 2026-11-15 方案④：手机端布局同步（节点搬运，桌面端零影响、可逆、幂等）=====
    ≤860px：把筛选控件(#fagent/#fplan/#dr/#sort)搬进「筛选」面板、七个低频工具按钮搬进「工具」
    抽屉、「数据口径」长段包进折叠 details(kjWrap)；>860px：按记录的原锚点逐一搬回原位。
@@ -16048,7 +16095,7 @@ function mDeployMobile(){
   if(MOV.length)return;
   var fids=['fagent','fplan','dr'],fs=$('fpSlot');   // 2026-11-18：'sort' 已删
   if(fs){fids.forEach(function(id){var el=mGrab(id);if(el)fs.appendChild(el);});}
-  var tids=['btnCsv','btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnMailTrace','btnBlk','btnOut'],ts=$('tdSlot');
+  var tids=['btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnMailTrace','btnBlk','btnOut'],ts=$('tdSlot');
   if(ts){tids.forEach(function(id){var el=mGrab(id);if(el)ts.appendChild(el);});}
   var kp=$('kjP');
   if(kp&&!$('kjWrap')){
@@ -16214,6 +16261,8 @@ export default {
         if (r && r.removed) console.log('scheduled relogin 超时清理删除 ' + r.removed + ' 个：' + (r.names || []).join('、'));
       } catch (e) { console.error('scheduled relogin 超时清理失败:', (e && e.message) || e); }
     })());
+    // 2026-11-23：签到买家判死 7 天未重登 → 自动补发第二封提醒（用户拍板口径，signDeadRemind）。
+    ctx.waitUntil(signDeadRemind().catch(() => {}));
     // 对端（定制群 dz）没有 scheduled handler，定时全靠 GitHub —— 这里用对穿口令让它在自己池里跑一遍。
     // 失败只记日志，绝不影响本群流程；对端没配 PEER_KEY 就直接跳过。
     ctx.waitUntil((async () => {
