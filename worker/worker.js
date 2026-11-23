@@ -13440,9 +13440,9 @@ body:has(.modal:not([hidden])){overflow:hidden}
   <div class="msg" id="rcm" data-page-node-id="qWqgk28EsFSRTjV4zMZLJI"></div>
 </div></div>
 <!-- ===== 2026-11-17：失效号邮件提醒查询（实时读 D1，满权限专属） ===== -->
-<div class="modal" id="mtModal" hidden><div class="mbox" style="width:1040px;max-height:92vh;overflow:hidden;display:flex;flex-direction:column">
+<div class="modal" id="mtModal" hidden><div class="mbox" style="width:max-content;max-width:98vw;max-height:92vh;overflow:hidden;display:flex;flex-direction:column;padding:16px 14px">
   <h3>失效号邮件提醒查询（实时 + 缓存）</h3>
-  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），默认返回近 <b>30 天</b>全部类型邮件（切大时间范围才多读，省配额），类型筛选在本机过滤不耗配额；每封队列邮件后有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」；2026-11-23 起<b>所有类型邮件（含删号通知）都有「补发」</b>——队列邮件走原发信链路（约 30 分钟内），删号通知重置后走兜底链路（最长约 12 小时内，判死超 3 天的会被放弃窗口自动跳过）。<br><b>失效号清单</b>：列出时间范围内<b>删掉的号</b>（每行带删号时间/原因、删号通知发没发/什么时候发的）+ 在池待复核的号（11-18 起失效号立即删号，清单以已删号为主体），每行可点「邮件」直达该号明细。<br><b>异常检查</b>：按 2026-11-18 拍板口径「今天播了明天就得有播放量」，列三类异常 —— 播放无效（生效数=0）/ 播放量停滞（近30日播放持平）/ 缺采（当天没采到且无标记）。</p>
+  <p style="font-size:11.5px;color:#8a8a8a;margin:6px 0 0;line-height:1.65;max-width:920px">回答一个问题：<b>提醒邮件到底发没发、什么时候发的</b>。查询走「版本指纹缓存」：邮件数据没变化时反复刷新<b>不读 D1</b>（读缓存，不吃配额），有新邮件/状态变化才重新拉取；要强制重读点「强制刷新」。<br><b>查单号</b>：输 UID / 手机号（≥3 位），默认返回近 <b>30 天</b>全部类型邮件（切大时间范围才多读，省配额），类型筛选在本机过滤不耗配额；每封队列邮件后有「补发」按钮，重登邮件从未发过的号在标题行有「补发重登提醒」；2026-11-23 起<b>所有类型邮件（含删号通知）都有「补发」</b>——队列邮件走原发信链路（约 30 分钟内），删号通知重置后走兜底链路（最长约 12 小时内，判死超 3 天的会被放弃窗口自动跳过）。<br><b>失效号清单</b>：列出时间范围内<b>删掉的号</b>（每行带删号时间/原因、删号通知发没发/什么时候发的）+ 在池待复核的号（11-18 起失效号立即删号，清单以已删号为主体），每行可点「邮件」直达该号明细。<br><b>异常检查</b>：按 2026-11-18 拍板口径「今天播了明天就得有播放量」，列三类异常 —— 播放无效（生效数=0）/ 播放量停滞（近30日播放持平）/ 缺采（当天没采到且无标记）。</p>
   <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px;flex-wrap:wrap">
     <div style="flex:1;min-width:220px"><label style="margin-top:0">搜索（UID / 手机号片段，可留空）</label><input id="mtQ" placeholder="如 13077105665" style="width:100%"></div>
     <button class="mini" id="mtGo" style="margin-top:0;padding:9px 14px">查单号</button>
@@ -15361,8 +15361,8 @@ function mtDeadReason(r){
 function mtRenderOne(o){
   var accs=(o&&o.accs)||[];
   if(!accs.length)return '<p style="color:#888">没查到这个号（accounts 里没有，邮件队列里也没有）。</p>';
-  var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;border-bottom:1px solid #e6e8ec;text-align:left';
-  var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;vertical-align:top;white-space:nowrap';
+  var TH='padding:5px 5px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;border-bottom:1px solid #e6e8ec;text-align:left';
+  var TD='padding:4px 5px;border-bottom:1px solid #f2f2f2;vertical-align:top;white-space:nowrap';
   var h='';
   for(var i=0;i<accs.length;i++){var a=accs[i];
     h+='<div style="margin:0 0 6px;font-size:13px"><b>'+esc(String(a.name||'').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</b>'
@@ -15442,9 +15442,9 @@ function mtRenderList(d){
     });
   }
   if(!rs.length)return '<p style="color:#888">'+(selK?'当前筛选条件下没有匹配的号（'+totalAll+' 个失效相关号里没有窗口内发过该类型邮件的）——把类型/时间范围放宽一点试试。':'时间窗口内没有已删号、也没有待复核的号 —— 失效邮件体系空转中（可把时间范围切大一点试试）。')+'</p>';
-  var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;position:sticky;top:0;border-bottom:1px solid #e6e8ec;text-align:left';
-  var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
-  var h='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px"><thead><tr>'
+  var TH='padding:5px 5px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;position:sticky;top:0;border-bottom:1px solid #e6e8ec;text-align:left';
+  var TD='padding:4px 5px;border-bottom:1px solid #f2f2f2;white-space:nowrap';
+  var h='<table style="border-collapse:separate;border-spacing:0;width:100%;font-size:12px"><thead><tr>'
     +'<th style="'+TH+'">群</th><th style="'+TH+'">账号</th><th style="'+TH+'">UID</th><th style="'+TH+'">邮箱</th>'
     +'<th style="'+TH+'" title="删号时间与原因（dead_log 流水；11-18 起失效号立即删号，清单以已删号为主体）">删号</th>'
     +'<th style="'+TH+'" title="每天一封的 relogin2 提醒，取最新一条">每日提醒</th>'
@@ -15458,13 +15458,13 @@ function mtRenderList(d){
     }
     var ddTxt='—';
     if(dd){
-      ddTxt='<b style="color:#a32d2d">'+mtTime(dd.at)+'</b> <span class="muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:bottom" title="'+esc(dd.reason||'')+'">'+esc(mtDeadReason(dd.reason||''))+'</span>';
+      ddTxt='<b style="color:#a32d2d">'+mtTime(dd.at)+'</b> <span class="muted" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:bottom" title="'+esc(dd.reason||'')+'">'+esc(mtDeadReason(dd.reason||''))+'</span>';
     }
     h+='<tr'+(i%2?' style="background:#fafbfc"':'')+'>'
       +'<td style="'+TD+'">'+(r.pool==='hz'?'主群':'定制')+'</td>'
       +'<td style="'+TD+'">'+esc(String(r.name||'—').replace(/^qr:.+/,'扫码登录').replace(/^manual:/,'手动·'))+'</td>'
       +'<td style="'+TD+'" class="num">'+esc(r.uid)+'</td>'
-      +'<td style="'+TD+';max-width:150px;overflow:hidden;text-overflow:ellipsis">'+esc(r.email||'（未留）')+'</td>'
+      +'<td style="'+TD+';max-width:130px;overflow:hidden;text-overflow:ellipsis">'+esc(r.email||'（未留）')+'</td>'
       +'<td style="'+TD+'">'+ddTxt+'</td>'
       +'<td style="'+TD+'">'+rel2Txt+'</td>'
       +'<td style="'+TD+'">'+(nt?(mtMailState(nt.state)+(nt.sent_at?(' '+mtTime(nt.sent_at)):'')):'—')+'</td>'
@@ -15488,8 +15488,8 @@ function mtApplyFilter(){
 // 2026-11-18 三期：异常检查渲染（口径 = 用户拍板「今天播了明天就得有播放量」）
 function mtRenderAnom(d){
   if(!d)return '<p style="color:#888">没有数据。</p>';
-  var TH='padding:6px 8px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;border-bottom:1px solid #e6e8ec;text-align:left';
-  var TD='padding:5px 8px;border-bottom:1px solid #f2f2f2;vertical-align:top;white-space:nowrap';
+  var TH='padding:5px 5px;background:#f5f6f8;color:#555;font-weight:600;white-space:nowrap;border-bottom:1px solid #e6e8ec;text-align:left';
+  var TD='padding:4px 5px;border-bottom:1px solid #f2f2f2;vertical-align:top;white-space:nowrap';
   var nn=(d.n||{});
   var h='<p style="margin:0 0 8px;font-size:12.5px">基准日 <b>'+esc(d.dayD)+'</b>（对比 '+esc(d.dayP)+'）· 当日快照 '+esc(String(nn.snap||0))+' 个 · 在池 '+esc(String(nn.accounts||0))+' 个'
     +' ｜ <b style="color:#a32d2d">播放无效 '+esc(String(nn.noEffect||0))+'</b> ｜ <b style="color:#8a6d1a">播放量停滞 '+esc(String(nn.flatRpc||0))+'</b> ｜ <b>缺采 '+esc(String(nn.missing||0))+'</b></p>'
