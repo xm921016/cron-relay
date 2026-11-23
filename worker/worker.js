@@ -12425,7 +12425,7 @@ th { color: #666; font-weight: 500; background: #fafbfc; }
       <input id="remember" type="checkbox" style="width:auto" checked> 记住口令（本机浏览器）
     </label>
     <label>一次生成几张（最多 10000）</label>
-    <input id="count" type="number" value="100" min="1" max="10000">
+    <input id="count" type="number" value="1000" min="1" max="10000">
     <div>
       <button onclick="gen()">生成卡密</button>
       <button class="gray" onclick="refresh()">刷新统计</button>
