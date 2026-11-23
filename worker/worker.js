@@ -12517,7 +12517,9 @@ function getPass() {
   return p;
 }
 function passFail(d) {
-  if (d && d.ok === false && String(d.message || '').indexOf('口令') >= 0) {
+  /* 2026-11-23 体检收紧：只匹配「口令错误」。「未配置管理口令」(503) 不清口令——
+     那是服务端配置异常，不是口令错了，误清会逼用户重输。 */
+  if (d && d.ok === false && String(d.message || '').indexOf('口令错误') >= 0) {
     try { localStorage.removeItem('signadm_pass'); } catch (e) {}
     $('pass').value = '';
     $('msg').style.color = '#c0392b';
