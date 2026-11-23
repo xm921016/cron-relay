@@ -12077,7 +12077,7 @@ button:disabled { opacity: 0.5; }
   <p class="sub">每天自动完成打卡 / 云贝 / VIP 签到，掉线自动邮件提醒</p>
   <div id="modeTag" class="tag" style="display:none">重新扫码 · 恢复你的签到</div>
 
-  <div class="card">
+  <div id="stepQr" class="card">
     <div id="rowEmail">
       <label>第一步：填邮箱</label>
       <input id="email" type="email" autocomplete="email" placeholder="用于接收登记回执和掉线提醒">
@@ -12099,7 +12099,8 @@ button:disabled { opacity: 0.5; }
     <p class="mini">邮箱填好、勾上同意、扫完码，会自动完成登记，不用再点按钮。</p>
   </div>
 
-  <div id="stepDone" class="card" style="display:none">
+  <div id="stepDone" class="card done-card" style="display:none">
+    <div id="doneMark" class="done-mark">✓</div>
     <div id="doneTitle" class="done-title">登记成功</div>
     <div id="doneBody" class="done-body"></div>
     <div id="doneCode" class="code" style="display:none"></div>
