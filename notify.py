@@ -356,8 +356,11 @@ def notify_relogin2(email, nickname, name, group=""):
 #     全程无卖家介入；650 号主「正文不出现网址」的红线不适用于本产品（架构不同）。
 #   · 售后群走独立配置（worker 侧 kv_misc sign_cfg，发送时现查随队列下发），
 #     与 650 的 reg_cfg 完全分开；group 为空时降级「联系客服获取」。
+#   · 落款用独立署名 SIGN_SIGN（买家产品不挂「网易音乐人650任务」品牌，2026-11-23）。
 # kind: signreg=登记成功 / signdead=登录失效需重登；notify_mail.py 按 kind 分发，
 # 登记码由 worker 写在队列行 exp 列（mail_queue 无多余列，复用口径同 650 的 exp 用法）。
+# 落款署名：买家产品独立品牌，不带 650 字样。
+SIGN_SIGN = "网易云每日签到服务"
 # ---------------------------------------------------------------------------
 
 def notify_signreg(email, who, code="", group=""):
@@ -377,7 +380,7 @@ def notify_signreg(email, who, code="", group=""):
         + _group_line(group) + "\n\n"
         "说明：偶尔掉线重登是正常现象，收到「重新扫码」邮件后按链接操作即可，\n"
         "不用找客服。重扫成功后第二天的签到会自动恢复。\n\n"
-        "——" + SIGN
+        "——" + SIGN_SIGN
     )
     return send_user_email(email, subject, body)
 
@@ -397,7 +400,7 @@ def notify_signdead(email, who, code="", group=""):
         "重扫成功后，第二天的签到会自动恢复，不用做别的。\n"
         "扫码遇到问题，加售后群问，群里处理最快：\n"
         + _group_line(group) + "\n\n"
-        "——" + SIGN
+        "——" + SIGN_SIGN
     )
     return send_user_email(email, subject, body)
 
