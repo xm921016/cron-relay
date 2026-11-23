@@ -6420,6 +6420,24 @@ async function handle(request) {
     }
     /* 签到产品页面：新登记 /sign、重登 /sign/r/<登记码>（链接可重用，来自邮件） */
     if ((url.pathname === '/sign' || url.pathname.indexOf('/sign/r/') === 0) && request.method === 'GET') {
+      /* 2026-11-23 封免费登记：销售全走卡密（/sign/c/<码>），重登走邮件链接（/sign/r/<码>）。
+         裸 /sign 只有 KV 开关 SIGN_REG_OPEN='1' 时才出登记页（默认关，堵白嫖直通车）。
+         页面这层只是省买家白扫码一次——真正的硬闸在 /api/s/submit 服务端强校验，
+         直接打 API 绕过页面也没用。重登 /sign/r/ 不受开关影响。 */
+      if (url.pathname === '/sign') {
+        let openG1 = '';
+        try { openG1 = String((await POOL.get('SIGN_REG_OPEN')) || '').trim(); } catch (e) { openG1 = ''; }
+        if (openG1 !== '1') {
+          return new Response(SIGN_CLOSED_HTML, {
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store',
+              'X-Frame-Options': 'DENY',
+              'Referrer-Policy': 'no-referrer',
+            },
+          });
+        }
+      }
       return new Response(SIGN_HTML, {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
@@ -6569,6 +6587,14 @@ async function handle(request) {
       const stS2 = String(bS.st || '').trim();
       const muS = String(bS.mu || '').trim();
       const emS2 = String(bS.email || '').trim();
+      /* 2026-11-23 硬闸：免费新登记默认关闭（KV 开关 SIGN_REG_OPEN='1' 才放开）。
+         会话 token 三种模式共用（snew 不分模式），所以闸必须卡在这里——
+         卡密兑换走 csubmit、重登走 rsubmit，都不经过本接口，不受影响。
+         KV 读失败按关闭处理（fail-closed，宁可不收也不能白送）。 */
+      const opS2 = await POOL.get('SIGN_REG_OPEN').catch(() => null);
+      if (String(opS2 || '').trim() !== '1') {
+        return json({ ok: false, message: '请从卡密链接或邮件里的链接进入登记' }, 403);
+      }
       if (!muS) return json({ ok: false, message: '没有拿到登录凭证，请重新扫码' }, 400);
       if (bS.agree !== true) return json({ ok: false, message: '请先勾选同意服务说明' }, 400);
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emS2) || emS2.length > 120) {
@@ -7731,34 +7757,11 @@ async function handle(request) {
     // ---- 二维码登录通道（实测网易是否放行 CF 机房 IP）----
     // GET /api/qr_key  → 网易申请 unikey
     // GET /api/qr_check?key=xxx → 轮询：800过期/801等待/802已扫/803成功（成功时从 set-cookie 提取 MUSIC_U 放进 JSON 返回）
-    if (url.pathname === '/api/qr_key' && request.method === 'GET') {
-      const r = await fetch(BASE + '/api/login/qrcode/unikey', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA, 'Referer': BASE + '/' },
-        body: 'type=1',
-      });
-      const text = await r.text();
-      return new Response(text, { status: r.status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' } });
-    }
-    if (url.pathname === '/api/qr_check' && request.method === 'GET') {
-      const key = (url.searchParams.get('key') || '').trim();
-      if (!key) return json({ message: '缺少 key' }, 400);
-      const r = await fetch(BASE + '/api/login/qrcode/client/login?key=' + encodeURIComponent(key) + '&type=1', {
-        headers: { 'User-Agent': UA, 'Referer': BASE + '/' },
-      });
-      const text = await r.text();
-      let out = text;
-      try {
-        const j = JSON.parse(text);
-        if (j.code === 803) {
-          const sc = r.headers.get('set-cookie') || '';
-          const m = sc.match(/MUSIC_U=([^;]+)/);
-          j.musicU = m ? m[1] : '';
-          out = JSON.stringify(j);
-        }
-      } catch (e) { /* 非 JSON（被风控页拦截）原样返回，前端据此判失败 */ }
-      return new Response(out, { status: r.status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' } });
-    }
+    /* 2026-11-23 下线 /api/qr_key 与 /api/qr_check（原网易扫码出码代理）：
+       全项目（EXE/APK/网页/CK助手）无任何调用方，属早期遗留孤儿接口；
+       且无口令无频控，成功轮询直接返回 MUSIC_U（完整 CK），既是免费出码代理
+       又可被拿去做二维码钓鱼（受害者扫码、攻击者轮询偷 CK）。
+       现行出码链路全部走 bridge（/api/s/qrkey、/api/r/qrkey），与此无关。 */
     // 隐藏管理接口：仍用 GROUP_PASS 保护（2026-10-20 登记接口已去掉群口令，此口令降级为群主管理专用暗号），从 KV 主表重新把 NB_POOL_1..5 推回 GitHub Secrets（KV 丢失/Secrets 异常时一键恢复）
     if (url.pathname === '/api/resync' && request.method === 'POST') {
       let body;
@@ -12031,6 +12034,30 @@ p { font-size: 14px; color: #555; line-height: 1.8; }
 <div class="wrap">
   <h1>卡密无效</h1>
   <p>这张卡密不存在、或已经被使用过了。<br>请核对卡密链接是否完整（要一整条复制），<br>如果有疑问请联系客服。</p>
+</div>
+</body>
+</html>`;
+
+/* 2026-11-23 裸 /sign 关闭提示页：免费登记入口默认封（SIGN_REG_OPEN 开关），引导买家走正道 */
+const SIGN_CLOSED_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>请从链接进入 · 网易云每日签到</title>
+<style>
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #f5f6f8; color: #222; padding: 60px 16px; text-align: center; }
+.wrap { max-width: 420px; margin: 0 auto; background: #fff; border: 1px solid #e3e5e8;
+  border-radius: 12px; padding: 28px 20px; }
+h1 { font-size: 18px; color: #3b6d11; margin-bottom: 10px; }
+p { font-size: 14px; color: #555; line-height: 1.8; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>请从链接进入</h1>
+  <p>新用户请通过购买后获得的<b>卡密链接</b>开通服务；<br>已开通的用户请点<b>邮件里的重登链接</b>恢复签到。<br>直接打开本页无法登记，如有疑问请联系客服。</p>
 </div>
 </body>
 </html>`;
