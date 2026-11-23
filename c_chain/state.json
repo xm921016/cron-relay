@@ -26,7 +26,7 @@
   }
  },
  "c": {
-  "status": "active",
+  "status": "done",
   "uids": [
    1354177974,
    433977774,
@@ -90,8 +90,28 @@
     "ctrl_pos": 11,
     "missing": [],
     "suspect": false
+   },
+   "2026-11-22": {
+    "exp_sum": 274,
+    "ctrl_sum": 128,
+    "exp_pos": 13,
+    "ctrl_pos": 8,
+    "missing": [],
+    "suspect": false
+   },
+   "2026-11-23": {
+    "exp_sum": 343,
+    "ctrl_sum": 11,
+    "exp_pos": 14,
+    "ctrl_pos": 4,
+    "missing": [],
+    "suspect": false
    }
   },
-  "launched": "2026-11-19"
+  "launched": "2026-11-19",
+  "verdict": [
+   "40秒口径成立",
+   "合计比 179%（实验 1055/对照 588），最差日正增长 13/15"
+  ]
  }
 }
