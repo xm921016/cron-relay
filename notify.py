@@ -354,13 +354,14 @@ def notify_relogin2(email, nickname, name, group=""):
 # 与 650 号主版的两条刻意差别：
 #   · 正文必须带重登链接（/sign/r/<登记码>）——买家版设计就是「掉线→收邮件→自己重扫」，
 #     全程无卖家介入；650 号主「正文不出现网址」的红线不适用于本产品（架构不同）。
-#   · 一期无售后群：文案引导「联系下单的店铺客服」，不套 _group_line（那是 650 群口径）。
+#   · 售后群走独立配置（worker 侧 kv_misc sign_cfg，发送时现查随队列下发），
+#     与 650 的 reg_cfg 完全分开；group 为空时降级「联系客服获取」。
 # kind: signreg=登记成功 / signdead=登录失效需重登；notify_mail.py 按 kind 分发，
 # 登记码由 worker 写在队列行 exp 列（mail_queue 无多余列，复用口径同 650 的 exp 用法）。
 # ---------------------------------------------------------------------------
 
-def notify_signreg(email, who, code=""):
-    """签到产品登记成功信：报喜 + 交付登记码和重登链接。"""
+def notify_signreg(email, who, code="", group=""):
+    """签到产品登记成功信：报喜 + 交付登记码和重登链接 + 售后群（worker 现查下发）。"""
     if not (email or "").strip():
         return False
     base = (os.environ.get("WORKER_URL") or "https://xx1031.xyz").rstrip("/")
@@ -372,6 +373,8 @@ def notify_signreg(email, who, code=""):
         "请保管好你的登记码：" + str(code or "") + "\n"
         "如果哪天登录失效，打开下面这个链接，用同一个账号再扫一次码就恢复了：\n"
         + base + "/sign/r/" + str(code or "") + "\n\n"
+        "售后有疑问，加售后群，群里处理最快：\n"
+        + _group_line(group) + "\n\n"
         "说明：偶尔掉线重登是正常现象，收到「重新扫码」邮件后按链接操作即可，\n"
         "不用找客服。重扫成功后第二天的签到会自动恢复。\n\n"
         "——" + SIGN
@@ -379,7 +382,7 @@ def notify_signreg(email, who, code=""):
     return send_user_email(email, subject, body)
 
 
-def notify_signdead(email, who, code=""):
+def notify_signdead(email, who, code="", group=""):
     """签到产品登录失效信：附重登链接，买家自己重扫，无卖家介入。"""
     if not (email or "").strip():
         return False
@@ -392,7 +395,8 @@ def notify_signdead(email, who, code=""):
         "处理办法（一步）：打开下面这个链接，用同一个账号扫一次码：\n"
         + base + "/sign/r/" + str(code or "") + "\n\n"
         "重扫成功后，第二天的签到会自动恢复，不用做别的。\n"
-        "如果链接打不开或扫码不成功，联系你下单的店铺客服。\n\n"
+        "扫码遇到问题，加售后群问，群里处理最快：\n"
+        + _group_line(group) + "\n\n"
         "——" + SIGN
     )
     return send_user_email(email, subject, body)

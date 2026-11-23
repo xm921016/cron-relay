@@ -2075,6 +2075,51 @@ async function saveRegCfg(o) {
   return { ok: !!d1, cfg: cfgN };
 }
 
+// ====================================================================
+// 2026-11-23 新增：签到产品售后群配置（独立产品独立群，与 650 的 reg_cfg 完全分开）。
+// 存放：D1 kv_misc 的 k='sign_cfg'（KV 键 SIGN_CFG 兜底镜像），结构 {"group":"数字群号"}。
+// 口径与 reg_cfg 一致：群号不入队，mail_pending 对 pool=sign 的行「发送时现查」——
+// 改群号立即生效，不用重发任何队列信。管理页 签到卡密管理.html「售后群设置」卡可改。
+// ====================================================================
+const SIGN_CFG_KEY = 'sign_cfg';
+const SIGN_CFG_KV = 'SIGN_CFG';
+
+function normSignCfg(o) {
+  const src = (o && typeof o === 'object') ? o : {};
+  const g = String(src.group == null ? '' : src.group).replace(/[^0-9]/g, '');
+  return { group: (g.length >= 5 && g.length <= 20) ? g : '' };
+}
+
+// 读配置：D1 → KV → 空。任何异常都不抛，绝不阻塞发信（群号空时模板降级「联系客服获取」）。
+async function readSignCfg() {
+  let raw = null;
+  if (d1ok()) {
+    try {
+      const rows = await d1All('SELECT v FROM kv_misc WHERE k=?', [SIGN_CFG_KEY]);
+      if (rows && rows.length) raw = rows[0].v;
+    } catch (e) { console.error('读 sign_cfg(D1) 失败:', e && e.message); }
+  }
+  if (!raw) {
+    try { raw = await POOL.get(SIGN_CFG_KV); } catch (e) {}
+  }
+  let o = null;
+  try { o = raw ? JSON.parse(raw) : null; } catch (e) { o = null; }
+  return normSignCfg(o);
+}
+
+async function saveSignCfg(o) {
+  const cN = normSignCfg(o);
+  const sN = JSON.stringify(cN);
+  let d1 = false;
+  if (d1ok()) {
+    d1 = await d1Run('INSERT INTO kv_misc (k,v,updated_at) VALUES (?,?,?) ' +
+      'ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at',
+      [SIGN_CFG_KEY, sN, new Date().toISOString()]);
+  }
+  try { await POOL.put(SIGN_CFG_KV, sN); } catch (e) {}
+  return { ok: !!d1, cfg: cN };
+}
+
 // 把客户端传来的「套餐」（key 或显示名都认）解析成 {key,label,exp}
 // 2026-11-11：返回值补 days（原始天数），join_manual 的「套餐与 exp 打架以套餐为准」
 // 兜底要用；只是加字段，老调用点不受影响。
@@ -5020,13 +5065,65 @@ async function ncReceiptRead(code, mu) {
    官方页 JS 在真 Chrome 里轮询领 CK，登录会话出生在真浏览器+家宽 IP）；
    删掉任一键 = 回滚开关，自动回老链路，代码不用动。
    红线：bridge 429/故障绝不落回老链路（老链路服务端假 UA 明文轮询=毒源，11-17 实证）。 */
-let _qrBridgeCfg = { at: 0, url: '', key: '' };
+let _qrBridgeCfg = { at: 0, url: '', key: '', url2: '', key2: '' };
 async function qrBridgeCfg() {
   if (Date.now() - _qrBridgeCfg.at < 60000) return _qrBridgeCfg;
   const u = cleanKV(await POOL.get('QR_BRIDGE_URL').catch(() => null)) || '';
   const k = cleanKV(await POOL.get('QR_BRIDGE_KEY').catch(() => null)) || '';
-  _qrBridgeCfg = { at: Date.now(), url: u.replace(/\/+$/, ''), key: k };
+  const u2 = cleanKV(await POOL.get('QR_BRIDGE_URL2').catch(() => null)) || '';
+  const k2 = cleanKV(await POOL.get('QR_BRIDGE_KEY2').catch(() => null)) || '';
+  _qrBridgeCfg = { at: Date.now(), url: u.replace(/\/+$/, ''), key: k,
+                   url2: u2.replace(/\/+$/, ''), key2: k2 };
   return _qrBridgeCfg;
+}
+
+/* 2026-11-23 bridge 双通道（主=qr-laptop 笔记本，备=qr-pc 台式机本机）。
+   背景：笔记本 WiFi 反复断连（RT3290+信号弱，11-22 定案；11-23 合盖/开盖均复发），
+   断网窗口 12:10~12:15 出码全灭 → 加备桥秒切。设计：
+   - qrnew 按顺序试各桥：网络异常/超时/非 JSON → 下一台；429(满载但活着) → 也试下一台
+     （备桥分摊负载），全 429 才回 429。成功落在哪台 → KV QRTK_<token> 记 '1'/'2'
+     （expirationTtl 900，QR 5 分钟有效+余量），qrpoll/qrack 按它路由回同一台
+     （token 绑定桥上实例会话，跨桥必 404）。
+   - KV 最终一致：qrnew 后几秒内的 qrpoll 可能读不到 QRTK → 未命中路由时按
+     [主,备] 顺序探测，404(token 不存在) 视为「不是这台」自动试下一台；两台全 404
+     才按过期处理。429 永不触发换桥（活着的桥不该再打扰另一台）。
+   - 备桥 KV 键（QR_BRIDGE_URL2/QR_BRIDGE_KEY2）删掉任一键 = 自动退化单通道，
+     原单通道回滚口径不变（删 QR_BRIDGE_URL/KEY = 回老链路，有毒源风险仅应急）。 */
+function qrBridges(bc) {
+  const a = [];
+  if (bc.url && bc.key) a.push({ url: bc.url, key: bc.key, idx: 1 });
+  if (bc.url2 && bc.key2) a.push({ url: bc.url2, key: bc.key2, idx: 2 });
+  return a;
+}
+/* 主桥故障标记：主桥网络级失败时落 KV QRPRI_DOWN=1（TTL 300s 自动过期=自动恢复探测）。
+   标记热期间调用顺序倒置（备桥先上），断网窗口内出码/轮询不再每请求白等 15~20s 超时。 */
+async function qrPriDown() {
+  try {
+    const v = cleanKV(await POOL.get('QRPRI_DOWN').catch(() => null)) || '';
+    return v === '1';
+  } catch (_) { return false; }
+}
+function qrPriMarkDown() {
+  try {
+    const p = POOL.put('QRPRI_DOWN', '1', { expirationTtl: 300 });
+    if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(p.catch(() => {}));
+  } catch (_) {}
+}
+async function qrTkRoute(token, brs) {
+  if (!token || brs.length < 2) return null;
+  try {
+    const r = cleanKV(await POOL.get('QRTK_' + String(token).slice(0, 64)).catch(() => null)) || '';
+    if (r === '1') return brs.find(function (x) { return x.idx === 1; }) || null;
+    if (r === '2') return brs.find(function (x) { return x.idx === 2; }) || null;
+  } catch (_) {}
+  return null;
+}
+function qrTkBind(token, idx) {
+  if (!token || !idx) return;
+  try {
+    const p = POOL.put('QRTK_' + String(token).slice(0, 64), String(idx), { expirationTtl: 900 });
+    if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(p.catch(() => {}));
+  } catch (_) {}
 }
 
 /* 2026-11-20 bridge 健康监测：登记页真实调用失败 + 每小时探针双路喂同一状态机。
@@ -5090,14 +5187,38 @@ async function bridgeHealth(ok, detail) {
 async function bridgeHealthProbe() {
   try {
     const bc = await qrBridgeCfg();
-    if (!bc.url || !bc.key) return;   // 未接线（回滚态）不探测
+    const brsP = qrBridges(bc);
+    if (!brsP.length) return;   // 未接线（回滚态）不探测
+    /* 2026-11-23 双桥探测：主桥异常 → 除 bridgeHealth 状态机外再预写 QRPRI_DOWN
+       （TTL 300s），把 KV 传播盲区提前补掉——探针每 10 分钟先探到断网并落标记，
+       用户请求进来时直接跳过主桥，不用再白等 20s 超时。主桥恢复 → 自动清除标记。
+       备桥异常只记日志（备桥挂了主桥还在，不影响主链路）。 */
+    const pri = brsP.find(function (x) { return x.idx === 1; }) || brsP[0];
+    const std = brsP.find(function (x) { return x.idx === 2; });
     let r;
     try {
-      r = await fetch(bc.url + '/health', { headers: { 'X-Bridge-Key': bc.key }, signal: AbortSignal.timeout(15000) });
-    } catch (e) { await bridgeHealth(false, '探针网络异常 ' + ((e && e.message) || '')); return; }
+      r = await fetch(pri.url + '/health', { headers: { 'X-Bridge-Key': pri.key }, signal: AbortSignal.timeout(15000) });
+    } catch (e) {
+      qrPriMarkDown();
+      await bridgeHealth(false, '探针网络异常 ' + ((e && e.message) || ''));
+      return;
+    }
     const jb = await r.json().catch(() => null);
-    if (jb && jb.code === 200 && Array.isArray(jb.instances)) await bridgeHealth(true);
-    else await bridgeHealth(false, '探针响应异常 HTTP ' + r.status);
+    if (jb && jb.code === 200 && Array.isArray(jb.instances)) {
+      try { const p2 = POOL.put('QRPRI_DOWN', '0', { expirationTtl: 120 }); if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(p2.catch(() => {})); } catch (_) {}
+      await bridgeHealth(true);
+    } else {
+      qrPriMarkDown();
+      await bridgeHealth(false, '探针响应异常 HTTP ' + r.status);
+    }
+    if (std) {
+      try {
+        const r2 = await fetch(std.url + '/health', { headers: { 'X-Bridge-Key': std.key }, signal: AbortSignal.timeout(15000) });
+        const j2 = await r2.json().catch(() => null);
+        if (j2 && j2.code === 200 && Array.isArray(j2.instances)) console.log('bridge-probe 备桥健康');
+        else console.error('bridge-probe 备桥异常 HTTP ' + r2.status);
+      } catch (e) { console.error('bridge-probe 备桥不可达:', e && e.message); }
+    }
   } catch (e) { console.error('bridgeHealthProbe 异常:', e && e.message); }
 }
 
@@ -6521,16 +6642,21 @@ async function handle(request) {
         return json({ ok: false, message: '会话缺失，请刷新页面' }, 400);
       }
       const bcQ2 = await qrBridgeCfg();
-      if (!(bcQ2.url && bcQ2.key)) return json({ ok: false, message: '出码通道未就绪，请稍后再试或联系客服' }, 502);
-      let brQ;
-      try {
-        brQ = await fetch(bcQ2.url + '/qrnew', { headers: { 'X-Bridge-Key': bcQ2.key }, signal: AbortSignal.timeout(20000) });
-      } catch (e) {
-        try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'sign qrnew 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
-        return json({ ok: false, message: '出码通道繁忙，请点「换一张」重试；多次不行请联系客服' }, 502);
+      const brsQ2 = qrBridges(bcQ2);
+      if (!brsQ2.length) return json({ ok: false, message: '出码通道未就绪，请稍后再试或联系客服' }, 502);
+      let jbQ = null;
+      for (let i = 0; i < brsQ2.length; i++) {
+        try {
+          const rQ = await fetch(brsQ2[i].url + '/qrnew', { headers: { 'X-Bridge-Key': brsQ2[i].key }, signal: AbortSignal.timeout(20000) });
+          jbQ = await rQ.json().catch(() => null);
+        } catch (e) {
+          jbQ = null;
+          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'sign qrnew 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
+        }
+        if (jbQ && jbQ.code === 429 && i < brsQ2.length - 1) continue;   // 主桥满载 → 试备桥分摊
+        if (jbQ) { qrTkBind(jbQ.token, i + 1); break; }
       }
-      const jbQ = await brQ.json().catch(() => null);
-      if (!jbQ) return json({ ok: false, message: '出码通道返回异常，请点「换一张」重试' }, 502);
+      if (!jbQ) return json({ ok: false, message: '出码通道繁忙，请点「换一张」重试；多次不行请联系客服' }, 502);
       if (jbQ.code === 429) return json({ ok: false, message: '当前登记人数较多，请 1 分钟后再点「换一张」' }, 429);
       if (jbQ.code !== 200 || !jbQ.token || !jbQ.qr_png) {
         try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'sign qrnew 异常响应 code=' + (jbQ.code || '无')).catch(() => {})); } catch (_) {}
@@ -6549,17 +6675,27 @@ async function handle(request) {
       const keyC = String(url.searchParams.get('key') || '').trim().slice(0, 64);
       if (!keyC) return json({ ok: false, code: 0, message: '缺少参数' }, 400);
       const bcC2 = await qrBridgeCfg();
-      if (!(bcC2.url && bcC2.key)) return json({ ok: false, code: 0, message: '出码通道未就绪' }, 502);
-      let brC;
-      try {
-        brC = await fetch(bcC2.url + '/qrpoll?token=' + encodeURIComponent(keyC), {
-          headers: { 'X-Bridge-Key': bcC2.key },
-          signal: AbortSignal.timeout(15000),
-        });
-      } catch (e) {
-        return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
+      const brsC2 = qrBridges(bcC2);
+      if (!brsC2.length) return json({ ok: false, code: 0, message: '出码通道未就绪' }, 502);
+      const rtC = await qrTkRoute(keyC, brsC2);
+      const ordC = rtC ? [rtC] : ((await qrPriDown()) ? brsC2.slice().reverse() : brsC2);
+      let jbC = null;
+      for (let i = 0; i < ordC.length; i++) {
+        try {
+          const rC = await fetch(ordC[i].url + '/qrpoll?token=' + encodeURIComponent(keyC), {
+            headers: { 'X-Bridge-Key': ordC[i].key },
+            signal: AbortSignal.timeout(15000),
+          });
+          jbC = await rC.json().catch(() => null);
+        } catch (e) {
+          jbC = null;
+          if (ordC[i].idx === 1) qrPriMarkDown();
+          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'sign qrpoll 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
+        }
+        // 无路由记录（KV 延迟/老 token）时 404=token 不在这台桥上 → 试下一台；有路由则信任
+        if (jbC && jbC.code === 404 && !rtC && i < ordC.length - 1) continue;
+        if (jbC) break;
       }
-      const jbC = await brC.json().catch(() => null);
       if (!jbC) return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
       if (jbC.code === 200) { try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(true).catch(() => {})); } catch (_) {} }
       else if (jbC.code && jbC.code !== 429) { try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'sign qrpoll 异常响应 code=' + jbC.code).catch(() => {})); } catch (_) {} }
@@ -6938,6 +7074,41 @@ async function handle(request) {
       console.log('签到产品清理: test 买家 ' + tU.length + ' 个，签到记录 ' + delLg + ' 条');
       return json({ ok: true, scope: scopeP, deleted: tU.length, logs: delLg }, 200, CORS_P);
     }
+    /* 签到售后群配置（2026-11-23）：管理页 签到卡密管理.html「售后群设置」卡读写。
+       GET ?pass=… 回当前群号；POST {pass, group} 改群号（纯数字 5~20 位，空=清空）。
+       存 kv_misc k='sign_cfg'；mail_pending 发 pool=sign 信时现查，改完立即生效。 */
+    if (url.pathname === '/api/sign/cfg' && request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '86400',
+      } });
+    }
+    if (url.pathname === '/api/sign/cfg' && (request.method === 'GET' || request.method === 'POST')) {
+      const CORS_C = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
+      const cC1 = await cfg();
+      if (!cC1.adminPass) return json({ ok: false, message: '未配置管理口令' }, 503, CORS_C);
+      let passC1 = '';
+      if (request.method === 'GET') {
+        passC1 = new URL(request.url).searchParams.get('pass') || '';
+      } else {
+        let bC0;
+        try { bC0 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400, CORS_C); }
+        passC1 = String(bC0.pass || '');
+        if (passC1 !== cC1.adminPass) return json({ ok: false, message: '管理口令错误' }, 403, CORS_C);
+        const gRaw = String(bC0.group == null ? '' : bC0.group).replace(/[^0-9]/g, '');
+        if (String(bC0.group || '').trim() && (gRaw.length < 5 || gRaw.length > 20)) {
+          return json({ ok: false, message: '群号要纯数字 5~20 位（QQ 群号一般 9~10 位）' }, 400, CORS_C);
+        }
+        const rC1 = await saveSignCfg({ group: gRaw });
+        console.log('签到售后群配置更新: group=' + (rC1.cfg.group || '(空)') + ' d1=' + rC1.ok);
+        return json({ ok: rC1.ok, group: rC1.cfg.group, message: rC1.ok ? '' : '写库失败（D1 异常）' }, rC1.ok ? 200 : 503, CORS_C);
+      }
+      if (passC1 !== cC1.adminPass) return json({ ok: false, message: '管理口令错误' }, 403, CORS_C);
+      const gC1 = await readSignCfg();
+      return json({ ok: true, group: gC1.group }, 200, CORS_C);
+    }
     /* ================= 方案C：网页自助扫码登记 ================= */
     /* 买家页面：/r/<8 位码>。不走 PAGE_ROUTES 口令（那是内部成员页，不能发给买家）。 */
     if (url.pathname.indexOf('/r/') === 0 && request.method === 'GET') {
@@ -7008,22 +7179,26 @@ async function handle(request) {
          dev 在新链路只作页面侧会话标记（真 Chrome 的指纹由 bridge 自己生成，
          sDeviceId 不再参与网易请求），bag 恒为空串，页面逻辑无需改动。 */
       const bc = await qrBridgeCfg();
-      if (bc.url && bc.key) {
-        let br;
-        try {
-          br = await fetch(bc.url + '/qrnew', {
-            headers: { 'X-Bridge-Key': bc.key },
-            signal: AbortSignal.timeout(20000),
-          });
-        } catch (e) {
-          console.error('qrkey bridge 请求失败:', e && e.message);
-          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrnew 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
-          return json({ ok: false, message: '出码通道繁忙，请点「换一张」重试；多次不行请联系客服' }, 502);
+      const brs = qrBridges(bc);
+      if (brs.length) {
+        let jb = null;
+        for (let i = 0; i < brs.length; i++) {
+          try {
+            const r = await fetch(brs[i].url + '/qrnew', {
+              headers: { 'X-Bridge-Key': brs[i].key },
+              signal: AbortSignal.timeout(20000),
+            });
+            jb = await r.json().catch(() => null);
+          } catch (e) {
+            jb = null;
+            console.error('qrkey bridge 请求失败:', e && e.message);
+            try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrnew 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
+          }
+          if (jb && jb.code === 429 && i < brs.length - 1) continue;   // 主桥满载 → 试备桥分摊
+          if (jb) { qrTkBind(jb.token, i + 1); break; }
         }
-        const jb = await br.json().catch(() => null);
         if (!jb) {
-          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrnew 响应非 JSON HTTP ' + br.status).catch(() => {})); } catch (_) {}
-          return json({ ok: false, message: '出码通道返回异常，请点「换一张」重试' }, 502);
+          return json({ ok: false, message: '出码通道繁忙，请点「换一张」重试；多次不行请联系客服' }, 502);
         }
         if (jb.code === 429) return json({ ok: false, message: '当前登记人数较多，请 1 分钟后再点「换一张」' }, 429);
         if (jb.code !== 200 || !jb.token || !jb.qr_png) {
@@ -7070,22 +7245,28 @@ async function handle(request) {
          home_browser=真浏览器家宽）；810/404 → 800（页面按过期处理，引导换一张）。
          bridge 网络失败 → 「稍后自动重试」与老链路 catch 同形，绝不回老轮询（毒源）。 */
       const bcQ = await qrBridgeCfg();
-      if (bcQ.url && bcQ.key) {
-        let br;
-        try {
-          br = await fetch(bcQ.url + '/qrpoll?token=' + encodeURIComponent(key), {
-            headers: { 'X-Bridge-Key': bcQ.key },
-            signal: AbortSignal.timeout(15000),
-          });
-        } catch (e) {
-          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrpoll 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
-          return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
+      const brsQ = qrBridges(bcQ);
+      if (brsQ.length) {
+        const rtQ = await qrTkRoute(key, brsQ);
+        const ordQ = rtQ ? [rtQ] : ((await qrPriDown()) ? brsQ.slice().reverse() : brsQ);
+        let jb = null;
+        for (let i = 0; i < ordQ.length; i++) {
+          try {
+            const r = await fetch(ordQ[i].url + '/qrpoll?token=' + encodeURIComponent(key), {
+              headers: { 'X-Bridge-Key': ordQ[i].key },
+              signal: AbortSignal.timeout(15000),
+            });
+            jb = await r.json().catch(() => null);
+          } catch (e) {
+            jb = null;
+            if (ordQ[i].idx === 1) qrPriMarkDown();
+            try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrpoll 网络异常 ' + ((e && e.message) || '')).catch(() => {})); } catch (_) {}
+          }
+          // 无路由记录时 404=token 不在这台桥上 → 试下一台；有路由则信任（404=真过期）
+          if (jb && jb.code === 404 && !rtQ && i < ordQ.length - 1) continue;
+          if (jb) break;
         }
-        const jb = await br.json().catch(() => null);
-        if (!jb) {
-          try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(false, 'qrpoll 响应非 JSON HTTP ' + br.status).catch(() => {})); } catch (_) {}
-          return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
-        }
+        if (!jb) return json({ ok: false, code: 0, message: '稍后自动重试' }, 200);
         if (jb.code === 200) { try { if (globalThis.CTX && globalThis.CTX.waitUntil) globalThis.CTX.waitUntil(bridgeHealth(true).catch(() => {})); } catch (_) {} }
         // 2026-11-20 体检观察项：bridge 返回 JSON 但 code!=200（实例内部异常）也喂一次失败，
         // 与 qrnew 路径口径对齐（429 限频由 bridgeHealth 内部按口径处理，不另算）。
@@ -7148,15 +7329,21 @@ async function handle(request) {
        bridge 侧 404（token 不存在/已复位）无害。 */
     if (url.pathname === '/api/r/qrack') {
       const bcA = await qrBridgeCfg();
-      if (bcA.url && bcA.key) {
+      const brsA = qrBridges(bcA);
+      if (brsA.length) {
         const ak = String(url.searchParams.get('key') || '').trim().slice(0, 64);
         if (ak) {
-          try {
-            await fetch(bcA.url + '/qrack?token=' + encodeURIComponent(ak), {
-              headers: { 'X-Bridge-Key': bcA.key },
-              signal: AbortSignal.timeout(8000),
-            });
-          } catch (e) { /* 释放失败无害：bridge 15 分钟自动复位兜底 */ }
+          const rtA = await qrTkRoute(ak, brsA);
+          const ordA = rtA ? [rtA] : brsA;
+          for (let i = 0; i < ordA.length; i++) {
+            try {
+              await fetch(ordA[i].url + '/qrack?token=' + encodeURIComponent(ak), {
+                headers: { 'X-Bridge-Key': ordA[i].key },
+                signal: AbortSignal.timeout(8000),
+              });
+            } catch (e) { /* 释放失败无害：bridge 15 分钟自动复位兜底 */ }
+            if (rtA) break;   // 有路由记录只发给出码的那台；无记录两台都发（404 无害）
+          }
         }
       }
       return json({ ok: true }, 200, { 'Cache-Control': 'no-store' });
@@ -8452,6 +8639,9 @@ async function handle(request) {
       const accMap = new Map();
       for (const a of accs) accMap.set(String(a.pool || '') + '|' + String(a.uid != null ? a.uid : ''), a);
       const rc = await regCfg();
+      // 2026-11-23：签到产品（pool=sign）的群号走独立配置 sign_cfg（发送时现查，改了立即生效），
+      //   不混用 650 的 reg_cfg（买家看不到客服维度，只有一张产品群）。
+      const scfgM = await readSignCfg();
       // 2026-11-13：songchange 需要新旧歌名（ref=旧歌id:新歌id），一次 IN 查询取齐 song_meta
       const scNames = {};
       const scIds = [];
@@ -8491,9 +8681,10 @@ async function handle(request) {
             [why, String(p.pool || ''), String(p.uid || ''), String(p.kind || ''), String(p.ref || '')]);
           continue;
         }
-        // 群号发送时现查：客服改群号立即生效，不用重发
+        // 群号发送时现查：客服改群号立即生效，不用重发。
+        // 2026-11-23：pool=sign（签到产品）不走客服群映射，改用独立 sign_cfg.group。
         const agent = normAgent((a ? a.agent : p.agent) || p.agent);
-        const grp = agentGroupOf(rc, agent);
+        const grp = String(p.pool || '') === 'sign' ? String(scfgM.group || '') : agentGroupOf(rc, agent);
         const item = { pool: String(p.pool || ''), uid: String(p.uid != null ? p.uid : ''), kind: String(p.kind || ''),
           ref: String(p.ref || ''), email: String((a ? a.email : p.email) || '').trim(), name: String((a ? a.name : p.name) || ''), agent: agent,
           group: grp, exp: String((a ? a.exp : p.exp) || '').slice(0, 10), created_at: String(p.created_at || '') };
