@@ -13,7 +13,9 @@ name: notify-mail
 # 群号在发放时按最新 reg_cfg 现查，控制台改完立即生效。
 # 仓库是 public，30 分钟一次不占 Actions 时长额度；D1 增量 ≈ 每天 1 次 accounts 全表 + 少量队列行。
 on:
-  # 2026-11-24 定时迁 CF：原 GitHub schedule（17,47 常丢班）已删，CF 发令表每小时的 :15/:45 准点 dispatch。
+  # 2026-11-24 定时迁 CF：原 GitHub schedule（17,47 常丢班）已删。发令方 = 主 worker 邮件队列腿
+  # MAIL_CRONS=[每小时 :05]（带队列判空 + 上一班在跑即跳过，worker.js 内），
+  # relay-watchdog 发令表不接管本工作流（避免双发令）。
   workflow_dispatch:
     inputs:
       dry:
