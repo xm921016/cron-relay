@@ -312,7 +312,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <!-- 2026-11-18：删掉「排序」下拉（用户拍板没用）。行内「较昨日」列本身可点表头排序的话另行处理，这里先直接移除 -->
     <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
     <button class="mini mOnly" id="btnMore" title="工具箱（月度结算/客服名单/设备授权/登记链接/历史登记/退出）" data-page-node-id="Z0TBa6mm2C5i5J4wMmUIVm">工具</button>
-    <button class="mini" id="btnSignAdm" style="display:none" title="签到卡密管理（网页版，满权限专属）：生成卡密/查看买家/删除买家/售后群号设置，换电脑也能用，口令=ADMIN_PASS" onclick="window.open('/signadmin','_blank')">签到管理</button>
+    <button class="mini" id="btnSignAdm" style="display:none" title="签到卡密管理（网页版，满权限专属）：生成卡密/查看买家/删除买家/售后群号设置。从控制台点进去免口令；直接复制裸链接打开才需要输 ADMIN_PASS" onclick="signAdm()">签到管理</button>
     <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
     <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成" data-page-node-id="KG7uyWeMOO4hHWeiVUB4Li">月度结算</button>
     <button class="mini gray" id="btnCfg" style="display:none" data-page-node-id="fyixyeXAj1IGBnB0XxPYrp">客服名单</button>
@@ -628,6 +628,18 @@ function dAdd(day,n){
   return d.toISOString().slice(0,10);
 }
 function api(ep,body){return fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});});}
+// 2026-11-24（用户强制要求，永久生效）：从控制台点「签到管理」进 /signadmin 不再要口令。
+// 流程：满权限登录态 → /api/sign/handoff 领一张一次性票据（KV 存 2 分钟）→
+//   带 #tk= 打开签到管理页 → 页面用票据换 ADMIN_PASS 自动登录并记住本机浏览器。
+// 直接复制裸链接打开的照旧要输口令，行为不变。
+// 票据签发失败（口令不对/网络异常）时退回裸链接打开，不影响原有使用方式。
+function signAdm(){
+  var t={};try{t=JSON.parse(TOKEN||'{}');}catch(e){}
+  api('/api/sign/handoff',{user:t.user||'xx1031',pass:t.pass||''}).then(function(o){
+    if(o.ok&&o.d&&o.d.ok&&o.d.tk){window.open('/signadmin#tk='+encodeURIComponent(o.d.tk),'_blank');}
+    else{window.open('/signadmin','_blank');}
+  }).catch(function(){window.open('/signadmin','_blank');});
+}
 // 2026-10-28（用户要求：输一次就一直有效）：控制台口令重新落盘记忆。
 // 上一版是「每次都输」，理由是别把 24 位口令明文留在浏览器里；实际用下来太麻烦，改回记忆。
 // 现在：登录成功 → 把 {user,pass} 连带 role 一起存进 localStorage 的 consToken。

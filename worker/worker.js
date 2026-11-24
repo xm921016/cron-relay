@@ -7017,6 +7017,42 @@ async function handle(request) {
       }
       return json({ ok: true, logs: logsRp.length, dead: deadK }, 200, { 'Cache-Control': 'no-store' });
     }
+    /* 2026-11-24 控制台→签到管理页免口令交接（用户强制要求，永久生效）：
+       控制台满权限点「签到管理」→ 先调 /api/sign/handoff 领一张一次性票据（KV 存 120 秒），
+       再开 /signadmin#tk=票据；页面调 /api/sign/handoff_redeem 用票据换 ADMIN_PASS 自动登录。
+       票据=一次性+短时效+只能由满权限口令领取；直接裸开 /signadmin（复制链接）不带票据，
+       行为完全不变（仍要输口令）。 */
+    if (url.pathname === '/api/sign/handoff' && request.method === 'POST') {
+      let bH1;
+      try { bH1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      if (!(await consoleAuthFull(bH1))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
+      const tkH1 = 'H' + signRand(24);
+      try { await POOL.put('sign_handoff:' + tkH1, '1', { expirationTtl: 120 }); }
+      catch (e) { return json({ ok: false, message: '票据写入失败，请重试' }, 503, { 'Cache-Control': 'no-store' }); }
+      console.log('签到管理交接票据签发');
+      return json({ ok: true, tk: tkH1 }, 200, { 'Cache-Control': 'no-store' });
+    }
+    if (url.pathname === '/api/sign/handoff_redeem' && request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      } });
+    }
+    if (url.pathname === '/api/sign/handoff_redeem' && request.method === 'POST') {
+      const CORS_HR = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
+      let bH2;
+      try { bH2 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400, CORS_HR); }
+      const tkH2 = String(bH2.tk || '');
+      if (!/^H[A-HJ-NP-Z2-9]{24}$/.test(tkH2)) return json({ ok: false, message: '交接票据无效' }, 400, CORS_HR);
+      let liveH2 = '';
+      try { liveH2 = await POOL.get('sign_handoff:' + tkH2); } catch (e) {}
+      if (!liveH2) return json({ ok: false, message: '交接已失效：票据只能用一次且 2 分钟内有效，请回控制台重新点「签到管理」' }, 403, CORS_HR);
+      try { await POOL.delete('sign_handoff:' + tkH2); } catch (e) {}
+      const cH2 = await cfg();
+      if (!cH2.adminPass) return json({ ok: false, message: '未配置管理口令（KV 键 ADMIN_PASS）' }, 503, CORS_HR);
+      return json({ ok: true, pass: cH2.adminPass }, 200, CORS_HR);
+    }
     /* 卡密批量生成：管理接口（口令=ADMIN_PASS）。count 1~10000/次（>1000 自动分批写库），
        unused 总库存上限 50000。
        卡密=预建 unused 行：uid 占位 'card:'+码，reg_code=卡密码（UNIQUE 天然防重），
@@ -11535,6 +11571,106 @@ async function dispatchSnap650(onlyPool, force) {
   } catch (e) { /* 记录失败不影响触发本身 */ }
   return { ok: out.every(x => x.ok), jobs: out };
 }
+// ---- 2026-11-24：CF cron 发令「签到白天补领」（signin-reclaim.yml）----
+// 与 dispatchSnap650 同套路：CF 原生 cron 准点 → GitHub workflow_dispatch。只发令不干活
+// （runner 里跑 signin_reclaim.py，P4/P6 幂等）。hz 大号（Secrets 分片）专用，只需 GH_TOKEN
+// 一个仓库，不带 inputs。发令记录写 KV cron:reclaim:last（1 周过期）供排障。
+async function dispatchSigninReclaim() {
+  const c = await cfg();
+  const out = [];
+  if (!c.ghToken) {
+    out.push({ status: 0, ok: false, message: 'KV 里没有 GH_TOKEN' });
+  } else {
+    try {
+      // workflow_dispatch 成功返回 204 且 body 为空
+      const resp = await fetch('https://api.github.com/repos/' + MAIL_REPO.owner + '/' + MAIL_REPO.repo +
+        '/actions/workflows/signin-reclaim.yml/dispatches', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + c.ghToken, Accept: 'application/vnd.github+json',
+                   'User-Agent': 'cron-relay-worker', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: 'main' }),
+      });
+      out.push({ status: resp.status, ok: resp.status === 204,
+                 message: resp.ok ? '' : (await resp.text()).slice(0, 120) });
+    } catch (e) {
+      out.push({ status: 0, ok: false, message: String((e && e.message) || e).slice(0, 120) });
+    }
+  }
+  try {
+    await POOL.put('cron:reclaim:last', JSON.stringify({ at: new Date().toISOString(), out }),
+                   { expirationTtl: 604800 });
+  } catch (e) { /* 记录失败不影响触发本身 */ }
+  return { ok: out.every(x => x.ok), jobs: out };
+}
+// ---- 2026-11-24：CF cron 动态派片「签到买家池跑批」（009/sign-node）----
+// active 买家数 ÷ shardSize(350) 向上取整 = 片数（上限 maxShards 12）。
+// 每片 ≤350 号 × 35s/号 ≈ 3.5h，稳在单 job 300min 超时内；assign LIMIT 600/片不被触及。
+// 漏班兜底（leakCheck=true）：cron:sign:last 显示今天已成功派过片就跳过，否则补派。
+// 发令记录写 KV cron:sign:last（1 周过期）供排障。
+async function dispatchSignBatch(leakCheck) {
+  const rec = { at: new Date().toISOString(), day: bjDate(0), action: '', n: 0, count: 0, dispatched: false };
+  const save = async () => { try { await POOL.put('cron:sign:last', JSON.stringify(rec), { expirationTtl: 604800 }); } catch (e) {} };
+  try {
+    if (leakCheck) {
+      try {
+        const lastRaw = await POOL.get('cron:sign:last').catch(() => null);
+        const last = lastRaw ? JSON.parse(lastRaw) : null;
+        if (last && last.day === rec.day && last.dispatched) {
+          rec.action = 'skip';
+          rec.reason = '今日已派 ' + last.n + ' 片，兜底班跳过';
+          rec.dispatched = true;
+          await save();
+          return rec;
+        }
+      } catch (e) { /* 读失败按未派处理，继续补派 */ }
+    }
+    const cntRows = await d1All("SELECT COUNT(*) n FROM sign_users WHERE status='active'", []);
+    if (cntRows === null) {
+      rec.action = 'error'; rec.reason = 'D1 读 sign_users 失败';
+      await save();
+      return rec;
+    }
+    const count = Number((cntRows[0] && cntRows[0].n) || 0);
+    rec.count = count;
+    if (count <= 0) {
+      rec.action = 'skip'; rec.reason = '没有 active 买家，不派';
+      await save();
+      return rec;
+    }
+    const n = Math.min(SIGN_REPO.maxShards, Math.ceil(count / SIGN_REPO.shardSize));
+    rec.n = n;
+    const tok = cleanKV(await POOL.get('GH_TOKEN_SIGN').catch(() => null)) || '';
+    if (!tok) {
+      rec.action = 'error'; rec.reason = 'KV 缺 GH_TOKEN_SIGN（xm921009 PAT），未派片';
+      await save();
+      return rec;
+    }
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      try {
+        const resp = await fetch('https://api.github.com/repos/' + SIGN_REPO.owner + '/' + SIGN_REPO.repo +
+          '/actions/workflows/' + SIGN_REPO.workflow + '/dispatches', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + tok, Accept: 'application/vnd.github+json',
+                     'User-Agent': 'cron-relay-worker', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ref: 'main', inputs: { i: String(i), n: String(n) } }),
+        });
+        out.push({ i: i, status: resp.status, ok: resp.status === 204 });
+      } catch (e) {
+        out.push({ i: i, status: 0, ok: false, message: String((e && e.message) || e).slice(0, 120) });
+      }
+    }
+    rec.dispatched = out.some(x => x.ok);
+    rec.action = rec.dispatched ? 'dispatched' : 'error';
+    rec.reason = rec.dispatched ? '' : '全部 dispatch 失败';
+    rec.jobs = out;
+  } catch (e) {
+    rec.action = 'error';
+    rec.reason = String((e && e.message) || e).slice(0, 160);
+  }
+  await save();
+  return rec;
+}
 // ---- 2026-11-05：CF cron 兜底发令「每日 D1 备份」----
 // 常规入口是 hz relay 结束后的 workflow_run（天然取删号后的终态）。但那条边偶尔不触发，
 // 而 GitHub 自己的 schedule 兜底实测会拖 3~7 小时（名义北京 19:40 → 次日 02:51 才跑）。
@@ -11564,6 +11700,26 @@ const BRIDGE_CRONS = ['*/10 * * * *'];
 // snap650 派发同步移除（10:10 采一次又 12:00 补一次的旧三重链路作废）。
 const SNAP_MAIN_CRON = ['30 1 * * *'];       // 北京 09:30
 const SNAP_FALLBACK_CRON = ['0 4 * * *'];    // 北京 12:00
+// 2026-11-24：签到补领发令腿（signin-reclaim.yml：P4 云贝任务 + P6 VIP 成长值白天补领，幂等
+// 无可领取=no-op）。GitHub schedule 实测延迟 4~8h+（11-24 名义 12:20/15:20/18:20/21:20 实际
+// 凌晨 03:16/06:04/09:01 才跑），改由 CF cron 准点发令 workflow_dispatch；GitHub 侧 schedule
+// 已删除，workflow 只认 workflow_dispatch（CF 发令 + 人工应急同一条通道）。
+// CF cron 不支持逗号列表（11-06 实锤），四班分四条：UTC 04:20/07:20/10:20/13:20。
+const RECLAIM_CRONS = ['20 4 * * *', '20 7 * * *', '20 10 * * *', '20 13 * * *'];  // 北京 12:20/15:20/18:20/21:20
+// 2026-11-24：签到买家池跑批派片腿（SIGN_USERS=1，009/sign-node 薄壳仓）。
+// 背景：009 的 GitHub schedule 只会固定单片（n=1），而 worker /api/sign/assign 每片
+// LIMIT 600 + 单 job timeout 300min÷35s/号 ≈ 500 号/片 —— 买家超过 ~500 就开始静默漏签。
+// 改为 CF 准点派片 + 按人数动态伸缩：active 买家数 ÷ 350 = 片数（ceil，上限 40 片），
+// 逐片 workflow_dispatch 009 sign.yml（inputs i/n）。买家少时只派 1 片，空池不派。
+// 009 侧 schedule 已删（防双跑），CF 是唯一发令方；00:40 主派 + 01:10 漏班兜底
+//（兜底班查 KV cron:sign:last，今天已成功派片就跳过）。
+// 需要 KV 键 GH_TOKEN_SIGN = xm921009 的 PAT（对 009 仓有 workflow 权限）。
+// 2026-11-24 二次扩容 12→40：12×350≈4200 扛不住用户预期的万级买家；40×350=1.4 万。
+// 1 万买家 = 29 片，GitHub 免费计划 public 仓并发 job 上限 20 → 自动排 2 波
+//（20 片 3.4h + 9 片 3.4h ≈ 7h，00:40 起跑 ~07:40 收工），无需任何额外改动。
+const SIGN_CRONS = ['40 16 * * *'];        // 北京 00:40 主派（错开 relay 00:20 高峰）
+const SIGN_LEAK_CRON = '10 17 * * *';      // 北京 01:10 漏班兜底
+const SIGN_REPO = { owner: 'xm921009', repo: 'sign-node', workflow: 'sign.yml', shardSize: 350, maxShards: 40 };
 const MAIL_REPO = { owner: 'xm921016', repo: 'cron-relay', workflow: 'notify-mail.yml' };
 const BACKUP_REPOS = [
   { pool: 'hz', owner: 'xm921016', repo: 'cron-relay', tokenKey: 'GH_TOKEN' },
@@ -12604,7 +12760,7 @@ function passFail(d) {
     try { localStorage.removeItem('signadm_pass'); } catch (e) {}
     $('pass').value = '';
     $('msg').style.color = '#c0392b';
-    $('msg').textContent = '口令不对：已清掉记住的口令，请重新粘贴 ADMIN_PASS（和 650 控制台管理口令同一个），再点一次';
+    $('msg').textContent = '口令不对：已清掉记住的口令，请重新粘贴 ADMIN_PASS（= /admin 管理后台那把口令，不是 650 控制台口令），再点一次';
     return true;
   }
   return false;
@@ -12702,6 +12858,7 @@ function refresh() {
       '<span class="stat"><b>' + (d.todayOk || 0) + '</b>今日签到成功</span>';
     renderWeek(d);
     renderList(d);
+    if (!$('qqgroup').value) loadGroup();   /* 2026-11-24：首输口令后不刷新页面也能看到群号回显 */
   });
 }
 function renderWeek(d) {
@@ -12811,7 +12968,47 @@ function saveGroup() {
   });
 }
 loadGroup();
-if (pass) refresh();
+/* 2026-11-24 控制台免口令交接（用户强制要求）：从 650 控制台点「签到管理」进来时
+   带 #tk= 一次性票据 → 服务端换出 ADMIN_PASS 自动登录并记住本机；
+   直接复制裸链接打开不带票据 → 照旧要输口令，行为不变。地址栏立即清掉票据防外泄。 */
+(function bootSignAdm() {
+  var mTk = (location.hash || '').match(/tk=([^&]+)/);
+  if (!mTk) {
+    if (pass) { refresh(); }
+    else {
+      /* 2026-11-24：本机没记住口令时给出自诊提示（用户反馈「每次刷新都要重输」——
+         服务端和页面逻辑实测无问题，多半是浏览器开了退出清数据/无痕窗口/换了浏览器）。 */
+      $('pass').placeholder = '粘贴管理口令（ADMIN_PASS = /admin 管理后台那把）';
+      $('msg').style.color = '#33506e';
+      $('msg').textContent = '口令输一次就会记在本机浏览器。如果每次打开都要重输：多半是浏览器开了「退出时清除浏览数据」、或用的无痕窗口、或换了浏览器/设备——换平时常用的浏览器直接打开本页即可。售后群号保存在服务端不会丢，口令输对后自动回显。';
+    }
+    return;
+  }
+  var tkB = mTk[1];
+  try { tkB = decodeURIComponent(tkB); } catch (e) {}
+  try { history.replaceState(null, '', location.pathname); } catch (e1) {}
+  $('msg').style.color = '#33506e';
+  $('msg').textContent = '正在从控制台交接登录…';
+  fetch(W + '/api/sign/handoff_redeem', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tk: tkB }) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      d = d || { ok: false, message: '响应异常' };
+      if (d.ok && d.pass) {
+        pass = d.pass;
+        $('pass').value = pass;
+        try { localStorage.setItem('signadm_pass', pass); } catch (e) {}
+        $('msg').textContent = '';
+        refresh();
+      } else {
+        $('msg').style.color = '#c0392b';
+        $('msg').textContent = d.message || '交接失败，请手动输入口令';
+      }
+    })
+    .catch(function () {
+      $('msg').style.color = '#c0392b';
+      $('msg').textContent = '交接失败（网络异常），请手动输入口令';
+    });
+})();
 </script>
 </body>
 </html>`;
@@ -13295,7 +13492,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <!-- 2026-11-18：删掉「排序」下拉（用户拍板没用）。行内「较昨日」列本身可点表头排序的话另行处理，这里先直接移除 -->
     <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
     <button class="mini mOnly" id="btnMore" title="工具箱（月度结算/客服名单/设备授权/登记链接/历史登记/退出）" data-page-node-id="Z0TBa6mm2C5i5J4wMmUIVm">工具</button>
-    <button class="mini" id="btnSignAdm" style="display:none" title="签到卡密管理（网页版，满权限专属）：生成卡密/查看买家/删除买家/售后群号设置，换电脑也能用，口令=ADMIN_PASS" onclick="window.open('/signadmin','_blank')">签到管理</button>
+    <button class="mini" id="btnSignAdm" style="display:none" title="签到卡密管理（网页版，满权限专属）：生成卡密/查看买家/删除买家/售后群号设置。从控制台点进去免口令；直接复制裸链接打开才需要输 ADMIN_PASS" onclick="signAdm()">签到管理</button>
     <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
     <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成" data-page-node-id="KG7uyWeMOO4hHWeiVUB4Li">月度结算</button>
     <button class="mini gray" id="btnCfg" style="display:none" data-page-node-id="fyixyeXAj1IGBnB0XxPYrp">客服名单</button>
@@ -13611,6 +13808,18 @@ function dAdd(day,n){
   return d.toISOString().slice(0,10);
 }
 function api(ep,body){return fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d};});});}
+// 2026-11-24（用户强制要求，永久生效）：从控制台点「签到管理」进 /signadmin 不再要口令。
+// 流程：满权限登录态 → /api/sign/handoff 领一张一次性票据（KV 存 2 分钟）→
+//   带 #tk= 打开签到管理页 → 页面用票据换 ADMIN_PASS 自动登录并记住本机浏览器。
+// 直接复制裸链接打开的照旧要输口令，行为不变。
+// 票据签发失败（口令不对/网络异常）时退回裸链接打开，不影响原有使用方式。
+function signAdm(){
+  var t={};try{t=JSON.parse(TOKEN||'{}');}catch(e){}
+  api('/api/sign/handoff',{user:t.user||'xx1031',pass:t.pass||''}).then(function(o){
+    if(o.ok&&o.d&&o.d.ok&&o.d.tk){window.open('/signadmin#tk='+encodeURIComponent(o.d.tk),'_blank');}
+    else{window.open('/signadmin','_blank');}
+  }).catch(function(){window.open('/signadmin','_blank');});
+}
 // 2026-10-28（用户要求：输一次就一直有效）：控制台口令重新落盘记忆。
 // 上一版是「每次都输」，理由是别把 24 位口令明文留在浏览器里；实际用下来太麻烦，改回记忆。
 // 现在：登录成功 → 把 {user,pass} 连带 role 一起存进 localStorage 的 consToken。
@@ -16361,6 +16570,20 @@ export default {
     }
     if (SNAP_FALLBACK_CRON.indexOf(_cron) >= 0) {
       ctx.waitUntil(dispatchSnap650('all', false).catch(() => {}));
+      return;
+    }
+    // 2026-11-24：签到补领发令腿（北京 12:20/15:20/18:20/21:20，四班幂等），只发令不干别的，跑完即 return。
+    if (RECLAIM_CRONS.indexOf(_cron) >= 0) {
+      ctx.waitUntil(dispatchSigninReclaim().catch(() => {}));
+      return;
+    }
+    // 2026-11-24：签到买家池派片腿（北京 00:40 主派 + 01:10 漏班兜底），动态按 active 数派片，跑完即 return。
+    if (SIGN_CRONS.indexOf(_cron) >= 0) {
+      ctx.waitUntil(dispatchSignBatch(false).catch(() => {}));
+      return;
+    }
+    if (_cron === SIGN_LEAK_CRON) {
+      ctx.waitUntil(dispatchSignBatch(true).catch(() => {}));
       return;
     }
     // 主 cron（10 2 * * *）：2026-11-21 起 snap650 派发已移出（挪到 09:30/12:00 两条独立腿），
