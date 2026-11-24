@@ -12625,7 +12625,7 @@ const SIGN_ADMIN_HTML = `<!DOCTYPE html>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   background: #f5f6f8; color: #222; padding: 20px 14px 40px; }
-.wrap { max-width: 760px; margin: 0 auto; }
+.wrap { max-width: 1200px; margin: 0 auto; }
 h1 { font-size: 20px; margin-bottom: 4px; }
 .sub { font-size: 13px; color: #777; margin-bottom: 14px; }
 .card { background: #fff; border: 1px solid #e3e5e8; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
@@ -12646,7 +12646,9 @@ button:disabled { opacity: 0.5; }
 .wk .bar b { font-size: 11px; color: #2c5fb3; font-weight: 600; margin-bottom: 3px; }
 .wk .bar span { font-size: 10px; color: #8894a4; margin-top: 4px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
-th, td { border-bottom: 1px solid #eceef1; padding: 6px 4px; text-align: left; word-break: break-all; }
+th, td { border-bottom: 1px solid #eceef1; padding: 6px 4px; text-align: left; white-space: nowrap; }
+/* 2026-11-24 用户要求：明细一行不放两行字；窄屏横向滚动（自动加宽） */
+.card { overflow-x: auto; }
 th { color: #666; font-weight: 500; background: #fafbfc; }
 .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
 .tag.unused { background: #fff4e0; color: #b26a00; }
@@ -12876,6 +12878,8 @@ function renderWeek(d) {
 function renderList(d) {
   LIST = d.cards || [];
   $('flimit').style.display = d.listLimited ? 'block' : 'none';
+  /* 2026-11-24 用户要求：状态显示成中文（配色 class 沿用英文键不变） */
+  var SCNT = { unused: '未售', active: '已激活', dead: '已判死' };
   var tb = $('tbl').querySelector('tbody');
   tb.innerHTML = LIST.map(function (c) {
     var ops = '';
@@ -12886,7 +12890,7 @@ function renderList(d) {
       ops = '<a href="javascript:void(0)" onclick="copyOne(\\'' + c.reg_code + '\\')">复制重登链接</a> · ' +
             '<a href="javascript:void(0)" style="color:#c0392b" onclick="delUser(\\'' + c.reg_code + '\\',\\'' + (c.uid || '') + '\\')">删除</a>';
     }
-    return '<tr><td>' + c.reg_code + '</td><td><span class="tag ' + c.status + '">' + c.status + '</span></td>' +
+    return '<tr><td>' + c.reg_code + '</td><td><span class="tag ' + c.status + '">' + (SCNT[c.status] || c.status) + '</span></td>' +
       '<td>' + (c.uid && c.uid.indexOf('card:') === 0 ? '-' : (c.uid || '-')) + '</td><td>' + (c.name || '-') + '</td><td>' + (c.email || '-') + '</td>' +
       '<td>' + (c.added_at || '-') + '</td><td>' + (c.last_ok_day || '-') + '</td><td>' + ops + '</td></tr>';
   }).join('') || '<tr><td colspan="8">没有符合条件的数据</td></tr>';
