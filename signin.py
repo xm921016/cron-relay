@@ -646,15 +646,36 @@ def main_sign():
             time.sleep(random.uniform(2, 5))
 
         logger.info("买家池签到完成: 成功 %d / 判死 %d / 共 %d", ok_count, len(deads), len(logs))
-        rr = requests.post(WORKER_URL + "/api/sign/report",
-                           json={"pass": SIGN_PASS, "day": day, "logs": logs, "dead": deads},
-                           headers={"User-Agent": _SIGN_UA}, timeout=60)
-        rr.raise_for_status()
-        rep = rr.json()
-        if rep.get("ok"):
-            logger.info("回传成功: logs=%s dead=%s", rep.get("logs"), rep.get("dead"))
-        else:
-            logger.error("回传失败: %s", rep.get("message", ""))
+        # 2026-11-24：回传切批 —— worker /api/sign/report 对 logs/dead 有硬截（600/100），
+        # 一次性全量回传在几百人规模会静默丢数据（sign_logs 缺行、判死买家漏标漏邮件）。
+        # 改为 logs 每 500、deads 每 90 一批循环 POST（worker 端限额内，d1Batch ≤1000 铁律也安全）。
+        def _chunk(lst, size):
+            return [lst[k:k + size] for k in range(0, len(lst), size)] if lst else []
+
+        log_batches = _chunk(logs, 500) or [[]]
+        dead_batches = _chunk(deads, 90) or [[]]
+        total_batches = max(len(log_batches), len(dead_batches))
+        rep_ok = True
+        for bi in range(total_batches):
+            lc = log_batches[bi] if bi < len(log_batches) else []
+            dc = dead_batches[bi] if bi < len(dead_batches) else []
+            try:
+                rr = requests.post(WORKER_URL + "/api/sign/report",
+                                   json={"pass": SIGN_PASS, "day": day, "logs": lc, "dead": dc},
+                                   headers={"User-Agent": _SIGN_UA}, timeout=60)
+                rr.raise_for_status()
+                rep = rr.json()
+            except Exception as e:
+                logger.error("回传第 %d/%d 批异常: %s", bi + 1, total_batches, e)
+                rep_ok = False
+                continue
+            if rep.get("ok"):
+                logger.info("回传第 %d/%d 批成功: logs=%s dead=%s",
+                            bi + 1, total_batches, rep.get("logs"), rep.get("dead"))
+            else:
+                logger.error("回传第 %d/%d 批失败: %s", bi + 1, total_batches, rep.get("message", ""))
+                rep_ok = False
+        if not rep_ok:
             sys.exit(1)
     except Exception as e:
         logger.error("买家池签到异常: %s", e)
