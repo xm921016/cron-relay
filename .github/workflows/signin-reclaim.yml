@@ -8,15 +8,12 @@ name: signin reclaim
 # 需经 git 协议重推一次才生效 —— 本行注释即为此重推载体，请保留。
 on:
   workflow_dispatch:
-  schedule:
-    # GitHub schedule 实测延迟 4~8h 且偶发整班丢失（见 run.yml 头注释），
-    # 所以放 4 个班次对冲。名义上北京 12:20 / 15:20 / 18:20 / 21:20
-    # （UTC 04:20 / 07:20 / 10:20 / 13:20）。补领幂等，班次多跑/抖动无害；
-    # 抖到次日 0 点后任务重置，也只是空跑一轮。
-    - cron: "20 4 * * *"
-    - cron: "20 7 * * *"
-    - cron: "20 10 * * *"
-    - cron: "20 13 * * *"
+# 2026-11-24：schedule 已删除（CF 接管发令）。GitHub schedule 实测延迟 4~8h+ 且偶发整班丢失
+#（11-24 名义 12:20/15:20/18:20/21:20 实际凌晨 03:16/06:04/09:01 才跑），现在由 hz worker 的
+# CF cron（RECLAIM_CRONS：UTC 04:20/07:20/10:20/13:20 = 北京 12:20/15:20/18:20/21:20）准点
+# workflow_dispatch 发令（worker.js dispatchSigninReclaim()，发令记录 KV cron:reclaim:last）。
+# 本文件只保留 workflow_dispatch 作为手动应急入口。补领幂等，班次多跑/抖动无害；
+# 抖到次日 0 点后任务重置，也只是空跑一轮。
 
 concurrency:
   group: signin-reclaim
