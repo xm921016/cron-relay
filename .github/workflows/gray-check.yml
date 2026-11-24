@@ -8,8 +8,7 @@ name: gray-check
 #   2) 今天名单全池落库进度（GitHub 昨夜 + 前夜灰度机合计）
 # 结果每天发一封邮件到 ALERT_TO，无需人工查。
 on:
-  schedule:
-    - cron: '40 23 * * *'
+  # 2026-11-24 定时迁 CF：原 GitHub schedule 已删，由 relay-watchdog 发令表准点 workflow_dispatch（详 cron-relay/watchdog/relay_watchdog.js SCHED_TABLE）
   workflow_dispatch:
 
 concurrency:

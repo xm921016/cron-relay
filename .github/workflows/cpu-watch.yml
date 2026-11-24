@@ -7,8 +7,7 @@ name: cpu-watch
 # 手动触发可勾选 force：不看阈值强制发一封，用来验证通道。
 
 on:
-  schedule:
-    - cron: '10 2 * * *'
+  # 2026-11-24 定时迁 CF：原 GitHub schedule 已删，由 relay-watchdog 发令表准点 workflow_dispatch（详 cron-relay/watchdog/relay_watchdog.js SCHED_TABLE）
   workflow_dispatch:
     inputs:
       force:

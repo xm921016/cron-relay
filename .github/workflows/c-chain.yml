@@ -6,8 +6,7 @@ name: c-chain
 # 铁律：本 workflow 只读 D1、只动 AB/C/POOL_PLAY_SECONDS 三个实验 Secret，不碰业务链路。
 # 文档：文档/01-AB实验与口径/C组38秒下探-自动化运行手册-20261118.md（本地）
 on:
-  schedule:
-    - cron: '30 2 * * *'
+  # 2026-11-24 定时迁 CF：原 GitHub schedule 已删，由 relay-watchdog 发令表准点 workflow_dispatch（详 cron-relay/watchdog/relay_watchdog.js SCHED_TABLE）
   workflow_dispatch: {}
 
 permissions:

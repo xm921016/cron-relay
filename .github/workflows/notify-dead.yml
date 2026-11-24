@@ -12,8 +12,7 @@ name: notify-dead
 #
 # 每天北京 11:00 跑一次（UTC 03:00），错开 10:00 的快照采集。
 on:
-  schedule:
-    - cron: '0 3 * * *'
+  # 2026-11-24 定时迁 CF：原 GitHub schedule 已删，由 relay-watchdog 发令表准点 workflow_dispatch（详 cron-relay/watchdog/relay_watchdog.js SCHED_TABLE）
   workflow_dispatch:
     inputs:
       wait_h:

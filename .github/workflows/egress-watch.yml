@@ -12,8 +12,7 @@ name: egress-watch
 # 额度注意：D1 只跑 3 条前缀 LIKE（走主键索引）+ 1 次 unikey，每天一次，量极小。
 
 on:
-  schedule:
-    - cron: '30 1 * * *'
+  # 2026-11-24 定时迁 CF：原 GitHub schedule 已删，由 relay-watchdog 发令表准点 workflow_dispatch（详 cron-relay/watchdog/relay_watchdog.js SCHED_TABLE）
   workflow_dispatch: {}
 
 permissions:

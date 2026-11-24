@@ -25,8 +25,7 @@ on:
   workflow_run:
     workflows: ["relay"]
     types: [completed]
-  schedule:
-    - cron: '40 11 * * *'
+  # 2026-11-24 定时迁 CF：原 GitHub schedule 已删，由 relay-watchdog 发令表准点 workflow_dispatch（详 cron-relay/watchdog/relay_watchdog.js SCHED_TABLE）
   workflow_dispatch:
     inputs:
       test_alert:

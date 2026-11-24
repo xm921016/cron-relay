@@ -13,9 +13,7 @@ name: notify-mail
 # 群号在发放时按最新 reg_cfg 现查，控制台改完立即生效。
 # 仓库是 public，30 分钟一次不占 Actions 时长额度；D1 增量 ≈ 每天 1 次 accounts 全表 + 少量队列行。
 on:
-  schedule:
-    # 2026-11-06：*/30（整点/半点）实测 8 班全丢 → 改非边界分钟（GitHub 高峰在整点边界）
-    - cron: '17,47 * * * *'
+  # 2026-11-24 定时迁 CF：原 GitHub schedule（17,47 常丢班）已删，CF 发令表每小时的 :15/:45 准点 dispatch。
   workflow_dispatch:
     inputs:
       dry:

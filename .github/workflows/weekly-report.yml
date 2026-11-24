@@ -5,8 +5,7 @@ name: weekly-report
 # 只读 D1，不改任何数据；发信失败不影响任何主流程。
 
 on:
-  schedule:
-    - cron: '20 1 * * 1'      # UTC 周一 01:20 ≈ 北京周一 09:20
+  # 2026-11-24 定时迁 CF：原 GitHub schedule 已删，由 relay-watchdog 发令表准点 workflow_dispatch（详 cron-relay/watchdog/relay_watchdog.js SCHED_TABLE）
   workflow_dispatch: {}
 
 permissions:

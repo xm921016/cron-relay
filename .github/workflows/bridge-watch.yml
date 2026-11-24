@@ -7,8 +7,7 @@ name: bridge-watch
 #   同一次掉线只发 1 封离线邮件（Actions cache 记状态）；恢复时补 1 封恢复邮件。
 # 邮件走 hz 仓 secrets（EMAIL_FROM/EMAIL_AUTH_CODE/ALERT_TO），与 alert-relay.yml 同款。
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  # 2026-11-24 定时迁 CF：原 GitHub schedule 已删，由 relay-watchdog 发令表准点 workflow_dispatch（详 cron-relay/watchdog/relay_watchdog.js SCHED_TABLE）
   workflow_dispatch:
 
 concurrency:

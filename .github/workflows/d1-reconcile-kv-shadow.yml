@@ -10,8 +10,7 @@ name: d1-reconcile-kv-shadow
 # 本工作流每天 UTC 00:10（北京 08:10，额度刚重置）对照一次，把缺的号补回 D1。
 # 幂等：没有差异时只读 675 行，什么也不写。跑一周确认稳定后可以删掉。
 on:
-  schedule:
-    - cron: '10 0 * * *'
+  # 2026-11-24 定时迁 CF：原 GitHub schedule 已删，由 relay-watchdog 发令表准点 workflow_dispatch（详 cron-relay/watchdog/relay_watchdog.js SCHED_TABLE）
   workflow_dispatch:
 
 permissions:
