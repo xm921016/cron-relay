@@ -1655,6 +1655,340 @@ function adminPassOk(c, pass) {
   if (c.adminPass) return p === c.adminPass;
   return !!(c.groupPass && p === c.groupPass);
 }
+
+/* ==================== 短信登录链路实测（2026-11-25）====================
+   页面 GET /t/sms，接口 POST /api/sms_test/{send,check,login}，口令=ADMIN_PASS。
+   链路（策略参考 api-enhanced PR#294 公开说明，代码自主实现）：
+     发码  weapi /api/sms/captcha/sent {ctcode, secrete:'music_middleuser_pclogin', cellphone}
+       → -462 挑战(data.verifyType/verifyId/verifyToken/params) → 前端易盾官方 SDK 挂滑块
+       → 用户拖 → validate → 服务端 frontrisk/verify/check（必须与触发挑战同 cookie 会话）
+       → 成功 → 重试发码 → 200
+     登录  weapi /api/w/login/cellphone {type:'1', phone, captcha, remember}
+       → -462 同上闭环 → 200 → Set-Cookie 含 MUSIC_U
+   会话 jar 存 D1 smstest_sess（sid 维度，30 分钟 TTL），UA/设备身份整个会话保持不变。 */
+const SMS_TEST_IV = '0102030405060708';
+const SMS_TEST_PRESET = '0CoJUm6Qyw8W8jud';
+const SMS_TEST_RSA_N = '00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7';
+const SMS_TEST_B62 = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+const SMS_TEST_CAPTCHA_ID = { 40: 'aefd3e6914a546a2a7263b20a5e8304f', 41: 'eb43b69cce7449c1b818b8a291b36f21' };
+const SMS_TEST_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+const _smsEnc = new TextEncoder();
+function smsB64(buf) {
+  const u8 = new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+async function smsAesB64(text, key) {
+  const ek = await crypto.subtle.importKey('raw', _smsEnc.encode(key), { name: 'AES-CBC' }, false, ['encrypt']);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-CBC', iv: _smsEnc.encode(SMS_TEST_IV) }, ek, _smsEnc.encode(text));
+  return smsB64(ct);
+}
+function smsRand(len) { // len 字节 → 2len 位小写 hex
+  const b = new Uint8Array(len);
+  crypto.getRandomValues(b);
+  let s = '';
+  for (let i = 0; i < b.length; i++) s += ('0' + b[i].toString(16)).slice(-2);
+  return s;
+}
+function smsRandSecret() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  let s = '';
+  for (let i = 0; i < 16; i++) s += SMS_TEST_B62[b[i] % 62];
+  return s;
+}
+function smsRsa(secretKey) { // 与 crypto.js 的 forge 'NONE' 等价：原始字节裸 RSA，hex 补足 256 位
+  const rev = secretKey.split('').reverse().join('');
+  let m = 0n;
+  for (let i = 0; i < rev.length; i++) m = (m << 8n) | BigInt(rev.charCodeAt(i));
+  const n = BigInt('0x' + SMS_TEST_RSA_N);
+  let r = 1n, b = m, e = 65537n;
+  while (e > 0n) { if (e & 1n) r = (r * b) % n; b = (b * b) % n; e >>= 1n; }
+  return r.toString(16).padStart(256, '0');
+}
+async function smsWeapi(obj) {
+  const text = JSON.stringify(obj);
+  const sk = smsRandSecret();
+  return {
+    params: await smsAesB64(await smsAesB64(text, SMS_TEST_PRESET), sk),
+    encSecKey: smsRsa(sk),
+  };
+}
+function smsCookieMerge(prev, list) {
+  const m = new Map();
+  String(prev || '').split(';').forEach(function (s) {
+    const i = s.indexOf('=');
+    if (i > 0) m.set(s.slice(0, i).trim(), s.slice(i + 1).trim());
+  });
+  (list || []).forEach(function (c) {
+    const kv = String(c).split(';')[0];
+    const i = kv.indexOf('=');
+    if (i > 0) m.set(kv.slice(0, i).trim(), kv.slice(i + 1).trim());
+  });
+  const out = [];
+  m.forEach(function (v, k) { out.push(k + '=' + v); });
+  return out.join('; ');
+}
+function smsCookiePick(cookie, key) {
+  const hit = String(cookie || '').match(new RegExp('(?:^|;\\s*)' + key + '=([^;]+)'));
+  return hit ? hit[1] : '';
+}
+async function smsNewJar() {
+  const jar = { ua: SMS_TEST_UA, cookie: '' };
+  jar.cookie = [
+    '_ntes_nuid=' + smsRand(16),
+    '_ntes_nnid=' + smsRand(16) + ',' + Date.now(),
+    'WNMCID=' + smsRand(3) + '.' + Date.now() + '.01.0',
+    'WEVNSM=1.0.0',
+    'deviceId=' + smsRand(16),
+  ].join('; ');
+  try { // 访问一次主站领真实 NMTID 等设备凭证（伪造 NMTID 是 -462 的触发条件之一）
+    const r = await fetch('https://music.163.com/', { headers: { 'User-Agent': jar.ua }, redirect: 'manual' });
+    const sc = r.headers.getSetCookie ? r.headers.getSetCookie() : [];
+    if (sc.length) jar.cookie = smsCookieMerge(jar.cookie, sc);
+  } catch (e) { /* 主站不可达不拦流程，用自造身份继续 */ }
+  return jar;
+}
+async function smsGetJar(sid) {
+  const db = globalThis.DB;
+  await db.prepare('CREATE TABLE IF NOT EXISTS smstest_sess (sid TEXT PRIMARY KEY, jar TEXT, ts INTEGER)').run();
+  const row = await db.prepare('SELECT jar, ts FROM smstest_sess WHERE sid=?').bind(sid).first();
+  if (row && row.jar && (Date.now() - Number(row.ts || 0)) < 30 * 60e3) {
+    try { return JSON.parse(row.jar); } catch (e) {}
+  }
+  const jar = await smsNewJar();
+  await db.prepare('INSERT INTO smstest_sess (sid, jar, ts) VALUES (?, ?, ?) ON CONFLICT(sid) DO UPDATE SET jar=excluded.jar, ts=excluded.ts')
+    .bind(sid, JSON.stringify(jar), Date.now()).run();
+  return jar;
+}
+async function smsSaveJar(sid, jar) {
+  await globalThis.DB.prepare('UPDATE smstest_sess SET jar=?, ts=? WHERE sid=?').bind(JSON.stringify(jar), Date.now(), sid).run();
+}
+async function smsUpstream(url, body, jar, extraHeaders) {
+  const h = Object.assign({
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'User-Agent': jar.ua,
+    'Origin': 'https://music.163.com',
+    'Referer': 'https://music.163.com/',
+    'Cookie': jar.cookie,
+  }, extraHeaders || {});
+  const r = await fetch(url, { method: 'POST', headers: h, body, redirect: 'manual' });
+  const text = await r.text();
+  const sc = r.headers.getSetCookie ? r.headers.getSetCookie() : [];
+  if (sc.length) jar.cookie = smsCookieMerge(jar.cookie, sc);
+  return { status: r.status, text };
+}
+async function smsWeapiCall(apiPath, data, jar) {
+  const encd = await smsWeapi(data);
+  const body = 'params=' + encodeURIComponent(encd.params) + '&encSecKey=' + encodeURIComponent(encd.encSecKey);
+  return smsUpstream('https://music.163.com' + apiPath.replace(/^\/api/, '/weapi'), body, jar);
+}
+function smsParseJson(text) { try { return JSON.parse(text); } catch (e) { return null; } }
+async function smsTestAuth(pass) { const c = await cfg(); return adminPassOk(c, pass); }
+const smsSendLimit = new Map(); // phone -> ts：单 isolate 内存闸（60 秒防连点），外加 ADMIN_PASS 口令兜底
+
+const TEST_SMS_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>短信登录链路实测 · CF代理+易盾滑块</title>
+<style>
+  :root { --ac:#ec4141; }
+  body { font-family: -apple-system,'PingFang SC','Microsoft YaHei',sans-serif; margin:0; background:#f6f6f8; color:#222; }
+  .wrap { max-width: 560px; margin: 0 auto; padding: 20px 14px 60px; }
+  h1 { font-size: 19px; margin: 14px 0 4px; }
+  .sub { font-size: 12px; opacity: .65; margin-bottom: 16px; line-height: 1.7; }
+  .card { background:#fff; border-radius: 14px; padding: 16px 14px; box-shadow: 0 1px 6px rgba(0,0,0,.06); margin-bottom: 14px; }
+  label { font-size: 13px; display:block; margin: 10px 0 4px; opacity:.8; }
+  input { width: 100%; box-sizing: border-box; border: 1px solid #ddd; border-radius: 10px; padding: 10px 12px; font-size: 15px; background:#fff; color:#222; outline: none; }
+  input:focus { border-color: var(--ac); }
+  .row { display:flex; gap:8px; align-items:center; }
+  button { flex:none; background: var(--ac); color:#fff; border:none; border-radius: 10px; padding: 10px 16px; font-size: 14px; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.ghost { background: transparent; color: inherit; border: 1px solid #bbb; }
+  .tip { font-size: 13px; min-height: 18px; margin: 10px 0 0; line-height: 1.6; }
+  .tip.bad { color: var(--ac); }
+  .tip.ok { color: #1a9e5c; }
+  #yidun-cap { margin-top: 12px; min-height: 10px; }
+  pre { background:#f0f0f2; border-radius: 10px; padding: 10px 12px; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; max-height: 340px; overflow:auto; margin: 4px 0 0; }
+  .mu { font-size: 12px; word-break: break-all; background:#eaf7ef; border-radius:10px; padding:10px 12px; line-height:1.6; margin-top:10px; }
+  @media (prefers-color-scheme: dark){
+    body{background:#121212;color:#ddd;}
+    .card{background:#1d1d20; box-shadow:none;}
+    input{background:#2a2a2e; color:#eee; border-color:#444;}
+    pre{background:#18181b;}
+    .mu{background:#17301f;}
+    button.ghost{border-color:#555;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>短信登录链路实测</h1>
+  <div class="sub">CF 代理发码/登录 + 网易易盾滑块（组件级复刻）。内部测试页，口令 = ADMIN_PASS。每一步真实响应码都打进日志：200=成功 / -462=要滑块 / 406=频繁 / 429=本站限频。</div>
+  <div class="card">
+    <label>管理口令（ADMIN_PASS）</label>
+    <input id="pass" type="password" placeholder="16 位管理口令">
+    <label>测试手机号（能收网易短信的号）</label>
+    <div class="row">
+      <input id="phone" inputmode="numeric" maxlength="11" placeholder="18888888888">
+      <button id="b-send">获取验证码</button>
+    </div>
+    <p class="tip" id="tip"></p>
+    <div id="yidun-cap"></div>
+    <label>短信验证码（收到后填这里）</label>
+    <div class="row">
+      <input id="code" inputmode="numeric" maxlength="6" placeholder="6 位数字">
+      <button id="b-login">提交登录</button>
+    </div>
+    <div id="mu" class="mu" style="display:none"></div>
+  </div>
+  <div class="card">
+    <label style="margin-top:0">执行日志（每步原始响应）</label>
+    <pre id="log">（等待操作）</pre>
+    <div class="row" style="margin-top:8px">
+      <button id="b-new" class="ghost">换新会话(新设备)</button>
+      <span style="font-size:12px;opacity:.6" id="sidv"></span>
+    </div>
+  </div>
+</div>
+<script>
+var CAPTCHA_ID_40 = 'aefd3e6914a546a2a7263b20a5e8304f';
+var CAPTCHA_ID_41 = 'eb43b69cce7449c1b818b8a291b36f21';
+var SID = newSid();
+function E(id){ return document.getElementById(id); }
+function newSid(){ var b=new Uint8Array(8); crypto.getRandomValues(b); var s=''; for(var i=0;i<b.length;i++) s+=('0'+b[i].toString(16)).slice(-2); return s; }
+function showSid(){ E('sidv').textContent = 'sid=' + SID; }
+showSid();
+function tip(msg, bad, ok){ var t=E('tip'); t.textContent=msg; t.className='tip' + (bad?' bad':'') + (ok?' ok':''); }
+function log(tag, obj){
+  var p=E('log');
+  var line='['+new Date().toTimeString().slice(0,8)+'] '+tag+'\\n'+JSON.stringify(obj).slice(0,600)+'\\n\\n';
+  p.textContent = line + p.textContent.slice(0, 8000);
+}
+async function api(path, payload){
+  var r = await fetch('/api/sms_test/' + path, { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(Object.assign({ pass: E('pass').value.trim(), sid: SID }, payload || {})) });
+  try { return await r.json(); } catch(e) { return { code: -1, message: 'HTTP ' + r.status + ' 非JSON' }; }
+}
+/* ===== 易盾滑块（官方 SDK，组件级挂载） ===== */
+var sdkLoaded = null;
+function loadSdk(){
+  if (window.initNECaptcha) return Promise.resolve();
+  if (sdkLoaded) return sdkLoaded;
+  sdkLoaded = new Promise(function(res, rej){
+    var s = document.createElement('script');
+    s.src = 'https://cstaticdun.126.net/load.min.js';
+    s.async = true;
+    s.onload = function(){ window.initNECaptcha ? res() : rej(new Error('SDK 已加载但无 initNECaptcha')); };
+    s.onerror = function(){ sdkLoaded = null; rej(new Error('易盾 SDK 加载失败（网络或拦截插件）')); };
+    document.head.appendChild(s);
+  });
+  return sdkLoaded;
+}
+function mountSlide(challenge){
+  return new Promise(function(resolve, reject){
+    loadSdk().then(function(){
+      var cap = E('yidun-cap');
+      cap.innerHTML = '';
+      var host = document.createElement('div');
+      host.id = 'yidun-host-' + Date.now();
+      cap.appendChild(host);
+      var vt = Number(challenge.verifyType) || 40;
+      var cid = vt === 41 ? CAPTCHA_ID_41 : CAPTCHA_ID_40;
+      var settled = false;
+      /* 三参数签名：onVerify 必须在第一个 options 里，否则渲染正常但永远不回调 */
+      window.initNECaptcha({
+        captchaId: cid,
+        element: '#' + host.id,
+        mode: 'embed',
+        width: '320px',
+        lang: 'zh-CN',
+        onVerify: function(err, data){
+          if (settled) return; settled = true;
+          if (err) { cap.innerHTML=''; return reject(err); }
+          var v = (data && (data.validate || (data.data && data.data.validate))) || '';
+          if (!v) { cap.innerHTML=''; return reject(new Error('安全验证未返回 validate')); }
+          cap.innerHTML = '';
+          resolve(v);
+        },
+        onError: function(){ if (settled) return; settled = true; reject(new Error('滑块组件出错')); }
+      }, function(){ tip('滑块已就绪，请拖动验证'); },
+        function(){ if (settled) return; settled = true; reject(new Error('滑块初始化失败')); });
+    }).catch(reject);
+  });
+}
+/* ===== 发码（-462 → 滑块 → check → 自动重试） ===== */
+var busy = false;
+async function doSend(){
+  if (busy) return;
+  var p = E('phone').value.trim();
+  if (!E('pass').value.trim()) { tip('先填管理口令', true); return; }
+  if (!/^1[3-9]\\d{9}$/.test(p)) { tip('手机号格式不对', true); return; }
+  busy = true; E('b-send').disabled = true;
+  try {
+    tip('发送中…');
+    var r = await api('send', { phone: p, ctcode: '86' });
+    log('send', r);
+    if (Number(r.code) === -462 && r.challenge) {
+      tip('网易要求安全验证，请在下方拖动滑块');
+      var v = await mountSlide(r.challenge);
+      tip('滑块已通过，提交核验…');
+      var c = await api('check', { challenge: r.challenge, validate: v });
+      log('check', c);
+      if (c.success) { tip('安全验证通过，重新发送…'); busy = false; E('b-send').disabled = false; return doSend(); }
+      tip('安全验证未通过：' + (c.message || '未知') + '，请再拖一次', true);
+    } else if (Number(r.code) === 200) {
+      tip('验证码已发送，请查收短信（60 秒内别重发）', false, true);
+    } else {
+      tip('发送失败 code=' + r.code + ' ' + (r.message || ''), true);
+    }
+  } catch (e) { tip('异常：' + (e.message || e), true); }
+  busy = false; E('b-send').disabled = false;
+}
+E('b-send').onclick = doSend;
+/* ===== 登录（同样支持滑块闭环） ===== */
+async function doLogin(){
+  var p = E('phone').value.trim();
+  var code = E('code').value.trim();
+  if (!E('pass').value.trim()) { tip('先填管理口令', true); return; }
+  if (!/^1[3-9]\\d{9}$/.test(p)) { tip('手机号格式不对', true); return; }
+  if (!/^\\d{4,8}$/.test(code)) { tip('先填收到的短信验证码', true); return; }
+  E('b-login').disabled = true;
+  try {
+    tip('提交登录中…');
+    var r = await api('login', { phone: p, captcha: code, ctcode: '86' });
+    log('login', r);
+    if (Number(r.code) === -462 && r.challenge) {
+      tip('登录也需要安全验证，请拖动滑块');
+      var v = await mountSlide(r.challenge);
+      var c = await api('check', { challenge: r.challenge, validate: v });
+      log('check', c);
+      if (!c.success) { tip('安全验证未通过：' + (c.message || ''), true); E('b-login').disabled = false; return; }
+      tip('验证通过，重新提交登录…');
+      r = await api('login', { phone: p, captcha: code, ctcode: '86' });
+      log('login#2', r);
+    }
+    if (Number(r.code) === 200 && r.musicU) {
+      tip('登录成功！MUSIC_U 已到手，链路全通', false, true);
+      var m = E('mu'); m.style.display = 'block';
+      m.innerHTML = 'MUSIC_U 长度 <b>' + r.musicULen + '</b>　昵称：' + (r.nickname || '-') + '（uid ' + (r.userId || '-') + '）<br><span style="opacity:.7">MUSIC_U=' + r.musicU + '</span>';
+    } else {
+      tip('登录失败 code=' + r.code + ' ' + (r.message || ''), true);
+    }
+  } catch (e) { tip('异常：' + (e.message || e), true); }
+  E('b-login').disabled = false;
+}
+E('b-login').onclick = doLogin;
+E('b-new').onclick = function(){ SID = newSid(); showSid(); E('mu').style.display='none'; tip('已换新会话（新设备身份），继续即可'); };
+</script>
+</body>
+</html>`;
+/* ==================== 短信登录实测区结束 ==================== */
+
 // 跨群对穿口令（2026-10-26）：KV 键 PEER_KEY，两群存同一个 32 位随机值。
 // 背景：对穿原来直接复用两边的群口令（dz 的 PEER_PASS 就是 hz 的 music2026），
 // 于是「群口令」既能登记、又能读对端全池（含邮箱）、还能删改号。
@@ -6755,9 +7089,84 @@ async function handle(request) {
       // 2026-10-22：编辑逻辑抽成 applyEntryEdit，供本路由与控制台编辑接口 /api/console/entry 共用（行为不变）
       const _rAe = await applyEntryEdit(body);
       // 2026-11-06：编辑/删号成功 → 作废控制台首屏缓存
-      try { if (_rAe.status === 200) await ccBust(); } catch (e) {}
+      try {       if (_rAe.status === 200) await ccBust(); } catch (e) {}
       return _rAe;
     }
+    /* ===== 短信登录链路实测（2026-11-25）：页面 /t/sms，口令=ADMIN_PASS ===== */
+    if (url.pathname === '/t/sms' && request.method === 'GET') {
+      return new Response(TEST_SMS_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+    }
+    if (url.pathname === '/api/sms_test/send' && request.method === 'POST') {
+      let b; try { b = await request.json(); } catch (e) { return json({ code: 400, message: '参数错误' }, 400); }
+      if (!(await smsTestAuth(b.pass))) return json({ code: 403, message: '口令错误' }, 403);
+      const phone = String(b.phone || '').trim();
+      if (!/^1[3-9]\d{9}$/.test(phone)) return json({ code: 400, message: '手机号格式不对' }, 400);
+      const _now = Date.now(); const _last = smsSendLimit.get(phone) || 0;
+      if (_now - _last < 60e3) return json({ code: 429, message: '发送太频繁，' + Math.ceil((60e3 - (_now - _last)) / 1e3) + ' 秒后再试' });
+      smsSendLimit.set(phone, _now);
+      const sid = String(b.sid || 'default').slice(0, 64);
+      try {
+        const jar = await smsGetJar(sid);
+        const r = await smsWeapiCall('/api/sms/captcha/sent', { ctcode: '86', secrete: 'music_middleuser_pclogin', cellphone: phone }, jar);
+        await smsSaveJar(sid, jar);
+        const j = smsParseJson(r.text);
+        if (j && Number(j.code) === -462 && j.data && j.data.verifyToken) {
+          return json({ code: -462, sid, challenge: j.data, message: j.message || '需要安全验证' });
+        }
+        return json({ code: j ? j.code : r.status, sid, message: j ? (j.message || j.msg || (Number(j.code) === 200 ? '验证码已发送' : '')) : '响应非JSON', raw: j ? undefined : r.text.slice(0, 200) });
+      } catch (e) { return json({ code: 500, message: '发送链路异常: ' + (e && e.message || e) }, 500); }
+    }
+    if (url.pathname === '/api/sms_test/check' && request.method === 'POST') {
+      let b; try { b = await request.json(); } catch (e) { return json({ code: 400, message: '参数错误' }, 400); }
+      if (!(await smsTestAuth(b.pass))) return json({ code: 403, message: '口令错误' }, 403);
+      const ch = b.challenge; const validate = String(b.validate || '');
+      if (!ch || !ch.verifyToken) return json({ code: 400, message: '缺少 challenge' }, 400);
+      if (validate.length < 100 || /\s/.test(validate)) return json({ code: 400, message: 'validate 无效（长度 ' + validate.length + '，要求≥100 且无空白）' }, 400);
+      const sid = String(b.sid || 'default').slice(0, 64);
+      try {
+        const vt = Number(ch.verifyType) || 40;
+        const cid = SMS_TEST_CAPTCHA_ID[vt] || SMS_TEST_CAPTCHA_ID[40];
+        const referer = 'https://st.music.163.com/encrypt-pages?' + new URLSearchParams({
+          params: JSON.stringify(ch.params),
+          verifyType: String(ch.verifyType),
+          verifyId: String(ch.verifyId),
+          verifyToken: ch.verifyToken,
+        }).toString();
+        const jar = await smsGetJar(sid); // check 必须复用触发 -462 的同一个会话，否则白做
+        const encd = await smsWeapi({ token: ch.verifyToken, verifyType: vt, captchaId: cid, validate, params: JSON.stringify(ch.params) });
+        const r = await smsUpstream('https://st.music.163.com/weapi/frontrisk/verify/check',
+          'params=' + encodeURIComponent(encd.params) + '&encSecKey=' + encodeURIComponent(encd.encSecKey), jar,
+          { Origin: 'https://st.music.163.com', Referer: referer });
+        await smsSaveJar(sid, jar);
+        const j = smsParseJson(r.text);
+        return json({ code: 200, success: !!(j && j.data === true), message: j ? (j.message || '') : r.text.slice(0, 120), raw: j ? undefined : r.text.slice(0, 200) });
+      } catch (e) { return json({ code: 500, success: false, message: 'check 异常: ' + (e && e.message || e) }, 500); }
+    }
+    if (url.pathname === '/api/sms_test/login' && request.method === 'POST') {
+      let b; try { b = await request.json(); } catch (e) { return json({ code: 400, message: '参数错误' }, 400); }
+      if (!(await smsTestAuth(b.pass))) return json({ code: 403, message: '口令错误' }, 403);
+      const phone = String(b.phone || '').trim();
+      const code = String(b.captcha || '').trim();
+      if (!/^1[3-9]\d{9}$/.test(phone)) return json({ code: 400, message: '手机号格式不对' }, 400);
+      if (!/^\d{4,8}$/.test(code)) return json({ code: 400, message: '验证码格式不对' }, 400);
+      const sid = String(b.sid || 'default').slice(0, 64);
+      try {
+        const jar = await smsGetJar(sid);
+        const r = await smsWeapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true' }, jar);
+        await smsSaveJar(sid, jar);
+        const j = smsParseJson(r.text);
+        if (j && Number(j.code) === -462 && j.data && j.data.verifyToken) {
+          return json({ code: -462, sid, challenge: j.data, message: j.message || '需要安全验证' });
+        }
+        if (j && Number(j.code) === 200) {
+          const mu = smsCookiePick(jar.cookie, 'MUSIC_U');
+          return json({ code: 200, sid, message: '登录成功', musicU: mu, musicULen: mu.length,
+            nickname: (j.profile && j.profile.nickname) || '', userId: (j.account && j.account.id) || (j.profile && j.profile.userId) || '' });
+        }
+        return json({ code: j ? j.code : r.status, sid, message: j ? (j.message || j.msg || '') : '响应非JSON', raw: j ? undefined : r.text.slice(0, 200) });
+      } catch (e) { return json({ code: 500, message: '登录链路异常: ' + (e && e.message || e) }, 500); }
+    }
+    /* ===== 短信登录实测路由结束 ===== */
     if (url.pathname === '/api/join_manual' && request.method === 'POST') {
       let body;
       try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
