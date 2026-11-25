@@ -4232,7 +4232,7 @@ function buildPlanAccel(live, songs, listeners, today, idle, shifts) {
      加速档 118 只能拿 ~60）。720 = 00:10 起跑最晚 12:10 收工；M=2206/5波 → 上限 86（稀释解除），
      M=2400/6波 → 71 还有余量。实际整轮 4.5h 收工，只有极端拥挤才会用满窗口。
      ⚠ 此常量与 dz 必须逐字同步（两边必须算出同一份 plan）。 */
-  const JOB_CONC = 20, TARGET_WAVES = 3, KNIFE_MIN = 720, MIN_PER_SONG = 1.52;
+  const JOB_CONC = 20, TARGET_WAVES = 3, KNIFE_MIN = 1310, MIN_PER_SONG = 1.52; // 2026-11-25 用户拍板顶格：00:10 开跑→22:00 收工=1310 分钟；稀释只在逼近 22:00 仍跑不完时才触发，增仓提醒自动化盯着实际完成时间
   const PER0_ASSUME = M >= 500 ? Math.max(8, Math.ceil(M / (TARGET_WAVES * JOB_CONC))) : 12;
   const PAR_ASSUME = M >= 500 ? Math.min(48, Math.max(24, Math.ceil(PER0_ASSUME * 2.0))) : 24;
   const APS_ASSUME = M >= 500
