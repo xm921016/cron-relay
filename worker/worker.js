@@ -3210,6 +3210,7 @@ async function eapiVipTake(n) {
     } catch (e) {}
     const rec = { token: tok, link: link, short_url: short, donor_uid: cand.uid, donor_name: cand.name,
       vip_level: cand.vipLevel, month: eapiMonthBJ(), expire_ms: eapiMonthEndMsBJ(),
+      left: cand.left, total: cand.total,
       created_at: new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19), status: 'created' };
     const um = used.map[cand.uid] || { t: 0, n: 0 };
     used.map[cand.uid] = { t: Date.now(), n: (um.n || 0) + 1 };
@@ -3221,7 +3222,248 @@ async function eapiVipTake(n) {
   try { await POOL.put('vip_cloud_tokens', JSON.stringify(tokens.slice(0, 200))); } catch (e) {}
   return { ok: true, made: made, results: out, probed: scan.probed, dead: scan.dead, poolSize: scan.poolSize };
 }
+/* 领取状态对账（推断口径，2026-11-25）。为什么只能「推断」：
+   网易没有「送出记录列表」接口（实测 6 个候选端点全 404；detail/info/get 对未领/已领卡都返回空 data）；
+   唯一可靠信号 = donor 侧 sendVipDayLeft 下降（领取动作才扣减、发卡不扣，实证：测试卡领取后 128→121 = -7）。
+   对最近 12 张卡里未决（status=created）的 donor（≤6 个）逐一复核额度：下降 → 把该 donor 最早
+   的未决卡标 redeemed_inferred（受赠天数=对账扣减量）。领取人昵称/领取时间网易侧拿不到，页面如实标注「推断」。 */
+async function eapiVipRedeemSync(tokens) {
+  const nowBj = new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+  const donors = {};
+  for (const t of tokens.slice(0, 12)) {
+    if (t.status !== 'created' || !t.donor_uid || t.left == null) continue;
+    (donors[String(t.donor_uid)] = donors[String(t.donor_uid)] || []).push(t);
+  }
+  let probed = 0, changed = false;
+  for (const uid of Object.keys(donors)) {
+    if (probed >= 6) break;
+    const list = donors[uid].slice().sort(function (a, b) { return String(a.created_at).localeCompare(String(b.created_at)); });
+    let ck = null;
+    try {
+      const rows = await d1All('SELECT ck FROM accounts WHERE uid=? LIMIT 1', [uid]);
+      if (rows && rows[0] && rows[0].ck) ck = String(rows[0].ck);
+    } catch (e) {}
+    if (!ck) continue;
+    probed++;
+    let curLeft = null;
+    try {
+      const r = await eapiPost(ck, EAPI_PAGEINFO_URL, { checktoken: '' });
+      const d = (r && typeof r.data === 'object' && r.data) || {};
+      if (r && r.code === 200 && d.sendVipDayLeft != null) curLeft = Number(d.sendVipDayLeft);
+    } catch (e) {}
+    if (curLeft == null) continue;
+    let baseline = 0;
+    for (const t of list) baseline = Math.max(baseline, Number(t.left) || 0);
+    let deficit = baseline - curLeft;
+    for (const t of list) {
+      if (deficit <= 0) break;
+      const days = Math.min(deficit, EAPI_RESERVE_DAYS);
+      t.status = 'redeemed_inferred';
+      t.redeemed_at_inferred = nowBj;
+      t.days_gifted = days;
+      deficit -= days;
+      changed = true;
+    }
+  }
+  return { changed: changed, probed: probed };
+}
 
+/* ============================================================================
+   号体检云版 helper（2026-11-25）：口径与本地 acc_health.py 逐条对齐。
+   时区：snapshots.at / runs.at = UTC ISO（+8 转北京显示）；accounts.added = 北京直接读。
+   ============================================================================ */
+function hcBJ(s) {
+  if (!s) return null;
+  const t = Date.parse(String(s).replace(' ', 'T').replace(/(\.\d+)?Z?$/, function (m, frac) { return (frac || '') + 'Z'; }));
+  if (isNaN(t)) return null;
+  const d = new Date(t + 8 * 3600 * 1000);
+  const p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return { ms: t, str: p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate()) + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) };
+}
+function hcDayBJ(offsetDays) {
+  const d = new Date(Date.now() + 8 * 3600 * 1000 + (offsetDays || 0) * 86400000);
+  const p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
+}
+function hcTf(v) { return v === true ? '是(True)' : v === false ? '否(False)' : String(v); }
+const HC_KIND_CN = { reg: 'reg(登记成功通知)', songchange: 'songchange(自动换歌)', songfix: 'songfix(共创冻结处置)',
+  songfix2: 'songfix2(独唱冻结处置)', songfix3: 'songfix3(绑错歌/查无此歌处置)', 'notify-dead': 'notify-dead(删号通知)', feenote: 'feenote(收费口径说明)' };
+const HC_DEAD_CN = { cookie_invalid: 'CK 失效（cookie 无效判死）', expired_pub: '公益号到期清理', manual: '管理员手动删号' };
+const HC_STATE_CN = { sent: '已发出', claimed: '发送中', pending: '排队中', dropped: '已放弃(连败3次)', skipped: '已跳过', skip_returned: '已回池·不发', skip_noemail: '无邮箱·不发' };
+function hcCmpOk(at1, at2, tol) {
+  const a = hcBJ(at1), b = hcBJ(at2);
+  if (!a || !b) return false;
+  const d = Math.abs(a.ms - b.ms) / 3600000;
+  return d <= (tol || 3) || d >= 24 - (tol || 3);
+}
+function hcStreak(hist) {
+  const pts = Object.keys(hist).sort().filter(function (d) { return hist[d].rate != null; });
+  let n = 0;
+  for (let i = pts.length - 1; i > 0; i--) {
+    if (hist[pts[i]].rate < 100 && hist[pts[i]].rate <= hist[pts[i - 1]].rate) n++; else break;
+  }
+  return n;
+}
+function hcActDesc(act) {
+  const t = String(act.created_at || '').slice(0, 16);
+  if (act.kind === 'songchange') {
+    let s = t + ' 自动换歌：旧歌' + (act.old_song || '') + '→新歌' + (act.new_song || '');
+    if (act.not_mine) s += '（旧歌非本人作品）';
+    return s;
+  }
+  return { songfix: t + ' 共创冻结邮件已发(songfix)', songfix2: t + ' 独唱冻结邮件已发(songfix2)',
+    songfix3: t + ' 绑错歌/查无此歌处置(songfix3)' }[act.kind] || (t + ' ' + act.kind);
+}
+// 标记复算（acc_health.py compute_marks 逐条对齐，2026-11-11 核对过的口径）
+function hcMarks(e, a, p, hist, today) {
+  const marks = [];
+  const rpcD = (a && p && a.rpc30 != null && p.rpc30 != null) ? (a.rpc30 - p.rpc30) : null;
+  const addedDay = e && e.added ? String(e.added).slice(0, 10) : '';
+  const sgn = function (v) { return (v > 0 ? '+' : '') + v; };
+  if (a && a.rate == null && e && e.song && !e.pub && addedDay && addedDay < today) {
+    marks.push({ name: '无650任务', cls: 'b-gray', desc: '后台没返回 650 任务：可能不是音乐人、没报名该任务或歌曲未过审，让号主去音乐人后台确认' });
+  } else if (a && a.rate == null && e && e.song && !e.pub && addedDay === today) {
+    marks.push({ name: '今日入池·无快照', cls: 'b-gray', desc: '今天才登记的新号，明天才进轮转，650 进度是空的属正常' });
+  }
+  if (a && a.rate != null) {
+    if (a.rate >= 100) marks.push({ name: '已达100%', cls: 'b-green', desc: '本周期 650 已做满，等下个 31 天周期自动归零重爬，不用管' });
+    const hasCycle = a.rate === 0 && (a.rpc30 || 0) >= 650;
+    const netLoss = (!hasCycle && p && a.rate <= p.rate && rpcD != null && rpcD <= 0 && (a.rpc30 || 0) >= 100 && hcCmpOk(a.at, p.at));
+    if (p && p.rate != null && a.rate < 100) {
+      const same = a.rate === p.rate;
+      if (hasCycle) marks.push({ name: '有播放·650为0', cls: 'b-orange', desc: '播放量已有 ' + a.rpc30 + ' 次但 650 进度 0%。多半是快照早于结算；实时复核仍 0% 且连续 8 天以上才是任务不再统计播放' });
+      else if (netLoss) marks.push({ name: '近30日净增≤0', cls: 'b-yellow', desc: '近30日播放今天没涨或略降（差 ' + sgn(rpcD) + '），650 也没涨：今天补的播放被 30 天前老播放到期退出抵掉，偶发正常' });
+      else if (same && rpcD != null && rpcD > 0) marks.push({ name: '650未结算', cls: 'b-yellow', desc: '650 进度与昨天一样（' + a.rate + '%），但播放量在涨（' + sgn(rpcD) + '）：播放已入账、网易分批结算还没滚到 650，停 1~2 天属正常' });
+      else if (same) marks.push({ name: '今日零增长', cls: 'b-yellow', desc: '650 进度和昨天完全一样，播放量也没涨。先观察 2~3 天；连续 3 天以上且实时复核仍 0% 再人工查' });
+    }
+    if (a.rate < 100) {
+      const st = hcStreak(hist);
+      if (st >= 2) marks.push({ name: '连续' + st + '天未涨', cls: 'b-yellow', desc: '650 进度连续多天没涨，先看播放量在涨还是跌' });
+    }
+  } else if (!a) {
+    marks.push({ name: '采集缺失', cls: 'b-gray', desc: '今天这一轮没采到该号快照（接口超时或号没跑），偶尔一次不用管；连续几天要查' });
+  }
+  return { marks: marks, rpcD: rpcD };
+}
+// 结论引擎（acc_health.py verdict 逐分支对齐）
+function hcVerdict(e, hist, a, p, marks, live, owner, rpcD, actions) {
+  const rateT = a ? a.rate : null;
+  const rateY = p ? p.rate : null;
+  let daysIn = null;
+  if (e.added) {
+    const t = Date.parse(String(e.added).slice(0, 19).replace(' ', 'T') + '+08:00');
+    if (!isNaN(t)) daysIn = Math.floor((Date.now() + 8 * 3600 * 1000 - t) / 86400000);
+  }
+  const lines = [];
+  const L = function (s) { lines.push(s); return lines.join(' '); };
+  // ① 快照 0% 但实时已涨 → 结算窗口
+  if (live && live.alive && live.rate != null && rateT === 0 && live.rate > 0) {
+    return L('①快照里 650 是 0%，但刚刚实时查工作台已经是 ' + live.rate + '%：这一轮快照采在网易结算之前（结算窗口实测到 11:30~12:00），不是掉量也不是周期问题，不用管。');
+  }
+  // ①b 快照没有 650 数据
+  if (rateT == null) {
+    if (rateY != null) {
+      const extra = rateY >= 100 ? '且昨天已 100% 做满，本周期任务已完成，等 31 天换期归零即可，'
+        : (rateY ? '最近一次进度 ' + rateY + '%，' : '最近一次进度 0%（周期刚换期归零），');
+      return L('②今天快照缺该号数据（【3】已标采集缺失——接口超时或当轮没跑），' + extra + '今天没采到≠任务没了，明天快照恢复自动接上。偶尔缺失不用管，连续 2 天缺失再查。');
+    }
+    const isMus = (live || {}).isMusician;
+    const hasOpen = (live || {}).hasOpen;
+    const canOpen = (live || {}).canOpen;
+    if (isMus === false) return L('②实时复核显示该号【不是音乐人】（isMusician=False）：650 任务无从谈起。如果登记歌确实能听，多半歌挂在别人名下或买家拿的是普通用户号——找买家核实账号身份，要么换号要么退款。');
+    if (hasOpen === false && canOpen === false) {
+      const pub = (owner || {}).publishTime;
+      if (pub) {
+        const pd = Date.parse(pub + 'T00:00:00+08:00');
+        if (!isNaN(pd)) {
+          const since = Math.floor((Date.now() + 8 * 3600 * 1000 - pd) / 86400000);
+          if (since >= 90) return L('②该号是音乐人但还在实习期未转正（status=0、canOpen=False）。登记歌发行于 ' + pub + '（约 ' + since + ' 天前），身份早已超过官方 90 天实习期却仍未转正——说明转正不是纯时间驱动，可能卡在号主侧的认证/签约/操作上，让号主上音乐人后台查实习任务/认证状态并主动完成。');
+          const left = 90 - since;
+          const will = new Date(Date.now() + 8 * 3600 * 1000 + left * 86400000).toISOString().slice(0, 10);
+          return L('②该号是音乐人但还在实习期未转正（status=0、canOpen=False）：登记歌发行于 ' + pub + '（约 ' + since + ' 天前），按 90 天实习期估算最早约 ' + will + ' 前后才可能转正（以歌发行时间旁证，仅粗估）。转正后号主在后台开通特殊权益，650 才开始计；此前的 650 做不满属预期内，无需处理，也别急着换歌。');
+        }
+      }
+      return L('②该号是音乐人但还在实习期未转正（status=0、canOpen=False），特殊权益当前开不了。按官方 90 天实习期，等转正后在音乐人后台开通特殊权益，650 进度才开始计；此前 650 做不满属预期内，无需处理。');
+    }
+    if (hasOpen === false && canOpen === true) return L('②快照和实时复核都没有 650 任务：该号音乐人身份在、已满足开通条件（canOpen=True），只是没去开通——让号主去音乐人后台开通「特殊权益/进阶任务」，开通后进度从 0 开始爬。');
+    return L('②快照里网易没返回 650 任务进度（可能是非音乐人、没报名任务）：让号主去音乐人后台确认任务状态。注意近30日播放量照常在跑，只是不计入 650。');
+  }
+  // ② 新号爬坡期
+  const newAcc = daysIn != null && daysIn <= 2;
+  const liveHasProgress = (live && live.alive && (live.rate || 0) > 0);
+  if (newAcc && (rateT == null || (rateT || 0) > 0 || liveHasProgress)) {
+    return L('②该号 ' + String(e.added).slice(0, 10) + ' 才登记（入池 ≤2 天）：新号前两三天 650 进度低是正常爬坡，快照少/进度空都不用查，先看到第 3~4 天。');
+  }
+  const prefix = newAcc && live && live.alive ? '②该号才登记不久（≤2 天），但快照和实时复核都是 0%：'
+    : (newAcc ? '②该号才登记不久（≤2 天），快照也是 0%：' : '');
+  // ③ 已做满
+  if (rateT != null && rateT >= 100) return L('③本周期 650 已达 ' + rateT + '%：做满了，继续刷也不会有额外收益，等 31 天周期换期自动归零。');
+  // ④a/④b 冻结处置联动
+  const acts = actions || [];
+  const cutoff3 = new Date(Date.now() + 8 * 3600 * 1000 - 3 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+  const cool = acts.filter(function (x) { return String(x.created_at || '') >= cutoff3; });
+  if (rateT != null && rateT < 100 && acts.length && !cool.length) {
+    const last = acts[0];
+    if (last.kind !== 'songchange') return L('④a该号 ' + hcActDesc(last) + '，但目标歌至今未换（号主未响应）：冻结歌播多久都不会涨，继续观察没有意义——需人工跟进催号主换本人原创独唱，或走无候选号的兜底处置。');
+  }
+  if (rateT != null && rateT < 100 && cool.length) {
+    return L('④b该号近 3 天刚做过冻结歌处置（' + hcActDesc(cool[0]) + '）：旧歌冻结期间的 650 读数不会回补，换歌后网易的有效认定有 1~2 天滞后，播放量在涨说明号本身正常。判断点=后 1~2 天快照：开始爬即结案；若播放量继续涨而 650 连续 2 天仍 0%，冷却期（3 天）过后系统会再次自动判定，期间不用人工重复换歌。');
+  }
+  // ④ 周期换期归零
+  if (rateT === 0 && rateY != null && rateY >= 10) return L('④昨天还有 ' + rateY + '%、今天 0%：这是 31 天任务周期换期归零（近期全池批量出现），不是播放失效，换期后从 0 重新爬即可，不用管。');
+  // ⑤ 结算延迟（快照口径）
+  if (rateT === rateY && rpcD != null && rpcD > 0) return L('⑤650 进度与昨天持平（' + rateT + '%）但播放量在涨（' + (rpcD > 0 ? '+' : '') + rpcD + ' 次）：播放已入账，网易分批结算还没滚到 650（入账窗口实测持续到 11:30~12:00）。停 1~2 天属正常节奏，连续 3 天以上播放涨而 650 不动才人工查。');
+  // ⑥ 真零增长 / 卡 0%
+  if (rateT === rateY && rpcD != null && rpcD <= 0) {
+    const st = hcStreak(hist);
+    let back = '';
+    const o14 = Object.keys(hist).sort().filter(function (d) { return hist[d].rpc30 != null; }).map(function (d) { return hist[d].rpc30; });
+    if (o14.length >= 2 && o14[0] && o14[o14.length - 1] > o14[0]) {
+      const avg = Math.round((o14[o14.length - 1] - o14[0]) / Math.max(1, o14.length - 1));
+      if (avg > 0) back = '该号近 ' + (o14.length - 1) + ' 天平均每天净涨约 ' + avg + ' 次，今天净变化 ' + rpcD + ' 次，差额约 ' + Math.max(0, avg - rpcD) + ' 次是 30 天前老播放到期退出抵掉的。';
+    }
+    L((prefix || '⑥') + '650 进度连续持平（' + rateT + '%），播放量也没涨（' + rpcD + ' 次）。' + back);
+    if (rateT === 0 && (a.rpc30 || 0) >= 650) {
+      L('播放量已过 650 次但进度 0%：多为快照早于结算；实时复核也 0% 且连续 8 天以上，才是任务不再统计播放（需重新报名或换号）。');
+    } else {
+      const liveZero = (live && live.alive && live.rate === 0);
+      const livePos = (live && live.alive && (live.rate || 0) > 0);
+      if (liveZero && st >= 2) L('已连续 ' + (st + 1) + ' 天未涨且实时复核仍 0%（结算窗口后）：达到人工干预门槛——建议查播放有效性（是否被网易判无效），必要时换目标歌或让号主重新报名 650 任务。');
+      else if (livePos && rpcD <= 0) L('连续 ' + (st + 1) + ' 天进度没涨，但播放量在跌、实时复核仍有 ' + live.rate + '%：这是 30 天滚动回吐（老播放到期退出）把进度涨幅吃平了，属自然衰减不用管；播放量连续 3 天以上在涨而进度完全不动才需要人工查。');
+      else if (st >= 4 && rpcD != null && rpcD > 0) L('连续 ' + (st + 1) + ' 天进度没涨且播放量在涨：播放被判无效的可能性大（实时复核 ' + live.rate + '%），超过 4 天了，建议人工查——换目标歌或让号主重新报名 650 任务。');
+      else L('目前连续 ' + (st + 1) + ' 天未涨，还没到人工门槛：先观察 2~3 天再实时复核一次；期间 CK 活、笔记任务正常跑就先不动。');
+    }
+    return lines.join(' ');
+  }
+  // ⑦ 正常
+  if (rateT != null && rateY != null && rateT > rateY) {
+    const rd = rateT - rateY;
+    const rdS = Number.isInteger(rd) ? ((rd > 0 ? '+' : '') + rd + '%') : ((rd > 0 ? '+' : '') + rd + '%');
+    return L('⑦650 进度正常爬坡（昨天 ' + rateY + '% → 今天 ' + rateT + '%，' + rdS + '），播放量变化 ' + rpcD + ' 次，一切正常，不用管。');
+  }
+  return L('⑦数据不足以给出确定结论（快照缺失或字段异常），建议明天快照出来后再看一天。');
+}
+// 目标歌归属（公开 API，无需 CK；与 acc_health.py song_owner 同源）
+async function hcSongOwner(songId) {
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
+  try {
+    const r = await fetch('https://music.163.com/api/song/detail?id=' + songId + '&ids=[' + songId + ']', { headers: { 'User-Agent': UA } });
+    const j = await r.json();
+    const d = ((j.songs || [])[0]) || {};
+    const out = { name: d.name || '', artists: [], publishTime: null };
+    if (d.album && d.album.publishTime) out.publishTime = new Date(d.album.publishTime).toISOString().slice(0, 10);
+    for (const a of (d.artists || [])) {
+      const art = { id: a.id, name: a.name, accountId: null };
+      try {
+        const ra = await fetch('https://music.163.com/api/artist/' + a.id, { headers: { 'User-Agent': UA } });
+        const ja = await ra.json();
+        art.accountId = ja.artist && ja.artist.accountId != null ? String(ja.artist.accountId) : null;
+      } catch (e2) {}
+      out.artists.push(art);
+    }
+    return out;
+  } catch (e) { return { error: String(e && e.message).slice(0, 80) }; }
+}
 // 死号流水写 D1（2026-10-22 新增）：KV 里的 dead_log 只是「墓碑名单」，最多 500 条、只存键名，
 // 看不出是谁、什么时候、因为什么被清理。D1 dead_log 表存完整流水，供周报统计与事后追查。
 async function d1LogDead(entries, reason) {
@@ -7303,9 +7545,14 @@ async function handle(request) {
       const scan = await eapiVipScan(8);
       const tokens = await eapiVipTokens();
       if (scan.error) return json({ ok: false, message: scan.error }, 503);
+      const rs = await eapiVipRedeemSync(tokens);
+      if (rs.changed) { try { await POOL.put('vip_cloud_tokens', JSON.stringify(tokens.slice(0, 200))); } catch (e) {} }
       return json({ ok: true, probed: scan.probed, dead: scan.dead, poolSize: scan.poolSize,
         eligible: scan.eligible.map(function (e) { return { uid: e.uid, name: e.name, pool: e.pool, vipLevel: e.vipLevel, left: e.left, total: e.total }; }),
-        tokens: tokens.slice(0, 12), totalTokens: tokens.length }, 200, { 'Cache-Control': 'no-store' });
+        tokens: tokens.slice(0, 12).map(function (t) { return { created_at: t.created_at, donor_uid: t.donor_uid, donor_name: t.donor_name,
+          vip_level: t.vip_level, short_url: t.short_url, link: t.link, status: t.status || 'created',
+          days_gifted: t.days_gifted || 0, redeemed_at: t.redeemed_at_inferred || '', month: t.month || '' }; }),
+        totalTokens: tokens.length }, 200, { 'Cache-Control': 'no-store' });
     }
     if (url.pathname === '/api/vipcloud/take' && request.method === 'POST') {
       let bVt;
@@ -7321,45 +7568,144 @@ async function handle(request) {
       if (!(await consoleAuthFull({ user: 'xx1031', pass: (bHc && bHc.pass) || '' }))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
       const keyHc = String(bHc.key || '').trim();
       if (!keyHc) return json({ ok: false, message: '请输入 uid / 手机号 / 邮箱' }, 400);
+      if (keyHc === '__probe__') return json({ ok: true, probe: true }, 200, { 'Cache-Control': 'no-store' });
       if (!d1ok()) return json({ ok: false, message: 'D1 不可用' }, 503);
-      const rowsHc = await d1All(
-        'SELECT uid,name,ck,pool,email,added,exp,note,suspect_at,relogin_at,no_listen,song,source FROM accounts WHERE uid=? OR name=? OR email=? LIMIT 5',
-        [keyHc, keyHc, keyHc]);
-      if (!rowsHc) return json({ ok: false, message: 'D1 查询失败' }, 503);
-      if (!rowsHc.length) return json({ ok: false, message: '库里没找到这个号（支持 uid / 手机号 / 邮箱）' }, 404);
-      const rowHc = rowsHc.find(function (r) { return String(r.uid) === keyHc; }) || rowsHc[0];
-      const base = { uid: rowHc.uid, name: rowHc.name, pool: rowHc.pool, email: rowHc.email || '',
-        added: rowHc.added, exp: rowHc.exp, note: rowHc.note || '', suspect_at: rowHc.suspect_at || '',
-        relogin_at: rowHc.relogin_at || '', no_listen: rowHc.no_listen, song: rowHc.song || '', source: rowHc.source || '' };
-      if (!rowHc.ck) return json({ ok: true, alive: null, text: '库里无 CK（未登记 Cookie），只能看到档案', base: base });
-      let live = {};
-      try {
-        const rP = await eapiPost(String(rowHc.ck), EAPI_PAGEINFO_URL, { checktoken: '' });
-        const dP = (rP && typeof rP.data === 'object' && rP.data) || {};
-        live.pageCode = (rP && rP.code) || -1;
-        if (rP && rP.code === 200) {
-          live.alive = true;
-          live.vipLevel = Number(dP.vipLevel || 0);
-          live.canSendVip = Number(dP.canSendVip || 0);
-          live.giftLeft = Number(dP.sendVipDayLeft || 0);
-          live.giftTotal = Number(dP.sendVipDayTotal || 0);
-        } else {
-          live.alive = false;
-          live.pageCode = (rP && rP.code) || -1;
+      const accsHc = await d1All('SELECT * FROM accounts WHERE name=? OR uid=? ORDER BY pool', [keyHc, keyHc]);
+      if (!accsHc) return json({ ok: false, message: 'D1 查询失败' }, 503);
+      /* —— 查无此号 → 死号历史回捞（acc_health.py dead_history 口径：删号后 accounts 无行是设计）—— */
+      if (!accsHc.length) {
+        const dh = await Promise.all([
+          d1All('SELECT pool,uid,name,reason,at FROM dead_log WHERE name=? OR uid=? ORDER BY at DESC', [keyHc, keyHc]),
+          d1All('SELECT pool,uid,email,removed_at,sent_at,state,skip_reason,kind FROM dead_notice WHERE name=? OR uid=? ORDER BY removed_at DESC LIMIT 10', [keyHc, keyHc]),
+          d1All('SELECT day,agent,plan,price,days,start,exp,remark FROM ledger WHERE name=? OR uid=? ORDER BY day DESC LIMIT 10', [keyHc, keyHc]),
+          d1All('SELECT kind,state,created_at,sent_at,skip_reason FROM mail_queue WHERE name=? OR uid=? ORDER BY created_at DESC LIMIT 20', [keyHc, keyHc]),
+        ]);
+        if (!dh[0] || !dh[1] || !dh[2] || !dh[3]) return json({ ok: false, message: 'D1 查询失败' }, 503);
+        const uidSet = {};
+        for (const r of dh[0].concat(dh[1])) if (r.uid) uidSet[String(r.uid)] = 1;
+        const uidList = Object.keys(uidSet).slice(0, 5);
+        let dhSnaps = [], dhRuns = [];
+        if (uidList.length) {
+          dhSnaps = await d1All('SELECT day,rate,rpc30,at,pool,uid FROM snapshots WHERE name=? OR uid IN (' + uidList.map(function () { return '?'; }).join(',') + ') ORDER BY day DESC LIMIT 14', [keyHc].concat(uidList));
+          if (dhSnaps === null) dhSnaps = [];
+          else if (dhSnaps.length) {
+            dhRuns = await d1All('SELECT day,slice,at FROM runs WHERE pool=? AND uid=? AND day>=? ORDER BY day', [dhSnaps[0].pool, dhSnaps[0].uid, hcDayBJ(-14)]);
+            if (dhRuns === null) dhRuns = [];
+          }
         }
-      } catch (e) { live.alive = null; live.err = String(e && e.message).slice(0, 80); }
-      try {
-        const rM = await eapiPost(String(rowHc.ck), EAPI_MUSICIAN_URL, {});
-        const dM = (rM && typeof rM.data === 'object' && rM.data) || {};
-        if (rM && rM.code === 200) {
-          live.rpc30 = dM.recentPlayCount30;
-          live.isMusician = dM.isMusician;
-          const kids = ((dM.furtherTask || {}).children) || [];
-          const play = kids.find(function (k) { return k.missionCode === 'mission_code_recently_play_effect_count_v2'; }) || {};
-          live.rate = play.progressRate;
+        return json({ ok: true, dead: true, key: keyHc,
+          deads: dh[0].map(function (r) { return { pool: r.pool, uid: r.uid, reason: r.reason, reason_cn: HC_DEAD_CN[r.reason] || r.reason, at: r.at }; }),
+          notices: dh[1], ledger: dh[2], mails: dh[3],
+          snaps: dhSnaps.map(function (r) { const b = hcBJ(r.at); return { day: r.day, rate: r.rate, rpc30: r.rpc30, at_bj: b ? b.str : String(r.at || ''), pool: r.pool }; }),
+          runs: dhRuns.map(function (r) { const b = hcBJ(r.at); return { day: r.day, slice: r.slice, at_bj: b ? b.str : '' }; }) }, 200, { 'Cache-Control': 'no-store' });
+      }
+      const rowHc = accsHc.find(function (r) { return String(r.uid) === keyHc; }) || accsHc[0];
+      const egMap = { home_browser: '笔记本真浏览器出码(新链路·bridge)', home_relay: '家宽转发·服务端轮询出码(老链路·毒源)' };
+      const mtMap = { link_qr: '链接扫码', manual_import: '客服EXE+验证码', manual_qr: '客服EXE扫码' };
+      const base = { uid: rowHc.uid, name: rowHc.name, pool: rowHc.pool, email: rowHc.email || '', added: rowHc.added || '',
+        exp: rowHc.exp || '', agent: rowHc.agent || '', plan: rowHc.plan || '', pub: !!rowHc.pub, rb: Number(rowHc.rb || 0),
+        suspect_at: rowHc.suspect_at || '', relogin_at: rowHc.relogin_at || '', no_listen: rowHc.no_listen,
+        song: rowHc.song || '', source: rowHc.source || '', note: rowHc.note || '', updated_at: rowHc.updated_at || '',
+        registration_method: rowHc.registration_method || '', login_egress: rowHc.login_egress || '',
+        reg_method_cn: mtMap[rowHc.registration_method] || (rowHc.registration_method || '未记录'),
+        egress_cn: egMap[rowHc.login_egress] || ('未记录(' + (rowHc.login_egress || '-') + ')'),
+        era_warn: rowHc.login_egress === 'home_relay' };
+      const todayHc = hcDayBJ(0);
+      const qr = await Promise.all([
+        d1All('SELECT day,rate,rpc30,at,missions FROM snapshots WHERE pool=? AND uid=? AND day>=? ORDER BY day', [rowHc.pool, rowHc.uid, hcDayBJ(-14)]),
+        d1All('SELECT day,slice,at FROM runs WHERE pool=? AND uid=? AND day>=? ORDER BY day', [rowHc.pool, rowHc.uid, hcDayBJ(-14)]),
+        d1All('SELECT day,agent,plan,price,days,start,exp,rb,remark,src FROM ledger WHERE pool=? AND (uid=? OR name=?) ORDER BY day DESC LIMIT 10', [rowHc.pool, rowHc.uid, rowHc.name]),
+        d1All('SELECT kind,ref,state,created_at,claimed_at,sent_at,skip_reason FROM mail_queue WHERE pool=? AND uid=? ORDER BY created_at DESC LIMIT 20', [rowHc.pool, rowHc.uid]),
+        d1All('SELECT kind,state,removed_at,sent_at,skip_reason FROM dead_notice WHERE pool=? AND (uid=? OR name=?) ORDER BY removed_at DESC LIMIT 10', [rowHc.pool, rowHc.uid, rowHc.name]),
+        d1All('SELECT reason,at FROM dead_log WHERE pool=? AND (uid=? OR name=?) ORDER BY at DESC LIMIT 5', [rowHc.pool, rowHc.uid, rowHc.name]),
+      ]);
+      if (!qr[0] || !qr[1] || !qr[2] || !qr[3] || !qr[4] || !qr[5]) return json({ ok: false, message: 'D1 查询失败' }, 503);
+      const snapsHc = qr[0], runsHc = qr[1], ledHc = qr[2], mailsHc = qr[3], noticesHc = qr[4], deadsHc = qr[5];
+      // 冻结歌处置记录（近 14 天 songchange/songfix*；created_at=北京 naive，字符串直接比）
+      const cut14Str = new Date(Date.now() + 8 * 3600 * 1000 - 14 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+      const actionsHc = [];
+      for (const m of mailsHc) {
+        if (['songchange', 'songfix', 'songfix2', 'songfix3'].indexOf(m.kind) < 0) continue;
+        if (String(m.created_at || '') < cut14Str) continue;
+        const ref = String(m.ref || '').split(':');
+        actionsHc.push({ kind: m.kind, created_at: m.created_at, old_song: ref[0] || '', new_song: ref[1] || '', not_mine: ref.length > 2 && ref[2].indexOf('B') >= 0 });
+      }
+      const actByDay = {};
+      for (const act of actionsHc) {
+        const d10 = String(act.created_at || '').slice(0, 10);
+        if (d10) (actByDay[d10] = actByDay[d10] || []).push(hcActDesc(act));
+      }
+      // 快照走势 + 笔记进度（missions JSON）
+      const hist = {};
+      const snapsOut = [], noteRows = [];
+      for (const r of snapsHc) {
+        const b = hcBJ(r.at);
+        hist[r.day] = { rate: r.rate, rpc30: r.rpc30, at: r.at };
+        const row = { day: r.day, rate: r.rate, rpc30: r.rpc30, at_bj: b ? b.str : String(r.at || ''), notes: actByDay[r.day] || [] };
+        let mis = {};
+        try { mis = r.missions ? JSON.parse(r.missions) : {}; } catch (e) { mis = {}; }
+        const nv = mis['mission_code_musician_notebook_publish'];
+        if (nv != null) {
+          const v = parseInt(nv, 10);
+          if (!isNaN(v)) {
+            const prev = noteRows.length ? noteRows[noteRows.length - 1].v : null;
+            let noteTxt = '';
+            if (prev != null) {
+              if (v === prev + 1) noteTxt = '当天发过笔记（+1 天）';
+              else if (v > prev) noteTxt = '补涨 +' + (v - prev) + '（中间有快照没采到）';
+              else if (v < prev) noteTxt = '进度回落（30 天窗口滚动，老的天数过期退出）';
+            }
+            noteRows.push({ day: r.day, v: v, note: noteTxt });
+          }
         }
-      } catch (e) {}
-      return json({ ok: true, base: base, live: live }, 200, { 'Cache-Control': 'no-store' });
+        snapsOut.push(row);
+      }
+      const aHc = snapsHc.find(function (r) { return r.day === todayHc; }) || null;
+      const pHc = snapsHc.find(function (r) { return r.day === hcDayBJ(-1); }) || null;
+      const runDays = {};
+      for (const r of runsHc) runDays[r.day] = 1;
+      const missed = snapsHc.map(function (r) { return r.day; }).filter(function (d) { return !runDays[d]; });
+      // 实时复核（page/info + musician + 赠送资格，只读 2~3 次）
+      let live = { alive: null };
+      let gift = null;
+      if (rowHc.ck) {
+        try {
+          const rP = await eapiPost(String(rowHc.ck), EAPI_PAGEINFO_URL, { checktoken: '' });
+          const dP = (rP && typeof rP.data === 'object' && rP.data) || {};
+          if (rP && rP.code === 200) {
+            live.alive = true;
+            gift = { vipLevel: Number(dP.vipLevel || 0), canSendVip: Number(dP.canSendVip || 0),
+              left: Number(dP.sendVipDayLeft || 0), total: Number(dP.sendVipDayTotal || 0) };
+          } else { live.alive = false; live.pageCode = (rP && rP.code) || -1; }
+        } catch (e) { live.alive = null; live.err = String(e && e.message).slice(0, 80); }
+        if (live.alive === true) {
+          try {
+            const rM = await eapiPost(String(rowHc.ck), EAPI_MUSICIAN_URL, {});
+            const dM = (rM && typeof rM.data === 'object' && rM.data) || {};
+            if (rM && rM.code === 200) {
+              const kids = ((dM.furtherTask || {}).children) || [];
+              const play = kids.find(function (k) { return k.missionCode === 'mission_code_recently_play_effect_count_v2'; }) || {};
+              const noteM = kids.find(function (k) { return k.missionCode === 'mission_code_musician_notebook_publish'; }) || {};
+              live.rate = play.progressRate; live.rpc30 = dM.recentPlayCount30;
+              live.taskStatus = dM.taskStatus; live.isMusician = dM.isMusician;
+              live.hasOpen = dM.hasOpen; live.canOpen = dM.canOpen; live.status = dM.status;
+              live.maintainDays = dM.maintainDays; live.unlockVipRight = dM.unlockVipRight;
+              live.missionStatus = play.missionStatus; live.noteProgress = noteM.progressRate;
+            }
+          } catch (e) {}
+        }
+      }
+      // 目标歌归属 + 标记复算 + 结论
+      const ownerHc = rowHc.song ? await hcSongOwner(rowHc.song) : null;
+      const mk = hcMarks({ added: rowHc.added, song: rowHc.song, pub: rowHc.pub }, aHc, pHc, hist, todayHc);
+      const verdictHc = hcVerdict({ added: rowHc.added }, hist, aHc, pHc, mk.marks, live.alive === true ? live : null, ownerHc, mk.rpcD, actionsHc);
+      return json({ ok: true, base: base, live: live, gift: gift,
+        snaps: snapsOut,
+        runs: runsHc.map(function (r) { const b = hcBJ(r.at); return { day: r.day, slice: r.slice, at_bj: b ? b.str : '' }; }),
+        missed: missed, marks: mk.marks,
+        ledger: ledHc, mails: mailsHc, notices: noticesHc,
+        deads: deadsHc.map(function (r) { return { reason: r.reason, reason_cn: HC_DEAD_CN[r.reason] || r.reason, at: r.at }; }),
+        noteRows: noteRows, owner: ownerHc, verdict: verdictHc }, 200, { 'Cache-Control': 'no-store' });
     }
     /* 2026-11-24 控制台→签到管理页免口令交接（用户强制要求，永久生效）：
        控制台满权限点「签到管理」→ 先调 /api/sign/handoff 领一张一次性票据（KV 存 120 秒），
@@ -13362,9 +13708,9 @@ loadGroup();
 </html>`;
 
 /* 2026-11-25 云端 VIP 赠送页（换电脑/手机可用，鉴权走票据或满权限口令） */
-const VIPCLOUD_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VIP 赠送池（云版）</title><style>body{font-family:-apple-system,system-ui,"PingFang SC",sans-serif;background:#f5f6f8;margin:0;padding:24px 12px;display:flex;flex-direction:column;align-items:center;gap:14px}.box{background:#fff;padding:20px;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:900px;box-sizing:border-box}h1{font-size:18px;margin:0 0 4px;color:#7c3aed}p.sub{font-size:13px;color:#666;margin:0 0 14px}input{padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px}button{padding:9px 16px;border:0;border-radius:8px;background:#7c3aed;color:#fff;font-size:14px;cursor:pointer}button:disabled{opacity:.5;cursor:default}button.gray{background:#888}table{border-collapse:collapse;width:100%;font-size:13px}th{background:#f5f6f8;text-align:left;padding:8px;color:#444;border-bottom:1px solid #eee}td{padding:7px 8px;border-bottom:1px solid #f2f2f2;word-break:break-all}.stat{display:inline-block;background:#f5f0ff;border-radius:10px;padding:8px 14px;margin:0 8px 8px 0;text-align:center}.stat b{display:block;font-size:18px;color:#7c3aed}.stat span{font-size:12px;color:#666}.msg{font-size:13px;color:#a32d2d;margin-top:8px}.ok{color:#3b6d11}.lnk{color:#7c3aed;word-break:break-all}.copy{background:#5b21b6;padding:5px 10px;font-size:12px;border-radius:6px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}select{padding:9px;border:1px solid #ddd;border-radius:8px;font-size:14px}</style></head><body><div class="box"><h1>🎁 VIP 赠送池（云版）</h1><p class="sub">数据在云端：换电脑、手机都能打开。发卡时现场扫描池内号 → 复核官方额度 → 生成邀请卡链接。与本地版同口径（绝不代领）。</p><div id="authBox"><div class="row"><input id="pw" type="password" placeholder="满权限控制台口令" style="flex:1;min-width:200px"><button id="btnAuth">进入</button></div><div class="msg" id="authMsg"></div></div></div><div class="box" id="mainBox" style="display:none"><div><span class="stat"><b id="stProbed">-</b><span>本次扫描</span></span><span class="stat"><b id="stElig">-</b><span>现场合格</span></span><span class="stat"><b id="stTotal">-</b><span>历史发卡</span></span><span class="stat"><b id="stPool">-</b><span>候选池</span></span></div><div class="row" style="margin:10px 0"><select id="nSel"><option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option></select><button id="btnTake">生成赠送链接</button><button class="gray" id="btnRef">刷新状态</button></div><div id="giftOut"></div><h3 style="font-size:14px;margin:16px 0 6px;color:#444">现场合格号（可直接用作 donor）</h3><div id="eligBox" style="font-size:13px;color:#666">（未扫描）</div><h3 style="font-size:14px;margin:16px 0 6px;color:#444">最近发出的卡</h3><div style="overflow-x:auto"><table id="tokT"><thead><tr><th>时间</th><th>donor</th><th>V级</th><th>短链</th><th>长链</th><th>操作</th></tr></thead><tbody id="tokB"><tr><td colspan="6" style="color:#999">加载中…</td></tr></tbody></table></div><div class="msg ok" id="tip"></div></div><script>var PASS='';function $(i){return document.getElementById(i)};function post(ep,b){return fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d}})})}function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}function boot(p){PASS=p;sessionStorage.setItem('vip_cloud_pass',p);$('authBox').style.display='none';$('mainBox').style.display='';refresh()}$('btnAuth').onclick=function(){$('btnAuth').disabled=true;post('/api/vipcloud/status',{pass:$('pw').value}).then(function(o){if(o.ok){boot($('pw').value)}else{$('authMsg').textContent=o.d.message||'口令错误'}}).finally(function(){$('btnAuth').disabled=false})};(function(){var m=location.hash.match(/tk=([A-Za-z0-9]+)/);var sp=sessionStorage.getItem('vip_cloud_pass');if(m){post('/api/cloud/redeem',{tk:m[1]}).then(function(o){if(o.ok){boot(o.d.pass)}else{document.getElementById('authMsg').textContent=o.d.message+'（也可直接手输口令）'}})}else if(sp){boot(sp)}})();function refresh(){$('btnRef').disabled=true;post('/api/vipcloud/status',{pass:PASS}).then(function(o){if(!o.ok){$('tip').textContent=o.d.message||'加载失败';return}var d=o.d;$('stProbed').textContent=d.probed;$('stElig').textContent=d.eligible.length;$('stTotal').textContent=d.totalTokens;$('stPool').textContent=d.poolSize;var eb='';for(var i=0;i<d.eligible.length;i++){var e=d.eligible[i];eb+='uid '+esc(e.uid)+' '+esc(e.name)+' 群'+esc(e.pool)+' V'+e.vipLevel+' 剩'+e.left+'/'+e.total+'天；'}$('eligBox').textContent=eb||('扫描 '+d.probed+' 个候选，现场无合格（失效 '+d.dead+'）');var tb='';for(var j=0;j<d.tokens.length;j++){var t=d.tokens[j];tb+='<tr><td>'+esc(t.created_at)+'</td><td>'+esc(t.donor_name||t.donor_uid)+'</td><td>V'+t.vip_level+'</td><td>'+(t.short_url?'<a href="'+esc(t.short_url)+'" target="_blank">'+esc(t.short_url)+'</a>':'-')+'</td><td><span class="lnk">'+esc(t.link)+'</span></td><td><button class="copy" data-l="'+esc(t.short_url||t.link)+'">复制</button></td></tr>'}$('tokB').innerHTML=tb||'<tr><td colspan="6" style="color:#999">本月还没发过</td></tr>';Array.prototype.forEach.call(document.querySelectorAll('.copy'),function(b){b.onclick=function(){navigator.clipboard.writeText(b.getAttribute('data-l')).then(function(){b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1200)})}})}).finally(function(){$('btnRef').disabled=false})}$('btnRef').onclick=refresh;$('btnTake').onclick=function(){$('btnTake').disabled=true;$('giftOut').innerHTML='<div style="font-size:13px;color:#666">现场扫描+复核中（约 10~40 秒，勿关页面）…</div>';post('/api/vipcloud/take',{pass:PASS,n:parseInt($('nSel').value,10)}).then(function(o){var d=o.d;if(!o.ok){$('giftOut').innerHTML='<div class="msg">❌ '+(d.message||'失败')+'</div>';return}var h='';for(var i=0;i<d.results.length;i++){var r=d.results[i];if(r.error){h+='<div class="msg">⚠ '+esc(r.error)+'</div>'}else{h+='<div class="box" style="box-shadow:none;background:#f5f0ff;margin-top:8px"><b>✅ '+esc(r.donor_name||r.donor_uid)+'（V'+r.vip_level+'）</b>，月底作废<br>短链：<a href="'+esc(r.short_url)+'" target="_blank" class="lnk">'+esc(r.short_url)+'</a> <button class="copy" data-l="'+esc(r.short_url||r.link)+'">复制短链</button><br><span class="lnk">'+esc(r.link)+'</span></div>'}}$('giftOut').innerHTML=h||'<div class="msg">❌ 现场扫描无合格号</div>';refresh()}).finally(function(){$('btnTake').disabled=false})};</script></body></html>`;
+const VIPCLOUD_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VIP 赠送池（网页版）</title><style>body{font-family:-apple-system,system-ui,"PingFang SC",sans-serif;background:#f5f6f8;margin:0;padding:24px 12px;display:flex;flex-direction:column;align-items:center;gap:14px}.box{background:#fff;padding:20px;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:960px;box-sizing:border-box}h1{font-size:18px;margin:0 0 4px;color:#7c3aed}p.sub{font-size:13px;color:#666;margin:0 0 14px;line-height:1.6}input{padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px}button{padding:9px 16px;border:0;border-radius:8px;background:#7c3aed;color:#fff;font-size:14px;cursor:pointer}button:disabled{opacity:.5;cursor:default}button.gray{background:#888}table{border-collapse:collapse;width:100%;font-size:13px}th{background:#f5f6f8;text-align:left;padding:8px;color:#444;border-bottom:1px solid #eee;white-space:nowrap}td{padding:7px 8px;border-bottom:1px solid #f2f2f2;word-break:break-all;vertical-align:middle}.stat{display:inline-block;background:#f5f0ff;border-radius:10px;padding:8px 14px;margin:0 8px 8px 0;text-align:center}.stat b{display:block;font-size:18px;color:#7c3aed}.stat span{font-size:12px;color:#666}.msg{font-size:13px;color:#a32d2d;margin-top:8px}.ok{color:#3b6d11}.lnk{color:#7c3aed;word-break:break-all}.copy{background:#5b21b6;padding:5px 10px;font-size:12px;border-radius:6px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}select{padding:9px;border:1px solid #ddd;border-radius:8px;font-size:14px}.pill{display:inline-block;padding:2px 10px;border-radius:10px;font-size:12px;background:#eef0f3;color:#666;white-space:nowrap}.pill.ok{background:#e5f3d8;color:#3b6d11;font-weight:600}.note{font-size:12px;color:#8a8f99;margin-top:6px;line-height:1.6}h3{font-size:14px;margin:18px 0 8px;color:#333}</style></head><body><div class="box"><h1>🎁 VIP 赠送池（网页版）</h1><p class="sub">与签到管理同款：数据存在云端，换电脑、手机都能打开。发卡时现场扫描池内号 → 复核官方额度 → 生成邀请卡链接。与本地版同口径（绝不代领）。</p><div id="authBox"><div class="row"><input id="pw" type="password" placeholder="满权限控制台口令" style="flex:1;min-width:200px"><button id="btnAuth">进入</button></div><div class="msg" id="authMsg"></div></div></div><div class="box" id="mainBox" style="display:none"><div><span class="stat"><b id="stProbed">-</b><span>本次扫描</span></span><span class="stat"><b id="stElig">-</b><span>现场合格</span></span><span class="stat"><b id="stTotal">-</b><span>历史发卡</span></span><span class="stat"><b id="stPool">-</b><span>候选池</span></span></div><div class="row" style="margin:10px 0"><select id="nSel"><option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option></select><button id="btnTake">生成赠送链接</button><button class="gray" id="btnRef">刷新状态</button></div><div id="giftOut"></div><h3>现场合格号（可直接用作 donor）</h3><div style="overflow-x:auto"><table><thead><tr><th>#</th><th>uid</th><th>名称</th><th>群</th><th>V级</th><th>本月剩余(天)</th><th>月总额度</th></tr></thead><tbody id="eligB"><tr><td colspan="7" style="color:#999">（未扫描）</td></tr></tbody></table></div><h3>最近发出的卡</h3><div style="overflow-x:auto"><table><thead><tr><th>时间</th><th>donor</th><th>V级</th><th>状态</th><th>短链</th><th>长链</th><th>操作</th></tr></thead><tbody id="tokB"><tr><td colspan="7" style="color:#999">加载中…</td></tr></tbody></table></div><div class="note">「已领取（推断）」的说明：网易不提供送出记录查询接口（领取人昵称、领取时间拿不到），唯一可靠信号 = donor 的本月剩余额度下降——发卡不扣额度、对方领取那一刻才扣（实测领取一张正好扣 7 天）。所以系统在每次刷新状态时复核各 donor 的剩余额度，额度降了就把该 donor 最早一张未决卡标为「已领取（推断）」；月底未领取的卡自动作废，无副作用。</div><div class="msg ok" id="tip"></div></div><script>var PASS='';function $(i){return document.getElementById(i)};function post(ep,b){return fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d}})})}function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}function boot(p){PASS=p;sessionStorage.setItem('vip_cloud_pass',p);$('authBox').style.display='none';$('mainBox').style.display='';refresh()}$('btnAuth').onclick=function(){$('btnAuth').disabled=true;post('/api/vipcloud/status',{pass:$('pw').value}).then(function(o){if(o.ok){boot($('pw').value)}else{$('authMsg').textContent=o.d.message||'口令错误'}}).finally(function(){$('btnAuth').disabled=false})};(function(){var m=location.hash.match(/tk=([A-Za-z0-9]+)/);var sp=sessionStorage.getItem('vip_cloud_pass');if(m){post('/api/cloud/redeem',{tk:m[1]}).then(function(o){if(o.ok){boot(o.d.pass)}else{document.getElementById('authMsg').textContent=o.d.message+'（也可直接手输口令）'}})}else if(sp){boot(sp)}})();function refresh(){$('btnRef').disabled=true;post('/api/vipcloud/status',{pass:PASS}).then(function(o){if(!o.ok){$('tip').textContent=o.d.message||'加载失败';return}var d=o.d;$('stProbed').textContent=d.probed;$('stElig').textContent=d.eligible.length;$('stTotal').textContent=d.totalTokens;$('stPool').textContent=d.poolSize;var eb='';for(var i=0;i<d.eligible.length;i++){var e=d.eligible[i];eb+='<tr><td>'+(i+1)+'</td><td>'+esc(e.uid)+'</td><td>'+esc(e.name)+'</td><td>'+esc(e.pool)+'</td><td><b>V'+e.vipLevel+'</b></td><td>'+e.left+'</td><td>'+e.total+'</td></tr>'}$('eligB').innerHTML=eb||'<tr><td colspan="7" style="color:#999">扫描 '+d.probed+' 个候选，现场无合格（失效 '+d.dead+'）</td></tr>';var tb='';for(var j=0;j<d.tokens.length;j++){var t=d.tokens[j];var st='';if(t.status==='redeemed_inferred'){st='<span class="pill ok" title="依据 donor 剩余额度下降推断；领取人/时间网易接口不提供">已领取（推断）'+(t.days_gifted?'·受赠'+t.days_gifted+'天':'')+'</span>'}else{st='<span class="pill" title="对方还没领取；月底未领取自动作废">未领取</span>'}tb+='<tr><td>'+esc(t.created_at)+'</td><td>'+esc(t.donor_name||t.donor_uid)+'</td><td>V'+t.vip_level+'</td><td>'+st+'</td><td>'+(t.short_url?'<a href="'+esc(t.short_url)+'" target="_blank">'+esc(t.short_url)+'</a>':'-')+'</td><td><span class="lnk">'+esc(t.link)+'</span></td><td><button class="copy" data-l="'+esc(t.short_url||t.link)+'">复制</button></td></tr>'}$('tokB').innerHTML=tb||'<tr><td colspan="7" style="color:#999">本月还没发过</td></tr>';Array.prototype.forEach.call(document.querySelectorAll('.copy'),function(b){b.onclick=function(){navigator.clipboard.writeText(b.getAttribute('data-l')).then(function(){b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1200)})}})}).finally(function(){$('btnRef').disabled=false})}$('btnRef').onclick=refresh;$('btnTake').onclick=function(){$('btnTake').disabled=true;$('giftOut').innerHTML='<div style="font-size:13px;color:#666">现场扫描+复核中（约 10~40 秒，勿关页面）…</div>';post('/api/vipcloud/take',{pass:PASS,n:parseInt($('nSel').value,10)}).then(function(o){var d=o.d;if(!o.ok){$('giftOut').innerHTML='<div class="msg">❌ '+(d.message||'失败')+'</div>';return}var h='';for(var i=0;i<d.results.length;i++){var r=d.results[i];if(r.error){h+='<div class="msg">⚠ '+esc(r.error)+'</div>'}else{h+='<div class="box" style="box-shadow:none;background:#f5f0ff;margin-top:8px"><b>✅ '+esc(r.donor_name||r.donor_uid)+'（V'+r.vip_level+'）</b>，月底作废<br>短链：<a href="'+esc(r.short_url)+'" target="_blank" class="lnk">'+esc(r.short_url)+'</a> <button class="copy" data-l="'+esc(r.short_url||r.link)+'">复制短链</button><br><span class="lnk">'+esc(r.link)+'</span></div>'}}$('giftOut').innerHTML=h||'<div class="msg">❌ 现场扫描无合格号</div>';refresh()}).finally(function(){$('btnTake').disabled=false})};</script></body></html>`;
 /* 2026-11-25 云端号体检页 */
-const HEALTHCLOUD_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>号体检（云版）</title><style>body{font-family:-apple-system,system-ui,"PingFang SC",sans-serif;background:#f5f6f8;margin:0;padding:24px 12px;display:flex;flex-direction:column;align-items:center;gap:14px}.box{background:#fff;padding:20px;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:760px;box-sizing:border-box}h1{font-size:18px;margin:0 0 4px;color:#0e7490}p.sub{font-size:13px;color:#666;margin:0 0 14px}input{padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px}button{padding:9px 16px;border:0;border-radius:8px;background:#0e7490;color:#fff;font-size:14px;cursor:pointer}button:disabled{opacity:.5}button.gray{background:#888}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}table{border-collapse:collapse;width:100%;font-size:13px}td{padding:6px 8px;border-bottom:1px solid #f2f2f2}.k{color:#666;white-space:nowrap;width:130px}.b-ok{color:#3b6d11;font-weight:600}.b-dead{color:#a32d2d;font-weight:600}.msg{font-size:13px;color:#a32d2d;margin-top:8px}</style></head><body><div class="box"><h1>🩺 号体检（云版）</h1><p class="sub">云端直查：D1 档案 + 网易实时状态（存活/黑胶等级/近30天播放）。换电脑、手机都能用。</p><div id="authBox"><div class="row"><input id="pw" type="password" placeholder="满权限控制台口令" style="flex:1;min-width:200px"><button id="btnAuth">进入</button></div><div class="msg" id="authMsg"></div></div><div id="mainBox" style="display:none"><div class="row"><input id="key" placeholder="uid / 手机号 / 邮箱" style="flex:1;min-width:180px"><button id="go">开始体检</button><button class="gray" id="out">退出</button></div><div class="msg" id="st"></div><div id="res" style="margin-top:12px"></div></div></div><script>var PASS='';function $(i){return document.getElementById(i)};function post(ep,b){return fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d}})})}function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}function boot(p){PASS=p;sessionStorage.setItem('health_cloud_pass',p);$('authBox').style.display='none';$('mainBox').style.display=''}$('btnAuth').onclick=function(){post('/api/healthcloud/run',{pass:$('pw').value,key:'__probe__'}).then(function(o){if(o.ok===false&&(o.d.message||'').indexOf('口令')>=0||o.ok===false&&o.d.message==='需要满权限口令'){$('authMsg').textContent='口令错误'}else{boot($('pw').value)}})};(function(){var m=location.hash.match(/tk=([A-Za-z0-9]+)/);var sp=sessionStorage.getItem('health_cloud_pass');if(m){post('/api/cloud/redeem',{tk:m[1]}).then(function(o){if(o.ok){boot(o.d.pass)}else{$('authMsg').textContent=o.d.message+'（也可直接手输口令）'}})}else if(sp){boot(sp)}})();$('go').onclick=function(){var k=$('key').value.trim();if(!k){$('st').textContent='请输入 uid / 手机号 / 邮箱';return}$('go').disabled=true;$('st').textContent='体检中（实时核查约 3~10 秒）…';$('res').innerHTML='';post('/api/healthcloud/run',{pass:PASS,key:k}).then(function(o){var d=o.d;if(!o.ok){$('st').textContent='❌ '+(d.message||'失败');return}$('st').textContent='';var l=d.live||{};var alive=l.alive===true?'<span class="b-ok">✅ 存活</span>':(l.alive===false?'<span class="b-dead">❌ 失效（page code '+l.pageCode+'）</span>':'⚠ 网络异常无法判定');var b=d.base||{};var rows=[['实时状态',alive],['黑胶等级',l.vipLevel!=null?'V'+l.vipLevel+(l.canSendVip===1?'（可赠送，剩 '+l.giftLeft+'/'+l.giftTotal+' 天）':''):'-'],['近30天播放',l.rpc30!=null?l.rpc30+'（完成度 '+l.rate+'%）':'-'],['uid',b.uid],['手机号/名称',b.name],['群',b.pool],['邮箱',b.email],['入池时间',b.added],['有效期',b.exp],['歌',b.song],['来源',b.source],['备注',b.note],['标记',b.relogin_at?('重登于 '+b.relogin_at):'',b.suspect_at?('嫌疑 '+b.suspect_at):'',b.no_listen?'暂停听歌':''].filter(Boolean)];var h='<table>';for(var i=0;i<rows.length;i++){h+='<tr><td class="k">'+esc(rows[i][0])+'</td><td>'+esc(rows[i][1])+'</td></tr>'}$('res').innerHTML=h+'</table>'}).finally(function(){$('go').disabled=false})};$('key').addEventListener('keydown',function(e){if(e.key==='Enter')$('go').click()});$('out').onclick=function(){sessionStorage.removeItem('health_cloud_pass');location.reload()};</script></body></html>`;
+const HEALTHCLOUD_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>号体检（网页版）</title><style>body{font-family:-apple-system,system-ui,"PingFang SC",sans-serif;background:#f5f6f8;margin:0;padding:24px 12px;display:flex;flex-direction:column;align-items:center;gap:14px}.box{background:#fff;padding:20px;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:860px;box-sizing:border-box}h1{font-size:18px;margin:0 0 4px;color:#0e7490}p.sub{font-size:13px;color:#666;margin:0 0 14px;line-height:1.6}input{padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px}button{padding:9px 16px;border:0;border-radius:8px;background:#0e7490;color:#fff;font-size:14px;cursor:pointer}button:disabled{opacity:.5}button.gray{background:#888}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}table{border-collapse:collapse;width:100%;font-size:13px}th{background:#f0f7f9;text-align:left;padding:7px 8px;color:#33555e;border-bottom:1px solid #dde9ec;white-space:nowrap}td{padding:6px 8px;border-bottom:1px solid #f0f3f5;vertical-align:top}.kv td.k{color:#666;white-space:nowrap;width:170px}.b-ok{color:#3b6d11;font-weight:600}.b-dead{color:#a32d2d;font-weight:600}.b-gray{background:#eef0f3;color:#666}.b-green{background:#e5f3d8;color:#3b6d11}.b-yellow{background:#fdf3d7;color:#8a6d1a}.b-orange{background:#ffe8d2;color:#9a4d10}.chip{display:inline-block;padding:2px 10px;border-radius:10px;font-size:12px;font-weight:600;margin-right:6px}.warn{background:#fdf3d7;border-radius:8px;padding:8px 12px;font-size:13px;color:#8a6d1a;margin-top:8px;line-height:1.6}.info{background:#eef6f9;border-radius:8px;padding:8px 12px;font-size:12px;color:#4a6b76;margin-top:8px;line-height:1.6}.msg{font-size:13px;color:#a32d2d;margin-top:8px}.sec{margin-bottom:2px}.sec h2{font-size:15px;margin:0 0 10px;color:#0e7490;border-bottom:2px solid #e3eef2;padding-bottom:6px}.muted{color:#8a8f99;font-size:12px}.verdict{background:#f0f7f9;border-left:4px solid #0e7490;border-radius:6px;padding:10px 14px;font-size:13px;line-height:1.8;color:#234}.ok-line{color:#3b6d11;font-weight:600}.bad-line{color:#a32d2d;font-weight:600}</style></head><body><div class="box"><h1>🩺 号体检（网页版）</h1><p class="sub">与本地版同一套口径（acc_health.py）：账号档案 + 14 天快照走势 + 控制台标记复算 + 实时复核创作者后台 + 目标歌归属 + 台账 + 邮件记录 + 笔记发布 + 结论分析，一页全出。直接查云端 D1，换电脑、手机都能用。</p><div id="authBox"><div class="row"><input id="pw" type="password" placeholder="满权限控制台口令" style="flex:1;min-width:200px"><button id="btnAuth">进入</button></div><div class="msg" id="authMsg"></div></div><div id="mainBox" style="display:none"><div class="row"><input id="key" placeholder="uid / 手机号 / 邮箱" style="flex:1;min-width:180px"><button id="go">开始体检</button><button class="gray" id="out">退出</button></div><div class="msg" id="st"></div><div id="res"></div></div></div><script>var PASS='';function $(i){return document.getElementById(i)};function post(ep,b){return fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d}})})}function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}function fmtBJ(s){if(!s)return '';var t=Date.parse(String(s).replace(' ','T').replace(/(\.\d+)?Z?$/,function(m,f){return (f||'')+'Z'}));if(isNaN(t))return String(s);var d=new Date(t+8*3600*1000);function p(n){return (n<10?'0':'')+n}return p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate())+' '+p(d.getUTCHours())+':'+p(d.getUTCMinutes())}function tf(v){return v===true?'是(True)':v===false?'否(False)':String(v==null?'-':v)}var KIND_CN={reg:'reg(登记成功通知)',songchange:'songchange(自动换歌)',songfix:'songfix(共创冻结处置)',songfix2:'songfix2(独唱冻结处置)',songfix3:'songfix3(绑错歌/查无此歌处置)','notify-dead':'notify-dead(删号通知)',feenote:'feenote(收费口径说明)'};var STATE_CN={sent:'已发出',claimed:'发送中',pending:'排队中',dropped:'已放弃(连败3次)',skipped:'已跳过',skip_returned:'已回池·不发',skip_noemail:'无邮箱·不发'};function sec(t,inner){return '<div class="box sec"><h2>'+t+'</h2>'+inner+'</div>'}function kv(rows){var h='<table class="kv">';for(var i=0;i<rows.length;i++){var r=rows[i];h+='<tr><td class="k">'+esc(r[0])+'</td><td>'+(r[2]?r[1]:esc(r[1]))+'</td></tr>'}return h+'</table>'}function tbl(heads,rows){var h='<div style="overflow-x:auto"><table><thead><tr>';for(var i=0;i<heads.length;i++)h+='<th>'+esc(heads[i])+'</th>';h+='</tr></thead><tbody>';for(var j=0;j<rows.length;j++){h+='<tr>';for(var k2=0;k2<rows[j].length;k2++)h+='<td>'+rows[j][k2]+'</td>';h+='</tr>'}return h+'</tbody></table></div>'}function boot(p){PASS=p;sessionStorage.setItem('health_cloud_pass',p);$('authBox').style.display='none';$('mainBox').style.display=''}$('btnAuth').onclick=function(){post('/api/healthcloud/run',{pass:$('pw').value,key:'__probe__'}).then(function(o){if(o.ok){boot($('pw').value)}else{$('authMsg').textContent=o.d.message||'口令错误'}})};(function(){var m=location.hash.match(/tk=([A-Za-z0-9]+)/);var sp=sessionStorage.getItem('health_cloud_pass');if(m){post('/api/cloud/redeem',{tk:m[1]}).then(function(o){if(o.ok){boot(o.d.pass)}else{$('authMsg').textContent=o.d.message+'（也可直接手输口令）'}})}else if(sp){boot(sp)}})();function buildDead(d){var h='';if(d.deads&&d.deads.length){var rows=[];for(var i=0;i<d.deads.length;i++){var x=d.deads[i];rows.push(['✂ '+esc(x.at),esc(x.reason_cn)+'（reason='+esc(x.reason)+'）','pool='+esc(x.pool),'uid='+esc(x.uid)])}h+=sec('【D1】删号流水（dead_log，时间为北京时间）',tbl(['时间','原因','',''],rows))}if(d.notices&&d.notices.length){var r2=[];for(var j=0;j<d.notices.length;j++){var n=d.notices[j];r2.push([esc(n.removed_at)+' 删号','收件邮箱 '+esc(n.email),'状态='+esc(STATE_CN[n.state]||n.state),'发出='+(n.sent_at?esc(n.sent_at):'—')+(n.skip_reason?'（'+esc(n.skip_reason)+'）':'')])}h+=sec('【D2】删号直邮记录（dead_notice）',tbl(['入队','邮箱','状态','发出'],r2))}if(d.ledger&&d.ledger.length){var r3=[];for(var k2=0;k2<d.ledger.length;k2++){var l=d.ledger[k2];r3.push([esc(l.day),esc(l.agent||'-'),esc(l.plan||'-'),l.price==null?'待补价':esc(l.price)+'元',esc(l.days)+'天',esc(l.start||'-'),esc(l.exp||'-'),esc(l.remark||'')])}h+=sec('【D3】台账记录（ledger，购买/续费流水）',tbl(['日期','代理','套餐','价格','天数','起始','到期','备注'],r3))}if(d.mails&&d.mails.length){var r4=[];for(var m2=0;m2<d.mails.length;m2++){var m=d.mails[m2];r4.push([esc(KIND_CN[m.kind]||m.kind),esc(STATE_CN[m.state]||m.state),esc(m.created_at||'-'),esc(m.sent_at||'—'),esc(m.skip_reason||'')])}h+=sec('【D4】历史邮件（mail_queue）',tbl(['类型','状态','入队时间','发出时间','备注'],r4))}if(d.snaps&&d.snaps.length){var r5=[];for(var s2=0;s2<d.snaps.length;s2++){var sn=d.snaps[s2];r5.push([esc(sn.day),sn.rate==null?'-':esc(sn.rate)+'%',esc(sn.rpc30==null?'-':sn.rpc30),esc(sn.at_bj)+'（pool='+esc(sn.pool)+'）',sn.rate!=null&&sn.rate>=100?'←已做满100%':''])}h+=sec('【D5】删号前快照走势（snapshots，最新在前，rate=650进度 rpc30=近30日播放）',tbl(['日期','650进度','近30日播放','快照时刻(北京)','备注'],r5));if(d.runs&&d.runs.length){var rl=[];for(var r6=0;r6<d.runs.length;r6++)rl.push([esc(d.runs[r6].day)+' ✓','片(slice)='+esc(d.runs[r6].slice||'-'),'跑完入账时刻='+esc(d.runs[r6].at_bj)+'（北京）']);h+='<div class="info"><b>实跑记录（近 14 天，runs 表）：</b>'+tbl(['日期','',''],rl)+'</div>'}else{h+='<div class="warn">⚠ 近 14 天没有任何实跑记录（runs 表零行）——删号前 relay 一直没派到这个号。</div>'}}h+='<div class="info"><b>【说明】</b>该号已被删号：删号后 accounts 表不再有它的行，所以号池列表查不到——这是设计，不是数据丢了。上面【D1】~【D5】就是它的全部历史档案。按 11-20 口径：CK 失效删号是终态，反复重登有害要劝阻，不要引导号主复活；如果买家质疑，把直邮记录和快照走势给TA看即可。死因判读（毒源=服务端程序化轮询登录态接口，与出口 IP 无关）：2026-11-20 12:38 前登记的扫码号走「老二维码」链路 → 3~5 天批量清算属预期；11-20 12:38 起已全量切笔记本真浏览器 bridge 出码。</div>';return h}function buildReport(d){var b=d.base||{},l=d.live||{},g=d.gift,h='';var rows1=[['池(pool)',b.pool],['uid（网易用户ID）',b.uid],['手机号',b.name],['代理(agent)',b.agent||'-'],['登记时间(added)',b.added],['套餐(plan)',b.plan||'-'],['到期(exp)',b.exp],['公益号(pub)',b.pub?'是':'否'],['退款(rb)',b.rb?'是(rb='+b.rb+')':'否'],['CK嫌疑标记',b.suspect_at||'无'],['目标歌(song)',b.song||'-'],['只收不听(no_listen)',b.no_listen?'1（是）':'0（否）'],['资料更新时间(updated_at)',b.updated_at?fmtBJ(b.updated_at)+'（北京时间）':'-'],['登记方式',b.reg_method_cn],['登录链路',b.egress_cn+(b.era_warn?' <span class="b-dead">⚠ 老链路时代登记，3~5 天清算窗口风险</span>':'')],['邮箱',b.email||'-'],['备注',b.note||'-']];if(b.relogin_at)rows1.push(['relogin_at',b.relogin_at+'（11-18 废除重登机制前的历史遗留，该字段现已不再写入，仅留档）']);h+=sec('【1】账号',kv(rows1));var s2='';if(d.snaps&&d.snaps.length){var rows=[];for(var i=0;i<d.snaps.length;i++){var sn=d.snaps[i];rows.push([esc(sn.day),sn.rate==null?'-':esc(sn.rate)+'%',esc(sn.rpc30==null?'-':sn.rpc30),esc(sn.at_bj),sn.notes&&sn.notes.length?esc(sn.notes.join('；')):''])}s2+=tbl(['日期','650进度(rate)','近30日播放(rpc30)','快照时刻(北京)','事件备注'],rows)}else{s2+='<div class="muted">（14 天内无任何快照——新号或一直没跑）</div>'}if(d.runs&&d.runs.length){var rl=[];for(var r2=0;r2<d.runs.length;r2++)rl.push([esc(d.runs[r2].day)+' ✓','片(slice)='+esc(d.runs[r2].slice||'-'),'跑完入账时刻='+esc(d.runs[r2].at_bj)+'（北京）']);s2+='<div style="margin-top:10px"><b style="font-size:13px">近 14 天实跑记录（runs 表，真跑了才有行）：</b>'+tbl(['日期','',''],rl);if(d.missed&&d.missed.length)s2+='<div class="warn">⚠ 快照有但没实跑的日期：'+esc(d.missed.join('、'))+'（当天 relay 没派到这个号）</div>';s2+='</div>'}else{s2+='<div class="warn">⚠ 近 14 天没有任何实跑记录（runs 表零行）——relay 一直没派到这个号，播放量不可能涨，先查派片/灰度名单，别往网易侧怀疑。</div>'}h+=sec('【2】近 14 天快照走势（pool='+esc(b.pool)+'）',s2);var s3='';if(d.marks&&d.marks.length){for(var m3=0;m3<d.marks.length;m3++){var mk=d.marks[m3];s3+='<div style="margin:6px 0"><span class="chip '+(mk.cls||'b-gray')+'">'+esc(mk.name)+'</span><span style="font-size:13px">'+esc(mk.desc)+'</span></div>'}}else{s3='<div class="ok-line">▸ 无异常标记（650 在涨或已做满）</div>'}h+=sec('【3】控制台标记复算（今天 vs 昨天）',s3);var s4='';if(l.alive===true){s4+='<div class="ok-line">CK=活号；实时 650 进度='+(l.rate!=null?l.rate:'-')+'%　实时近30日播放='+esc(l.rpc30!=null?l.rpc30:'-')+'</div>';s4+=kv([['任务总开关(taskStatus)',tf(l.taskStatus)],['是音乐人(isMusician)',tf(l.isMusician)],['特殊权益已开通(hasOpen)',tf(l.hasOpen)],['可开通(canOpen)',tf(l.canOpen)],['音乐人身份状态(status)',esc(l.status==null?'-':l.status)],['维持天数(maintainDays)',esc(l.maintainDays==null?'-':l.maintainDays)],['特殊权益生效(unlockVipRight)',tf(l.unlockVipRight)],['650任务状态(missionStatus)',esc(l.missionStatus==null?'-':l.missionStatus)],['笔记发布进度',(l.noteProgress!=null?l.noteProgress+'/4（30 天内发笔记天数，封顶 4；走势详见【8】）':'未返回')]]);if(g){var gl;var used=g.total-g.left;if(g.vipLevel>=2){gl='✅ VIP赠送资格：黑胶V'+g.vipLevel+'　可赠送（canSendVip=1）　本月剩余 '+g.left+'/'+g.total+' 天　'+(g.left===g.total?'本月从未赠送（额度完整）':'本月已送出 '+used+' 天')}else{gl='VIP赠送资格：黑胶V'+g.vipLevel+'，无赠送资格（须 V2+）'}s4+='<div class="info">'+gl+'</div>'}s4+='<div class="muted" style="margin-top:6px">（furtherTaskStartTime/furtherVipGetTime 字段网易数据不可信，仅留档不参与判定）</div>'}else if(l.alive===false){s4='<div class="bad-line">⚠️ CK 状态：失效（page code '+esc(l.pageCode)+'）——如果判失效，先让买家换 CK 再谈其他</div>'}else{s4='<div class="warn">⚠ '+(l.err?'实时复核失败：'+esc(l.err):'库里无 CK（未登记 Cookie），只能看到档案')+'</div>'}h+=sec('【4】实时复核创作者后台（只读查询，2~3 次）',s4);if(d.owner){var s5='';if(d.owner.error){s5='查询失败：'+esc(d.owner.error)}else{var hit=false;var ar=[];for(var a2=0;a2<d.owner.artists.length;a2++){var art=d.owner.artists[a2];var isHit=String(art.accountId)===String(b.uid);hit=hit||isHit;ar.push('艺人「'+esc(art.name)+'」(id='+esc(art.id)+')　accountId(网易账号ID)='+esc(art.accountId==null?'null':art.accountId)+(isHit?'　<span class="b-ok">✅ 就是号主本人</span>':''))}s5='《'+esc(d.owner.name)+'》(id='+esc(b.song)+')'+(d.owner.publishTime?'　专辑发行 '+esc(d.owner.publishTime):'')+'<br>'+ar.join('<br>');if(!hit&&d.owner.artists.length)s5+='<div class="warn">⚠️ 没有任何艺人绑定到号主 uid——如果这是号主小号名下的歌，播放可能全无效，重点怀疑！</div>'}h+=sec('【5】目标歌归属验证',s5)}var s6='';if(d.ledger&&d.ledger.length){var r6=[];for(var l2=0;l2<d.ledger.length;l2++){var lg=d.ledger[l2];r6.push([esc(lg.day),esc(lg.agent||'-'),esc(lg.plan||'-'),lg.price==null?'待补价':esc(lg.price)+'元',esc(lg.days),esc(lg.start||'-'),esc(lg.exp||'-'),esc(lg.remark||'')])}s6=tbl(['日期','代理','套餐','价格','天数','起始','到期','备注'],r6)}else{s6='<div class="muted">无台账（可能是免费/公益号或漏登记）</div>'}h+=sec('【6】台账记录（ledger，购买/续费流水）',s6);var s7='<div class="info">当前邮件口径：判死/过期号 → 立即删号 + 直邮（notify-dead），没有「先通知重登、留缓冲期」这回事；管理员手动删号不发邮件（11-19 起）。</div>';var hasMail=false;if(d.deads&&d.deads.length){hasMail=true;for(var d2=0;d2<d.deads.length;d2++)s7+='<div>✂ 删号流水：'+esc(d.deads[d2].reason_cn)+'　'+esc(d.deads[d2].at)+'</div>'}if(d.notices&&d.notices.length){hasMail=true;for(var n2=0;n2<d.notices.length;n2++){var nt=d.notices[n2];s7+='<div>✉ 删号通知['+esc(nt.kind||'dead')+']：'+esc(STATE_CN[nt.state]||nt.state)+'　入队 '+esc(nt.removed_at)+'　发出 '+(nt.sent_at?esc(nt.sent_at):'—')+(nt.skip_reason?'（'+esc(nt.skip_reason)+'）':'')+'</div>'}}if(d.mails&&d.mails.length){hasMail=true;var r7=[];for(var m4=0;m4<d.mails.length;m4++){var mm=d.mails[m4];r7.push([esc(KIND_CN[mm.kind]||mm.kind),esc(STATE_CN[mm.state]||mm.state),esc(mm.created_at||'-'),esc(mm.sent_at||'-'),esc(mm.skip_reason||'')])}s7+='<div style="margin-top:8px">'+tbl(['类型','状态','入队时间','发出时间','备注'],r7)+'</div>'}if(!hasMail){s7+='<div class="muted">无任何邮件记录：这个号从未进过任何邮件队列，也从未发过重登邮件。注意：重登邮件只由采集判死链路触发；号还没被采集判死（比如只显示「采集缺失」）时，不会有任何邮件。</div>'}h+=sec('【7】邮件提醒记录（mail_queue / dead_notice / dead_log）',s7);var s8='';if(l.alive===true&&l.noteProgress!=null){s8+='<div class="info">实时复核：当前笔记进度 '+l.noteProgress+'/4'+(l.noteProgress>=4?'（已满，本轮周期内不再发，属正常）':'')+'</div>'}if(d.noteRows&&d.noteRows.length){var r8=[];for(var q2=0;q2<d.noteRows.length;q2++)r8.push([esc(d.noteRows[q2].day),esc(d.noteRows[q2].v)+'/4',esc(d.noteRows[q2].note||'')]);s8+=tbl(['日期','笔记进度','说明'],r8);var lastV=d.noteRows[d.noteRows.length-1].v;if(lastV>=4)s8+='<div class="ok-line" style="margin-top:8px">✅ 已发满 4/4：本轮任务完成。notes.py 有进度门控（11-11 起），满了自动停发，不用管。</div>';else s8+='<div class="info" style="margin-top:8px">ℹ 发布节奏（notes.py 现口径）：每晚北京 22:23 随 relay 触发，全部号每天都尝试发一篇；发布前先读任务进度——满 4/4 自动跳过（进度门控），没满就发；发完 40~60 秒自动删动态（进度实时结算，删了不影响计数）。只有「进度没满却连续 2 周不涨」才需要查。</div>'}else{s8+='<div class="muted">近 14 天快照里没有笔记进度数据：可能是新号、当天快照网易没返回该子任务，或 missions 没上报。</div>'}h+=sec('【8】笔记发布情况（mission_code_musician_notebook_publish：30 天内发笔记天数 ≥4，封顶 4/4）',s8);h+=sec('【9】结论分析','<div class="verdict">'+esc(d.verdict||'')+'</div>');return h}function render(d){var box=$('res');if(d.dead){box.innerHTML=buildDead(d);return}box.innerHTML=buildReport(d)}$('go').onclick=function(){var k=$('key').value.trim();if(!k){$('st').textContent='请输入 uid / 手机号 / 邮箱';return}$('go').disabled=true;$('st').textContent='体检中（实时核查约 3~10 秒，快照/台账并行查云库）…';$('res').innerHTML='';post('/api/healthcloud/run',{pass:PASS,key:k}).then(function(o){var d=o.d;if(!o.ok){$('st').textContent='❌ '+(d.message||'失败');return}$('st').textContent='';render(d)}).catch(function(e){$('st').textContent='❌ 请求失败：'+e}).finally(function(){$('go').disabled=false})};$('key').addEventListener('keydown',function(e){if(e.key==='Enter')$('go').click()});$('out').onclick=function(){sessionStorage.removeItem('health_cloud_pass');location.reload()};</script></body></html>`;
 const ADMIN_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
