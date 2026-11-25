@@ -2984,6 +2984,244 @@ async function d1All(sql, params) {
   }
 }
 
+/* ===== 2026-11-25 云端 eapi 客户端（VIP赠送云版 /vipcloud + 号体检云版 /healthcloud 共用）=====
+   移植自 signin.py 的 eapi_encrypt / NeteaseClient.eapi_post，与 Python 版逐字节对齐
+   （tmp/crypto_parity.mjs 三组用例 ALL-PASS，2026-11-25）。响应走 e_r=false 明文 JSON
+   （2026-11-25 实测 interface3 接受），Worker 端只需 MD5 + AES-128-ECB 加密请求。
+   口径与本地 vip_gift_pool.py 完全一致：只调 page/info / token/create / shorturl /
+   musician vip/info 四个只读/开卡接口，绝不调 accept（不替任何人领会员）。 */
+function eapiMd5(str) {
+  function rl(n, c) { return (n << c) | (n >>> (32 - c)); }
+  function au(x, y) { var l = (x & 0xFFFF) + (y & 0xFFFF), m = (x >> 16) + (y >> 16) + (l >> 16); return (m << 16) | (l & 0xFFFF); }
+  function cmn(q, a, b, x, s, t) { return au(rl(au(au(a, q), au(x, t)), s), b); }
+  function ff(a, b, c, d, x, s, t) { return cmn((b & c) | ((~b) & d), a, b, x, s, t); }
+  function gg(a, b, c, d, x, s, t) { return cmn((b & d) | (c & (~d)), a, b, x, s, t); }
+  function hh(a, b, c, d, x, s, t) { return cmn(b ^ c ^ d, a, b, x, s, t); }
+  function ii(a, b, c, d, x, s, t) { return cmn(c ^ (b | (~d)), a, b, x, s, t); }
+  var bytes = Array.from(new TextEncoder().encode(str));
+  var bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 != 56) bytes.push(0);
+  bytes.push(bitLen & 0xFF, (bitLen >>> 8) & 0xFF, (bitLen >>> 16) & 0xFF, (bitLen >>> 24) & 0xFF, 0, 0, 0, 0);
+  var x = new Array(16);
+  var a = 1732584193, b = -271733879, c = -1732584194, d = 271733878, olda, oldb, oldc, oldd;
+  for (var i0 = 0; i0 < bytes.length; i0 += 64) {
+    for (var k = 0; k < 16; k++) x[k] = bytes[i0 + k * 4] | (bytes[i0 + k * 4 + 1] << 8) | (bytes[i0 + k * 4 + 2] << 16) | (bytes[i0 + k * 4 + 3] << 24);
+    olda = a; oldb = b; oldc = c; oldd = d;
+    a = ff(a, b, c, d, x[0], 7, -680876936); d = ff(d, a, b, c, x[1], 12, -389564586); c = ff(c, d, a, b, x[2], 17, 606105819); b = ff(b, c, d, a, x[3], 22, -1044525330);
+    a = ff(a, b, c, d, x[4], 7, -176418897); d = ff(d, a, b, c, x[5], 12, 1200080426); c = ff(c, d, a, b, x[6], 17, -1473231341); b = ff(b, c, d, a, x[7], 22, -45705983);
+    a = ff(a, b, c, d, x[8], 7, 1770035416); d = ff(d, a, b, c, x[9], 12, -1958414417); c = ff(c, d, a, b, x[10], 17, -42063); b = ff(b, c, d, a, x[11], 22, -1990404162);
+    a = ff(a, b, c, d, x[12], 7, 1804603682); d = ff(d, a, b, c, x[13], 12, -40341101); c = ff(c, d, a, b, x[14], 17, -1502002290); b = ff(b, c, d, a, x[15], 22, 1236535329);
+    a = gg(a, b, c, d, x[1], 5, -165796510); d = gg(d, a, b, c, x[6], 9, -1069501632); c = gg(c, d, a, b, x[11], 14, 643717713); b = gg(b, c, d, a, x[0], 20, -373897302);
+    a = gg(a, b, c, d, x[5], 5, -701558691); d = gg(d, a, b, c, x[10], 9, 38016083); c = gg(c, d, a, b, x[15], 14, -660478335); b = gg(b, c, d, a, x[4], 20, -405537848);
+    a = gg(a, b, c, d, x[9], 5, 568446438); d = gg(d, a, b, c, x[14], 9, -1019803690); c = gg(c, d, a, b, x[3], 14, -187363961); b = gg(b, c, d, a, x[8], 20, 1163531501);
+    a = gg(a, b, c, d, x[13], 5, -1444681467); d = gg(d, a, b, c, x[2], 9, -51403784); c = gg(c, d, a, b, x[7], 14, 1735328473); b = gg(b, c, d, a, x[12], 20, -1926607734);
+    a = hh(a, b, c, d, x[5], 4, -378558); d = hh(d, a, b, c, x[8], 11, -2022574463); c = hh(c, d, a, b, x[11], 16, 1839030562); b = hh(b, c, d, a, x[14], 23, -35309556);
+    a = hh(a, b, c, d, x[1], 4, -1530992060); d = hh(d, a, b, c, x[4], 11, 1272893353); c = hh(c, d, a, b, x[7], 16, -155497632); b = hh(b, c, d, a, x[10], 23, -1094730640);
+    a = hh(a, b, c, d, x[13], 4, 681279174); d = hh(d, a, b, c, x[0], 11, -358537222); c = hh(c, d, a, b, x[3], 16, -722521979); b = hh(b, c, d, a, x[6], 23, 76029189);
+    a = hh(a, b, c, d, x[9], 4, -640364487); d = hh(d, a, b, c, x[12], 11, -421815835); c = hh(c, d, a, b, x[15], 16, 530742520); b = hh(b, c, d, a, x[2], 23, -995338651);
+    a = ii(a, b, c, d, x[0], 6, -198630844); d = ii(d, a, b, c, x[7], 10, 1126891415); c = ii(c, d, a, b, x[14], 15, -1416354905); b = ii(b, c, d, a, x[5], 21, -57434055);
+    a = ii(a, b, c, d, x[12], 6, 1700485571); d = ii(d, a, b, c, x[3], 10, -1894986606); c = ii(c, d, a, b, x[10], 15, -1051523); b = ii(b, c, d, a, x[1], 21, -2054922799);
+    a = ii(a, b, c, d, x[8], 6, 1873313359); d = ii(d, a, b, c, x[15], 10, -30611744); c = ii(c, d, a, b, x[6], 15, -1560198380); b = ii(b, c, d, a, x[13], 21, 1309151649);
+    a = ii(a, b, c, d, x[4], 6, -145523070); d = ii(d, a, b, c, x[11], 10, -1120210379); c = ii(c, d, a, b, x[2], 15, 718787259); b = ii(b, c, d, a, x[9], 21, -343485551);
+    a = au(a, olda); b = au(b, oldb); c = au(c, oldc); d = au(d, oldd);
+  }
+  function hx(n) { var s = '', i, v; for (i = 0; i < 4; i++) { v = (n >>> (i * 8)) & 255; s += (v < 16 ? '0' : '') + v.toString(16); } return s; }
+  return hx(a) + hx(b) + hx(c) + hx(d);
+}
+const EAPI_SBOX = [0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16];
+const EAPI_RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+function eapiXtime(a) { return ((a << 1) ^ ((a & 0x80) ? 0x1b : 0)) & 0xFF; }
+function eapiKeyExpansion(key) {
+  var w = new Array(44);
+  for (var i = 0; i < 4; i++) w[i] = [key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]];
+  for (var i2 = 4; i2 < 44; i2++) {
+    var t = w[i2 - 1].slice();
+    if (i2 % 4 === 0) { t = [EAPI_SBOX[t[1]], EAPI_SBOX[t[2]], EAPI_SBOX[t[3]], EAPI_SBOX[t[0]]]; t[0] ^= EAPI_RCON[i2 / 4 - 1]; }
+    w[i2] = [w[i2 - 4][0] ^ t[0], w[i2 - 4][1] ^ t[1], w[i2 - 4][2] ^ t[2], w[i2 - 4][3] ^ t[3]];
+  }
+  return w;
+}
+function eapiEcbEncrypt(input, w) {
+  var s = input.slice();
+  for (var c = 0; c < 4; c++) for (var r = 0; r < 4; r++) s[4 * c + r] ^= w[c][r];
+  for (var round = 1; round <= 10; round++) {
+    for (var i = 0; i < 16; i++) s[i] = EAPI_SBOX[s[i]];
+    var t;
+    t = s[1]; s[1] = s[5]; s[5] = s[9]; s[9] = s[13]; s[13] = t;
+    t = s[2]; s[2] = s[10]; s[10] = t; t = s[6]; s[6] = s[14]; s[14] = t;
+    t = s[15]; s[15] = s[11]; s[11] = s[7]; s[7] = s[3]; s[3] = t;
+    if (round !== 10) {
+      var o = s.slice();
+      for (var c2 = 0; c2 < 4; c2++) {
+        var a = o[4 * c2], b = o[4 * c2 + 1], cc = o[4 * c2 + 2], dd = o[4 * c2 + 3];
+        s[4 * c2] = eapiXtime(a) ^ (eapiXtime(b) ^ b) ^ cc ^ dd;
+        s[4 * c2 + 1] = a ^ eapiXtime(b) ^ (eapiXtime(cc) ^ cc) ^ dd;
+        s[4 * c2 + 2] = a ^ b ^ eapiXtime(cc) ^ (eapiXtime(dd) ^ dd);
+        s[4 * c2 + 3] = (eapiXtime(a) ^ a) ^ b ^ cc ^ eapiXtime(dd);
+      }
+    }
+    for (var c3 = 0; c3 < 4; c3++) for (var r2 = 0; r2 < 4; r2++) s[4 * c3 + r2] ^= w[round * 4 + c3][r2];
+  }
+  return s;
+}
+function eapiEncryptParams(path, obj) {
+  var url = path.replace('eapi', 'api');
+  var text = JSON.stringify(obj);
+  var digest = eapiMd5('nobody' + url + 'use' + text + 'md5forencrypt');
+  var plain = url + '-36cd479b6b5-' + text + '-36cd479b6b5-' + digest;
+  var raw = Array.from(new TextEncoder().encode(plain));
+  var pad = 16 - (raw.length % 16);
+  for (var i2 = 0; i2 < pad; i2++) raw.push(pad);
+  var ks = 'e82ckenh8dichen8', key = [];
+  for (var i3 = 0; i3 < 16; i3++) key.push(ks.charCodeAt(i3));
+  var w = eapiKeyExpansion(key), outHex = '';
+  for (var off = 0; off < raw.length; off += 16) {
+    var blk = eapiEcbEncrypt(raw.slice(off, off + 16), w);
+    for (var j = 0; j < 16; j++) { var v = blk[j]; outHex += (v < 16 ? '0' : '') + v.toString(16); }
+  }
+  return outHex.toUpperCase();
+}
+const EAPI_UA = 'NeteaseMusic/9.2.85.250418145357(9002085);Dalvik/2.1.0 (Linux; U; Android 9; SM-S9180 Build/PQ3B.190801.10101846)';
+async function eapiSha256HexUpper(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  const arr = new Uint8Array(buf);
+  let h = '';
+  for (var i = 0; i < arr.length; i++) h += (arr[i] < 16 ? '0' : '') + arr[i].toString(16);
+  return h.toUpperCase();
+}
+async function eapiPost(ck, fullUrl, data) {
+  const u = new URL(fullUrl);
+  const devId = (await eapiSha256HexUpper(ck)).slice(0, 52);
+  const payload = { deviceId: devId, os: 'android', e_r: false, header: '{}' };
+  if (data) for (const k in data) payload[k] = data[k];
+  const params = eapiEncryptParams(u.pathname, payload);
+  let cookie = ck.trim();
+  if (!cookie.endsWith(';')) cookie += ';';
+  cookie += ' __remember_me=true; os=android; appver=9.2.85; osver=9; channel=xiaomi; mobilename=SM-S9180; buildver=9002085; deviceId=' + devId + '; sDeviceId=' + devId;
+  const r = await fetch(fullUrl, {
+    method: 'POST',
+    headers: {
+      'User-Agent': EAPI_UA,
+      'Referer': 'https://music.163.com',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Accept': '*/*',
+      'Accept-language': 'zh-CN,zh-Hans;q=0.9',
+      'x-mam-custommark': 'okhttp',
+      'cm_no_encrypt_native_tag_20220105': 'false',
+      'x-aeapi': 'false',
+      'Cookie': cookie,
+    },
+    body: 'params=' + params,
+  });
+  try { return await r.json(); } catch (e) { return { code: -1, message: 'HTTP ' + r.status }; }
+}
+const EAPI_PAGEINFO_URL = 'https://interface3.music.163.com/eapi/vipactivity/app/vip/invitation/page/info';
+const EAPI_TOKENCREATE_URL = 'https://interface3.music.163.com/eapi/vipactivity/app/vip/invitation/token/create';
+const EAPI_SHORTURL_URL = 'https://music.163.com/eapi/middle/shorturl/generate';
+const EAPI_MUSICIAN_URL = 'https://interface3.music.163.com/eapi/nmusician/workbench/special/right/vip/info';
+const EAPI_RESERVE_DAYS = 7;   // 与本地 vip_gift_pool.py RESERVE_DAYS 同口径
+function eapiSlug(n) {
+  const cs = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let s = '';
+  for (var i = 0; i < n; i++) s += cs[Math.floor(Math.random() * cs.length)];
+  return s;
+}
+function eapiMonthBJ() {
+  const d = new Date(Date.now() + 8 * 3600 * 1000);
+  return d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2);
+}
+function eapiMonthEndMsBJ() {
+  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const y = now.getUTCFullYear(), m = now.getUTCMonth();
+  const end = (m === 11) ? Date.UTC(y + 1, 0, 1) : Date.UTC(y, m + 1, 1);
+  return end - 1;
+}
+// 云版 donor 候选：稳定存活号优先（入池早的经住了清算窗），与本地镜像池口径互补。
+// 轮换记账在 KV vip_cloud_used（月度重置，官方额度每月刷新）。
+async function eapiVipCandidates() {
+  return await d1All(
+    "SELECT uid, name, ck, pool FROM accounts WHERE ck!='' AND no_listen=0 " +
+    "AND (relogin_at IS NULL OR relogin_at='') AND (suspect_at IS NULL OR suspect_at='') " +
+    'ORDER BY added IS NULL, added ASC LIMIT 300', []);
+}
+async function eapiVipUsed() {
+  let used = null;
+  try { used = JSON.parse(await POOL.get('vip_cloud_used') || 'null'); } catch (e) {}
+  const cur = eapiMonthBJ();
+  if (!used || used.month !== cur) used = { month: cur, map: {} };
+  if (!used.map) used.map = {};
+  return used;
+}
+async function eapiVipTokens() {
+  try { return JSON.parse(await POOL.get('vip_cloud_tokens') || '[]') || []; } catch (e) { return []; }
+}
+// 现场扫描候选 donor（eapi page/info，只读）。最多 maxProbe 次、最多收 6 个合格。
+async function eapiVipScan(maxProbe) {
+  const cands = await eapiVipCandidates();
+  if (!cands) return { error: 'D1 不可用' };
+  const used = await eapiVipUsed();
+  const order = cands.slice().sort(function (a, b) {
+    const ua = used.map[String(a.uid)] || null, ub = used.map[String(b.uid)] || null;
+    const ta = ua ? ua.t : 0, tb = ub ? ub.t : 0;
+    if (ta !== tb) return ta - tb;
+    return String(a.uid).localeCompare(String(b.uid));
+  });
+  const eligible = [];
+  let probed = 0, dead = 0;
+  for (const c of order) {
+    if (probed >= maxProbe || eligible.length >= 6) break;
+    probed++;
+    let r = null;
+    try { r = await eapiPost(String(c.ck), EAPI_PAGEINFO_URL, { checktoken: '' }); } catch (e) { continue; }
+    const d = (r && typeof r.data === 'object' && r.data) || {};
+    if (r && r.code === 200 && Number(d.canSendVip || 0) === 1) {
+      eligible.push({ uid: String(c.uid), name: c.name || '', pool: c.pool || '',
+        vipLevel: Number(d.vipLevel || 0), left: Number(d.sendVipDayLeft || 0),
+        total: Number(d.sendVipDayTotal || 0), ck: String(c.ck) });
+    } else if (r && r.code !== 200) { dead++; }
+  }
+  return { probed: probed, eligible: eligible, dead: dead, poolSize: cands.length };
+}
+// 云版发卡：扫描 → 现场复核额度 → token/create → 官方短链 → KV 记账（月度轮换）。
+async function eapiVipTake(n) {
+  const scan = await eapiVipScan(24);
+  if (scan.error) return { ok: false, message: scan.error };
+  const used = await eapiVipUsed();
+  let tokens = await eapiVipTokens();
+  const out = [];
+  let made = 0;
+  for (const cand of scan.eligible) {
+    if (made >= n) break;
+    if (cand.left < EAPI_RESERVE_DAYS) continue;
+    const resp = await eapiPost(cand.ck, EAPI_TOKENCREATE_URL, {});
+    const dd = (resp && typeof resp.data === 'object' && resp.data) || {};
+    if (!resp || resp.code !== 200 || !dd.token) {
+      out.push({ error: 'uid=' + cand.uid + ' token/create 失败 code=' + ((resp && resp.code) || -1) + ' ' + String((resp && resp.message) || '').slice(0, 60) });
+      continue;
+    }
+    const tok = String(dd.token);
+    const link = 'https://y.music.163.com/g/vip-invite-cashier/' + eapiSlug(9) + '?token=' + tok;
+    let short = '';
+    try {
+      const sr = await eapiPost(cand.ck, EAPI_SHORTURL_URL, { url: link });
+      const sd = (sr && typeof sr.data === 'object' && sr.data) || {};
+      short = String(sd.shortUrl || '');
+    } catch (e) {}
+    const rec = { token: tok, link: link, short_url: short, donor_uid: cand.uid, donor_name: cand.name,
+      vip_level: cand.vipLevel, month: eapiMonthBJ(), expire_ms: eapiMonthEndMsBJ(),
+      created_at: new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19), status: 'created' };
+    const um = used.map[cand.uid] || { t: 0, n: 0 };
+    used.map[cand.uid] = { t: Date.now(), n: (um.n || 0) + 1 };
+    tokens.unshift(rec);
+    out.push(rec);
+    made++;
+  }
+  try { await POOL.put('vip_cloud_used', JSON.stringify(used)); } catch (e) {}
+  try { await POOL.put('vip_cloud_tokens', JSON.stringify(tokens.slice(0, 200))); } catch (e) {}
+  return { ok: true, made: made, results: out, probed: scan.probed, dead: scan.dead, poolSize: scan.poolSize };
+}
+
 // 死号流水写 D1（2026-10-22 新增）：KV 里的 dead_log 只是「墓碑名单」，最多 500 条、只存键名，
 // 看不出是谁、什么时候、因为什么被清理。D1 dead_log 表存完整流水，供周报统计与事后追查。
 async function d1LogDead(entries, reason) {
@@ -7025,6 +7263,103 @@ async function handle(request) {
         catch (e) { console.error('signdead 邮件入队失败:', e && e.message); }
       }
       return json({ ok: true, logs: logsRp.length, dead: deadK }, 200, { 'Cache-Control': 'no-store' });
+    }
+    /* ===== 2026-11-25 云端 VIP赠送 /vipcloud + 云端号体检 /healthcloud =====
+       换电脑/手机可直接访问（用户要求）。鉴权两路：
+       ① 控制台满权限点按钮 → /api/cloud/handoff 领一次性票据（KV 120 秒）→ 带 #tk 打开页面 →
+          页面 /api/cloud/redeem 换 CONSOLE_PASS 存 sessionStorage（同签到管理交接模式）。
+       ② 直接开页面 → 手输满权限口令。
+       所有 API 只认满权限口令（与控制台按钮显隐口径一致）。发卡/体检口径与本地版一致。 */
+    if (url.pathname === '/vipcloud' || url.pathname === '/healthcloud') {
+      const pageH = url.pathname === '/vipcloud' ? VIPCLOUD_HTML : HEALTHCLOUD_HTML;
+      return new Response(pageH, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+    }
+    if (url.pathname === '/api/cloud/handoff' && request.method === 'POST') {
+      let bC1;
+      try { bC1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      if (!(await consoleAuthFull(bC1))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
+      const tkC1 = 'C' + signRand(24);
+      try { await POOL.put('cloud_handoff:' + tkC1, '1', { expirationTtl: 120 }); }
+      catch (e) { return json({ ok: false, message: '票据写入失败，请重试' }, 503, { 'Cache-Control': 'no-store' }); }
+      return json({ ok: true, tk: tkC1 }, 200, { 'Cache-Control': 'no-store' });
+    }
+    if (url.pathname === '/api/cloud/redeem' && request.method === 'POST') {
+      let bC2;
+      try { bC2 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      const tkC2 = String(bC2.tk || '');
+      if (!/^C[A-HJ-NP-Z2-9]{24}$/.test(tkC2)) return json({ ok: false, message: '票据无效' }, 400);
+      let liveC2 = '';
+      try { liveC2 = await POOL.get('cloud_handoff:' + tkC2); } catch (e) {}
+      if (!liveC2) return json({ ok: false, message: '票据已失效（一次性、2 分钟），请回控制台重新点按钮' }, 403);
+      try { await POOL.delete('cloud_handoff:' + tkC2); } catch (e) {}
+      const cC2 = await cfg();
+      if (!cC2.consolePass) return json({ ok: false, message: '未配置 CONSOLE_PASS' }, 503);
+      return json({ ok: true, pass: cC2.consolePass }, 200, { 'Cache-Control': 'no-store' });
+    }
+    if (url.pathname === '/api/vipcloud/status' && request.method === 'POST') {
+      let bVs;
+      try { bVs = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      if (!(await consoleAuthFull(bVs))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
+      const scan = await eapiVipScan(8);
+      const tokens = await eapiVipTokens();
+      if (scan.error) return json({ ok: false, message: scan.error }, 503);
+      return json({ ok: true, probed: scan.probed, dead: scan.dead, poolSize: scan.poolSize,
+        eligible: scan.eligible.map(function (e) { return { uid: e.uid, name: e.name, pool: e.pool, vipLevel: e.vipLevel, left: e.left, total: e.total }; }),
+        tokens: tokens.slice(0, 12), totalTokens: tokens.length }, 200, { 'Cache-Control': 'no-store' });
+    }
+    if (url.pathname === '/api/vipcloud/take' && request.method === 'POST') {
+      let bVt;
+      try { bVt = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      if (!(await consoleAuthFull(bVt))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
+      const nVt = Math.min(3, Math.max(1, parseInt(bVt.n, 10) || 1));
+      const rVt = await eapiVipTake(nVt);
+      return json(rVt, rVt.ok ? 200 : 503, { 'Cache-Control': 'no-store' });
+    }
+    if (url.pathname === '/api/healthcloud/run' && request.method === 'POST') {
+      let bHc;
+      try { bHc = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      if (!(await consoleAuthFull(bHc))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
+      const keyHc = String(bHc.key || '').trim();
+      if (!keyHc) return json({ ok: false, message: '请输入 uid / 手机号 / 邮箱' }, 400);
+      if (!d1ok()) return json({ ok: false, message: 'D1 不可用' }, 503);
+      const rowsHc = await d1All(
+        'SELECT uid,name,ck,pool,email,added,exp,note,suspect_at,relogin_at,no_listen,song,source FROM accounts WHERE uid=? OR name=? OR email=? LIMIT 5',
+        [keyHc, keyHc, keyHc]);
+      if (!rowsHc) return json({ ok: false, message: 'D1 查询失败' }, 503);
+      if (!rowsHc.length) return json({ ok: false, message: '库里没找到这个号（支持 uid / 手机号 / 邮箱）' }, 404);
+      const rowHc = rowsHc.find(function (r) { return String(r.uid) === keyHc; }) || rowsHc[0];
+      const base = { uid: rowHc.uid, name: rowHc.name, pool: rowHc.pool, email: rowHc.email || '',
+        added: rowHc.added, exp: rowHc.exp, note: rowHc.note || '', suspect_at: rowHc.suspect_at || '',
+        relogin_at: rowHc.relogin_at || '', no_listen: rowHc.no_listen, song: rowHc.song || '', source: rowHc.source || '' };
+      if (!rowHc.ck) return json({ ok: true, alive: null, text: '库里无 CK（未登记 Cookie），只能看到档案', base: base });
+      let live = {};
+      try {
+        const rP = await eapiPost(String(rowHc.ck), EAPI_PAGEINFO_URL, { checktoken: '' });
+        const dP = (rP && typeof rP.data === 'object' && rP.data) || {};
+        live.pageCode = (rP && rP.code) || -1;
+        if (rP && rP.code === 200) {
+          live.alive = true;
+          live.vipLevel = Number(dP.vipLevel || 0);
+          live.canSendVip = Number(dP.canSendVip || 0);
+          live.giftLeft = Number(dP.sendVipDayLeft || 0);
+          live.giftTotal = Number(dP.sendVipDayTotal || 0);
+        } else {
+          live.alive = false;
+          live.pageCode = (rP && rP.code) || -1;
+        }
+      } catch (e) { live.alive = null; live.err = String(e && e.message).slice(0, 80); }
+      try {
+        const rM = await eapiPost(String(rowHc.ck), EAPI_MUSICIAN_URL, {});
+        const dM = (rM && typeof rM.data === 'object' && rM.data) || {};
+        if (rM && rM.code === 200) {
+          live.rpc30 = dM.recentPlayCount30;
+          live.isMusician = dM.isMusician;
+          const kids = ((dM.furtherTask || {}).children) || [];
+          const play = kids.find(function (k) { return k.missionCode === 'mission_code_recently_play_effect_count_v2'; }) || {};
+          live.rate = play.progressRate;
+        }
+      } catch (e) {}
+      return json({ ok: true, base: base, live: live }, 200, { 'Cache-Control': 'no-store' });
     }
     /* 2026-11-24 控制台→签到管理页免口令交接（用户强制要求，永久生效）：
        控制台满权限点「签到管理」→ 先调 /api/sign/handoff 领一张一次性票据（KV 存 120 秒），
@@ -13026,6 +13361,10 @@ loadGroup();
 </body>
 </html>`;
 
+/* 2026-11-25 云端 VIP 赠送页（换电脑/手机可用，鉴权走票据或满权限口令） */
+const VIPCLOUD_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VIP 赠送池（云版）</title><style>body{font-family:-apple-system,system-ui,"PingFang SC",sans-serif;background:#f5f6f8;margin:0;padding:24px 12px;display:flex;flex-direction:column;align-items:center;gap:14px}.box{background:#fff;padding:20px;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:900px;box-sizing:border-box}h1{font-size:18px;margin:0 0 4px;color:#7c3aed}p.sub{font-size:13px;color:#666;margin:0 0 14px}input{padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px}button{padding:9px 16px;border:0;border-radius:8px;background:#7c3aed;color:#fff;font-size:14px;cursor:pointer}button:disabled{opacity:.5;cursor:default}button.gray{background:#888}table{border-collapse:collapse;width:100%;font-size:13px}th{background:#f5f6f8;text-align:left;padding:8px;color:#444;border-bottom:1px solid #eee}td{padding:7px 8px;border-bottom:1px solid #f2f2f2;word-break:break-all}.stat{display:inline-block;background:#f5f0ff;border-radius:10px;padding:8px 14px;margin:0 8px 8px 0;text-align:center}.stat b{display:block;font-size:18px;color:#7c3aed}.stat span{font-size:12px;color:#666}.msg{font-size:13px;color:#a32d2d;margin-top:8px}.ok{color:#3b6d11}.lnk{color:#7c3aed;word-break:break-all}.copy{background:#5b21b6;padding:5px 10px;font-size:12px;border-radius:6px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}select{padding:9px;border:1px solid #ddd;border-radius:8px;font-size:14px}</style></head><body><div class="box"><h1>🎁 VIP 赠送池（云版）</h1><p class="sub">数据在云端：换电脑、手机都能打开。发卡时现场扫描池内号 → 复核官方额度 → 生成邀请卡链接。与本地版同口径（绝不代领）。</p><div id="authBox"><div class="row"><input id="pw" type="password" placeholder="满权限控制台口令" style="flex:1;min-width:200px"><button id="btnAuth">进入</button></div><div class="msg" id="authMsg"></div></div></div><div class="box" id="mainBox" style="display:none"><div><span class="stat"><b id="stProbed">-</b><span>本次扫描</span></span><span class="stat"><b id="stElig">-</b><span>现场合格</span></span><span class="stat"><b id="stTotal">-</b><span>历史发卡</span></span><span class="stat"><b id="stPool">-</b><span>候选池</span></span></div><div class="row" style="margin:10px 0"><select id="nSel"><option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option></select><button id="btnTake">生成赠送链接</button><button class="gray" id="btnRef">刷新状态</button></div><div id="giftOut"></div><h3 style="font-size:14px;margin:16px 0 6px;color:#444">现场合格号（可直接用作 donor）</h3><div id="eligBox" style="font-size:13px;color:#666">（未扫描）</div><h3 style="font-size:14px;margin:16px 0 6px;color:#444">最近发出的卡</h3><div style="overflow-x:auto"><table id="tokT"><thead><tr><th>时间</th><th>donor</th><th>V级</th><th>短链</th><th>长链</th><th>操作</th></tr></thead><tbody id="tokB"><tr><td colspan="6" style="color:#999">加载中…</td></tr></tbody></table></div><div class="msg ok" id="tip"></div></div><script>var PASS='';function $(i){return document.getElementById(i)};function post(ep,b){return fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d}})})}function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}function boot(p){PASS=p;sessionStorage.setItem('vip_cloud_pass',p);$('authBox').style.display='none';$('mainBox').style.display='';refresh()}$('btnAuth').onclick=function(){$('btnAuth').disabled=true;post('/api/vipcloud/status',{pass:$('pw').value}).then(function(o){if(o.ok){boot($('pw').value)}else{$('authMsg').textContent=o.d.message||'口令错误'}}).finally(function(){$('btnAuth').disabled=false})};(function(){var m=location.hash.match(/tk=([A-Za-z0-9]+)/);var sp=sessionStorage.getItem('vip_cloud_pass');if(m){post('/api/cloud/redeem',{tk:m[1]}).then(function(o){if(o.ok){boot(o.d.pass)}else{document.getElementById('authMsg').textContent=o.d.message+'（也可直接手输口令）'}})}else if(sp){boot(sp)}})();function refresh(){$('btnRef').disabled=true;post('/api/vipcloud/status',{pass:PASS}).then(function(o){if(!o.ok){$('tip').textContent=o.d.message||'加载失败';return}var d=o.d;$('stProbed').textContent=d.probed;$('stElig').textContent=d.eligible.length;$('stTotal').textContent=d.totalTokens;$('stPool').textContent=d.poolSize;var eb='';for(var i=0;i<d.eligible.length;i++){var e=d.eligible[i];eb+='uid '+esc(e.uid)+' '+esc(e.name)+' 群'+esc(e.pool)+' V'+e.vipLevel+' 剩'+e.left+'/'+e.total+'天；'}$('eligBox').textContent=eb||('扫描 '+d.probed+' 个候选，现场无合格（失效 '+d.dead+'）');var tb='';for(var j=0;j<d.tokens.length;j++){var t=d.tokens[j];tb+='<tr><td>'+esc(t.created_at)+'</td><td>'+esc(t.donor_name||t.donor_uid)+'</td><td>V'+t.vip_level+'</td><td>'+(t.short_url?'<a href="'+esc(t.short_url)+'" target="_blank">'+esc(t.short_url)+'</a>':'-')+'</td><td><span class="lnk">'+esc(t.link)+'</span></td><td><button class="copy" data-l="'+esc(t.short_url||t.link)+'">复制</button></td></tr>'}$('tokB').innerHTML=tb||'<tr><td colspan="6" style="color:#999">本月还没发过</td></tr>';Array.prototype.forEach.call(document.querySelectorAll('.copy'),function(b){b.onclick=function(){navigator.clipboard.writeText(b.getAttribute('data-l')).then(function(){b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1200)})}})}).finally(function(){$('btnRef').disabled=false})}$('btnRef').onclick=refresh;$('btnTake').onclick=function(){$('btnTake').disabled=true;$('giftOut').innerHTML='<div style="font-size:13px;color:#666">现场扫描+复核中（约 10~40 秒，勿关页面）…</div>';post('/api/vipcloud/take',{pass:PASS,n:parseInt($('nSel').value,10)}).then(function(o){var d=o.d;if(!o.ok){$('giftOut').innerHTML='<div class="msg">❌ '+(d.message||'失败')+'</div>';return}var h='';for(var i=0;i<d.results.length;i++){var r=d.results[i];if(r.error){h+='<div class="msg">⚠ '+esc(r.error)+'</div>'}else{h+='<div class="box" style="box-shadow:none;background:#f5f0ff;margin-top:8px"><b>✅ '+esc(r.donor_name||r.donor_uid)+'（V'+r.vip_level+'）</b>，月底作废<br>短链：<a href="'+esc(r.short_url)+'" target="_blank" class="lnk">'+esc(r.short_url)+'</a> <button class="copy" data-l="'+esc(r.short_url||r.link)+'">复制短链</button><br><span class="lnk">'+esc(r.link)+'</span></div>'}}$('giftOut').innerHTML=h||'<div class="msg">❌ 现场扫描无合格号</div>';refresh()}).finally(function(){$('btnTake').disabled=false})};</script></body></html>`;
+/* 2026-11-25 云端号体检页 */
+const HEALTHCLOUD_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>号体检（云版）</title><style>body{font-family:-apple-system,system-ui,"PingFang SC",sans-serif;background:#f5f6f8;margin:0;padding:24px 12px;display:flex;flex-direction:column;align-items:center;gap:14px}.box{background:#fff;padding:20px;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:760px;box-sizing:border-box}h1{font-size:18px;margin:0 0 4px;color:#0e7490}p.sub{font-size:13px;color:#666;margin:0 0 14px}input{padding:9px 10px;border:1px solid #ddd;border-radius:8px;font-size:14px}button{padding:9px 16px;border:0;border-radius:8px;background:#0e7490;color:#fff;font-size:14px;cursor:pointer}button:disabled{opacity:.5}button.gray{background:#888}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}table{border-collapse:collapse;width:100%;font-size:13px}td{padding:6px 8px;border-bottom:1px solid #f2f2f2}.k{color:#666;white-space:nowrap;width:130px}.b-ok{color:#3b6d11;font-weight:600}.b-dead{color:#a32d2d;font-weight:600}.msg{font-size:13px;color:#a32d2d;margin-top:8px}</style></head><body><div class="box"><h1>🩺 号体检（云版）</h1><p class="sub">云端直查：D1 档案 + 网易实时状态（存活/黑胶等级/近30天播放）。换电脑、手机都能用。</p><div id="authBox"><div class="row"><input id="pw" type="password" placeholder="满权限控制台口令" style="flex:1;min-width:200px"><button id="btnAuth">进入</button></div><div class="msg" id="authMsg"></div></div><div id="mainBox" style="display:none"><div class="row"><input id="key" placeholder="uid / 手机号 / 邮箱" style="flex:1;min-width:180px"><button id="go">开始体检</button><button class="gray" id="out">退出</button></div><div class="msg" id="st"></div><div id="res" style="margin-top:12px"></div></div></div><script>var PASS='';function $(i){return document.getElementById(i)};function post(ep,b){return fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json().then(function(d){return{ok:r.ok,d:d}})})}function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}function boot(p){PASS=p;sessionStorage.setItem('health_cloud_pass',p);$('authBox').style.display='none';$('mainBox').style.display=''}$('btnAuth').onclick=function(){post('/api/healthcloud/run',{pass:$('pw').value,key:'__probe__'}).then(function(o){if(o.ok===false&&(o.d.message||'').indexOf('口令')>=0||o.ok===false&&o.d.message==='需要满权限口令'){$('authMsg').textContent='口令错误'}else{boot($('pw').value)}})};(function(){var m=location.hash.match(/tk=([A-Za-z0-9]+)/);var sp=sessionStorage.getItem('health_cloud_pass');if(m){post('/api/cloud/redeem',{tk:m[1]}).then(function(o){if(o.ok){boot(o.d.pass)}else{$('authMsg').textContent=o.d.message+'（也可直接手输口令）'}})}else if(sp){boot(sp)}})();$('go').onclick=function(){var k=$('key').value.trim();if(!k){$('st').textContent='请输入 uid / 手机号 / 邮箱';return}$('go').disabled=true;$('st').textContent='体检中（实时核查约 3~10 秒）…';$('res').innerHTML='';post('/api/healthcloud/run',{pass:PASS,key:k}).then(function(o){var d=o.d;if(!o.ok){$('st').textContent='❌ '+(d.message||'失败');return}$('st').textContent='';var l=d.live||{};var alive=l.alive===true?'<span class="b-ok">✅ 存活</span>':(l.alive===false?'<span class="b-dead">❌ 失效（page code '+l.pageCode+'）</span>':'⚠ 网络异常无法判定');var b=d.base||{};var rows=[['实时状态',alive],['黑胶等级',l.vipLevel!=null?'V'+l.vipLevel+(l.canSendVip===1?'（可赠送，剩 '+l.giftLeft+'/'+l.giftTotal+' 天）':''):'-'],['近30天播放',l.rpc30!=null?l.rpc30+'（完成度 '+l.rate+'%）':'-'],['uid',b.uid],['手机号/名称',b.name],['群',b.pool],['邮箱',b.email],['入池时间',b.added],['有效期',b.exp],['歌',b.song],['来源',b.source],['备注',b.note],['标记',b.relogin_at?('重登于 '+b.relogin_at):'',b.suspect_at?('嫌疑 '+b.suspect_at):'',b.no_listen?'暂停听歌':''].filter(Boolean)];var h='<table>';for(var i=0;i<rows.length;i++){h+='<tr><td class="k">'+esc(rows[i][0])+'</td><td>'+esc(rows[i][1])+'</td></tr>'}$('res').innerHTML=h+'</table>'}).finally(function(){$('go').disabled=false})};$('key').addEventListener('keydown',function(e){if(e.key==='Enter')$('go').click()});$('out').onclick=function(){sessionStorage.removeItem('health_cloud_pass');location.reload()};</script></body></html>`;
 const ADMIN_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -13517,8 +13856,8 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <!-- 2026-11-25：号体检 / VIP赠送 —— 新标签页打开本机 acc_health 网页。两个功能已拆成独立页：
          号体检=/ 首页，VIP赠送=/vip 独立页。服务由 号体检&VIP赠送.bat 拉起（pythonw 常驻后台），
          没跑时点了会看到浏览器「无法访问」，先双击一次 bat 即可。顺序：VIP赠送 在前（用户要求换位）。 -->
-    <button class="mini" id="btnVip" style="display:none" title="打开本机「VIP赠送池」独立页（127.0.0.1:8765/vip）。打不开=服务没在跑，先双击一次 号体检&VIP赠送.bat">VIP赠送</button>
-    <button class="mini" id="btnHealth" style="display:none" title="打开本机「号体检」独立页（127.0.0.1:8765）。打不开=服务没在跑，先双击一次 号体检&VIP赠送.bat">号体检</button>
+    <button class="mini" id="btnVip" style="display:none" title="云端「VIP赠送池」网页（/vipcloud，数据在云上，换电脑/手机都能开；现场发卡无需本机开机）。从控制台点进去免口令；直接复制裸链接打开才需要输满权限口令">VIP赠送</button>
+    <button class="mini" id="btnHealth" style="display:none" title="云端「号体检」网页（/healthcloud，数据在云上，换电脑/手机都能开）。从控制台点进去免口令；直接复制裸链接打开才需要输满权限口令">号体检</button>
     <button class="mini" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限/只读都可看，纯读不改数据）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
     <!-- 2026-11-25：客服名单/设备授权/登记链接/邮件提醒/黑名单 5 个低频按钮收进「工具箱」下拉。
          子按钮 id 不变，applyRole 显隐、手机端抽屉 mGrab 按 id 搬运全部照旧；下拉只在至少一个子项可见（满权限+桌面端）时显示。 -->
@@ -15077,7 +15416,7 @@ function openInfo(i){
   var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
   var ai=r.ai||artistInfo(e);
   var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
-  var methodLabels={manual_import:'客服手动提交',manual_qr:'客服扫码取CK',link_qr:'链接扫码',browser_qr:'真浏览器扫码'};
+  var methodLabels={manual_import:'客服手动提交',link_qr:'链接扫码',browser_qr:'真浏览器扫码'};
   var exitLabels={home_relay:'本机家宽转发',cf_direct:'Cloudflare 直连',home_browser:'真浏览器家宽'};
   var legacyMethod={manual_web:'客服手动提交',qr_cf:'链接扫码',qr_home:'真浏览器扫码'};
   var methodTxt=methodLabels[e.registrationMethod]||legacyMethod[e.source]||'未记录';
@@ -16504,8 +16843,17 @@ document.addEventListener('click',function(e){
   if(w.contains(e.target))return;      // 点壳内（含子项）不收起：子项点击后面板可能还要用
   m.classList.remove('open');
 });
-if($('btnHealth'))$('btnHealth').onclick=function(){window.open('http://127.0.0.1:8765/','_blank');};
-if($('btnVip'))$('btnVip').onclick=function(){window.open('http://127.0.0.1:8765/vip','_blank');};
+// 2026-11-25：号体检/VIP赠送 升级为云端页（换电脑/手机可用）。复用签到管理交接模式：
+// 满权限登录态 → /api/cloud/handoff 领一次性票据 → 带 #tk 开云页 → 页面自动换口令登录。
+function cloudHandoffOpen(page){
+  var t={};try{t=JSON.parse(TOKEN||'{}');}catch(e){}
+  api('/api/cloud/handoff',{user:t.user||'xx1031',pass:t.pass||''}).then(function(o){
+    var u=location.origin+page+((o&&o.ok&&o.tk)?('#tk='+o.tk):'');
+    window.open(u,'_blank');
+  });
+}
+if($('btnHealth'))$('btnHealth').onclick=function(){cloudHandoffOpen('/healthcloud');};
+if($('btnVip'))$('btnVip').onclick=function(){cloudHandoffOpen('/vipcloud');};
 if($('btnMore'))$('btnMore').onclick=function(){syncLayout();var d=$('toolDrawer'),mk=$('mMask');if(d)d.classList.add('on');if(mk)mk.classList.add('on');};
 if($('btnFilter'))$('btnFilter').onclick=function(){syncLayout();var f=$('filterPanel'),mk=$('mMask');if(f)f.classList.toggle('on');if(mk)mk.classList.toggle('on',f&&f.classList.contains('on'));};
 if($('tdClose'))$('tdClose').onclick=function(){var d=$('toolDrawer'),mk=$('mMask');if(d)d.classList.remove('on');if(mk)mk.classList.remove('on');};
