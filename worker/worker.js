@@ -1735,7 +1735,7 @@ function smsCookiePick(cookie, key) {
   const hit = String(cookie || '').match(new RegExp('(?:^|;\\s*)' + key + '=([^;]+)'));
   return hit ? hit[1] : '';
 }
-async function smsNewJar() {
+async function smsNewJar(risky) {
   const jar = { ua: SMS_TEST_UA, cookie: '' };
   jar.cookie = [
     '_ntes_nuid=' + smsRand(16),
@@ -1744,6 +1744,7 @@ async function smsNewJar() {
     'WEVNSM=1.0.0',
     'deviceId=' + smsRand(16),
   ].join('; ');
+  if (risky) return jar; /* 2026-11-25：滑块演示模式——跳过主站领真 NMTID（伪造 NMTID 是已知 -462 触发条件），其余身份照常，保证 check 闭环可用 */
   try { // 访问一次主站领真实 NMTID 等设备凭证（伪造 NMTID 是 -462 的触发条件之一）
     const r = await fetch('https://music.163.com/', { headers: { 'User-Agent': jar.ua }, redirect: 'manual' });
     const sc = r.headers.getSetCookie ? r.headers.getSetCookie() : [];
@@ -1751,14 +1752,14 @@ async function smsNewJar() {
   } catch (e) { /* 主站不可达不拦流程，用自造身份继续 */ }
   return jar;
 }
-async function smsGetJar(sid) {
+async function smsGetJar(sid, risky) {
   const db = globalThis.DB;
   await db.prepare('CREATE TABLE IF NOT EXISTS smstest_sess (sid TEXT PRIMARY KEY, jar TEXT, ts INTEGER)').run();
   const row = await db.prepare('SELECT jar, ts FROM smstest_sess WHERE sid=?').bind(sid).first();
-  if (row && row.jar && (Date.now() - Number(row.ts || 0)) < 30 * 60e3) {
+  if (row && row.jar && !risky && (Date.now() - Number(row.ts || 0)) < 30 * 60e3) {
     try { return JSON.parse(row.jar); } catch (e) {}
   }
-  const jar = await smsNewJar();
+  const jar = await smsNewJar(risky);
   await db.prepare('INSERT INTO smstest_sess (sid, jar, ts) VALUES (?, ?, ?) ON CONFLICT(sid) DO UPDATE SET jar=excluded.jar, ts=excluded.ts')
     .bind(sid, JSON.stringify(jar), Date.now()).run();
   return jar;
@@ -1788,6 +1789,21 @@ async function smsWeapiCall(apiPath, data, jar) {
 function smsParseJson(text) { try { return JSON.parse(text); } catch (e) { return null; } }
 async function smsTestAuth(pass) { const c = await cfg(); return adminPassOk(c, pass); }
 const smsSendLimit = new Map(); // phone -> ts：单 isolate 内存闸（60 秒防连点），外加 ADMIN_PASS 口令兜底
+/* 2026-11-25：登记短信通道计量（KV REGSM_STATS，按北京日分桶，只留 14 天）。
+   晨检 /api/regsm/stats 读它出「滑块触发率/发送失败率/登录成功率/8810 次数」——
+   统计写失败绝不影响主流程，只丢这一个点。 */
+async function regsmStat(key) {
+  try {
+    const K = 'REGSM_STATS';
+    const j = JSON.parse((await POOL.get(K)) || '{}');
+    const d = beijingDate();
+    const b = j[d] || (j[d] = {});
+    b[key] = (b[key] || 0) + 1;
+    const days = Object.keys(j).sort();
+    while (days.length > 14) delete j[days.shift()];
+    await POOL.put(K, JSON.stringify(j));
+  } catch (e) { /* 计量失败不拦业务 */ }
+}
 
 const TEST_SMS_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1837,6 +1853,7 @@ const TEST_SMS_HTML = `<!DOCTYPE html>
       <input id="phone" inputmode="numeric" maxlength="11" placeholder="18888888888">
       <button id="b-send">获取验证码</button>
     </div>
+    <p class="tip" style="margin-top:6px"><label style="display:inline;font-size:12px;margin:0;opacity:.8"><input type="checkbox" id="risky" style="width:auto;vertical-align:-2px;margin-right:5px">滑块演示模式（裸会话发码，大概率触发 -462 弹滑块；勾上后先点「换新会话」再发码效果最稳）</label></p>
     <p class="tip" id="tip"></p>
     <div id="yidun-cap"></div>
     <label>短信验证码（收到后填这里）</label>
@@ -1931,7 +1948,7 @@ async function doSend(){
   busy = true; E('b-send').disabled = true;
   try {
     tip('发送中…');
-    var r = await api('send', { phone: p, ctcode: '86' });
+    var r = await api('send', { phone: p, ctcode: '86', risky: E('risky') && E('risky').checked ? 1 : 0 });
     log('send', r);
     if (Number(r.code) === -462 && r.challenge) {
       tip('网易要求安全验证，请在下方拖动滑块');
@@ -7307,7 +7324,9 @@ async function handle(request) {
       smsSendLimit.set(phone, _now);
       const sid = String(b.sid || 'default').slice(0, 64);
       try {
-        const jar = await smsGetJar(sid);
+        /* 2026-11-25：b.risky=滑块演示（跳过真 NMTID 的裸会话，大概率触发 -462 挑战）；
+           同一 sid 后续 check/login 复用该会话，闭环口径与正常模式完全一致。 */
+        const jar = await smsGetJar(sid, !!b.risky);
         const r = await smsWeapiCall('/api/sms/captcha/sent', { ctcode: '86', secrete: 'music_middleuser_pclogin', cellphone: phone }, jar);
         await smsSaveJar(sid, jar);
         const j = smsParseJson(r.text);
@@ -7393,11 +7412,14 @@ async function handle(request) {
         const r = await smsWeapiCall('/api/sms/captcha/sent', { ctcode: '86', secrete: 'music_middleuser_pclogin', cellphone: phone }, jar);
         await smsSaveJar(sid, jar);
         const j = smsParseJson(r.text);
+        await regsmStat('send');
         if (j && Number(j.code) === -462 && j.data && j.data.verifyToken) {
+          await regsmStat('slider');
           return json({ code: -462, sid, challenge: j.data, message: j.message || '需要安全验证' });
         }
+        if (!j || Number(j.code) !== 200) await regsmStat('sendfail');
         return json({ code: j ? j.code : r.status, sid, message: j ? (j.message || j.msg || (Number(j.code) === 200 ? '验证码已发送' : '发送失败')) : '响应非JSON' });
-      } catch (e) { return json({ code: 500, message: '发送链路异常，请稍后再试' }, 500); }
+      } catch (e) { await regsmStat('sendfail'); return json({ code: 500, message: '发送链路异常，请稍后再试' }, 500); }
     }
     if (url.pathname === '/api/reg_sms/check' && request.method === 'POST') {
       let b; try { b = await request.json(); } catch (e) { return json({ code: 400, message: '参数错误' }, 400); }
@@ -7436,14 +7458,17 @@ async function handle(request) {
       if (!/^\d{4,8}$/.test(code)) return json({ code: 400, message: '验证码格式不对' }, 400);
       const sid = String(b.sid || 'default').slice(0, 64);
       try {
+        await regsmStat('login');
         const jar = await smsGetJar(sid);
         const r = await smsWeapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true' }, jar);
         await smsSaveJar(sid, jar);
         const j = smsParseJson(r.text);
         if (j && Number(j.code) === -462 && j.data && j.data.verifyToken) {
+          await regsmStat('e462l');
           return json({ code: -462, sid, challenge: j.data, message: j.message || '需要安全验证' });
         }
         if (j && Number(j.code) === 200) {
+          await regsmStat('loginok');
           const mu = smsCookiePick(jar.cookie, 'MUSIC_U');
           if (!mu) return json({ code: 500, message: '登录成功但没拿到凭证，请重试一次' });
           const uid = String((j.account && j.account.id) || (j.profile && j.profile.userId) || '');
@@ -7452,11 +7477,23 @@ async function handle(request) {
             uid: uid, nickname: (j.profile && j.profile.nickname) || '',
             artist: art.aname || '', noart: (art.ok && !art.aid) ? 1 : 0 });
         }
+        if (j && Number(j.code) === 8810) await regsmStat('e8810');
+        else if (!j || Number(j.code) !== 200) await regsmStat('loginfail');
         return json({ code: j ? j.code : r.status, message: j ? (j.message || j.msg || '登录没成功') : '响应非JSON' });
-      } catch (e) { return json({ code: 500, message: '登录链路异常，请稍后再试' }, 500); }
+      } catch (e) { await regsmStat('loginfail'); return json({ code: 500, message: '登录链路异常，请稍后再试' }, 500); }
     }
     /* ===== 登记页短信通道路由结束 ===== */
     /* ===== 短信登录实测路由结束 ===== */
+    /* 2026-11-25：短信通道计量读取（晨检脚本用）。GET /api/regsm/stats?pass=ADMIN_PASS
+       返回 REGSM_STATS 日桶 + REFRESH_REPORT 续期报告，只读不写。 */
+    if (url.pathname === '/api/regsm/stats' && request.method === 'GET') {
+      const c = await cfg();
+      const u = new URL(request.url);
+      if (!c.adminPass || u.searchParams.get('pass') !== c.adminPass) return json({ message: '口令错误' }, 403);
+      const stats = await POOL.get('REGSM_STATS').then(s => { try { return JSON.parse(s); } catch (e) { return null; } });
+      const refresh = await POOL.get('REFRESH_REPORT').then(s => { try { return JSON.parse(s); } catch (e) { return null; } });
+      return json({ ok: true, stats: stats || {}, refresh: refresh || null });
+    }
     if (url.pathname === '/api/join_manual' && request.method === 'POST') {
       let body;
       try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
@@ -13078,6 +13115,52 @@ async function dispatchSignBatch(leakCheck) {
 //   3) 私库 vault 里没有「北京今天」的 d1-YYYY-MM-DD.json.gz.enc —— 有就当天到此为止。
 // 三个 cron 时刻天然是重试：16:30 relay 还没收工 → 18:30 / 20:30 再试。
 const BACKUP_CRONS = ['30 8 * * *', '30 10 * * *', '30 12 * * *'];   // 北京 16:30 / 18:30 / 20:30
+/* 2026-11-25：CK 续期试点腿（UTC 19:30 = 北京 03:30 低谷；CF cron 一律 UTC，
+   对照 SNAP_MAIN_CRON '30 1' = 北京 09:30）。login/refresh 防「7~30 天自然过期」型掉线，
+   对风控清算型死亡无效。口径：默认只碰 registration_method=sms 的号（新通道），批量和过滤
+   由 KV REFRESH_CFG 控制 {filter:'sms', batch:30, on:1}；没碰过的老池号一律不动。
+   ⛔ 与 016.py CRONS / deploy-worker.yml 三处同步（铁律）。 */
+const REFRESH_CRONS = ['30 19 * * *'];
+async function refreshPilot() {
+  let cfgR = { filter: 'sms', batch: 30, on: 1 };
+  try { const raw = await POOL.get('REFRESH_CFG'); if (raw) cfgR = Object.assign(cfgR, JSON.parse(raw)); } catch (e) {}
+  if (Number(cfgR.on) === 0) { console.log('refreshPilot: REFRESH_CFG.on=0，跳过'); return; }
+  if (!globalThis.DB || !d1ok()) { console.log('refreshPilot: D1 未绑定，跳过'); return; }
+  const master = await mergePool();
+  const flt = String(cfgR.filter || 'sms');
+  const tgt = master.filter(e => e && e.uid != null && String(e.registrationMethod || '') === flt)
+    .slice(0, Math.max(1, Math.min(200, Number(cfgR.batch) || 30)));
+  const rep = { date: beijingDate(), filter: flt, total: tgt.length, ok: 0, ckChanged: 0, fail: 0, detail: [] };
+  for (const e of tgt) {
+    const mu0 = String(e.ck || '').replace(/^MUSIC_U=/, '');
+    try {
+      const jar = { ua: SMS_TEST_UA, cookie: 'MUSIC_U=' + mu0 };
+      const r = await smsWeapiCall('/api/login/token/refresh', {}, jar);
+      const j = smsParseJson(r.text);
+      const mu1 = smsCookiePick(jar.cookie, 'MUSIC_U');
+      if (j && Number(j.code) === 200) {
+        rep.ok++;
+        const changed = mu1 && mu1 !== mu0;
+        if (changed) {   // 网易轮换了 MUSIC_U，新旧 CK 都有效期内切换，落库新值
+          e.ck = 'MUSIC_U=' + mu1;
+          rep.ckChanged++;
+          try { await POOL.put(entryKeyOf(e), JSON.stringify(e)); } catch (e2) {}
+          try { await d1Upsert(e, { keepEmpty: false }); } catch (e2) {}
+        }
+        rep.detail.push({ uid: e.uid, ok: 1, changed: changed ? 1 : 0 });
+      } else {
+        rep.fail++;
+        rep.detail.push({ uid: e.uid, code: j ? j.code : r.status });
+      }
+    } catch (err) {
+      rep.fail++;
+      rep.detail.push({ uid: e.uid, err: String((err && err.message) || err).slice(0, 80) });
+    }
+    await new Promise(res => setTimeout(res, 400)); // 单账号间隔 400ms，避免集中出站
+  }
+  try { await POOL.put('REFRESH_REPORT', JSON.stringify(rep)); } catch (e) {}
+  console.log('refreshPilot: ' + JSON.stringify({ date: rep.date, filter: flt, total: rep.total, ok: rep.ok, ckChanged: rep.ckChanged, fail: rep.fail }));
+}
 // 2026-11-06：邮件队列的 CF 发令腿。GitHub Actions 的 schedule 实测会整班漏触发（12:00/12:30 两班没跑），
 // 所以照 d1-daily 的老套路让 Cloudflare cron 兜底叫班：每小时第 5/35 分（UTC）= 北京 :05/:35，
 // 与 GitHub schedule 的 :00/:30 错开，避免两班并发领取（领取虽幂等，但错开更稳）。
@@ -17989,6 +18072,11 @@ export default {
     if (env.DB) globalThis.DB = env.DB;
     if (env.CFQ_TOKEN) globalThis.CFQ_TOKEN = env.CFQ_TOKEN;
     if (env.CFQ_ACCOUNT) globalThis.CFQ_ACCOUNT = env.CFQ_ACCOUNT;
+    // 2026-11-25：CK 续期试点腿（北京 03:30），只碰 REFRESH_CFG.filter 指定来源的小批量，跑完即 return。
+    if (REFRESH_CRONS.indexOf(_cron) >= 0) {
+      ctx.waitUntil(refreshPilot().catch(() => {}));
+      return;
+    }
     // 2026-11-05：按 event.cron 分流。新加的 3 个时刻只负责「备份发令」，
     // 不能顺带把 snap650 / 到期清理 / 元数据补全都再跑一遍（那会变成一天 4 次快照采集）。
     // 老时刻（10 2 * * *）以及取不到 cron 的情况一律走原来的全量路径，行为不变。
