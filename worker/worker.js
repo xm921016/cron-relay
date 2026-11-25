@@ -7299,7 +7299,7 @@ async function handle(request) {
     if (url.pathname === '/api/vipcloud/status' && request.method === 'POST') {
       let bVs;
       try { bVs = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
-      if (!(await consoleAuthFull(bVs))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
+      if (!(await consoleAuthFull({ user: 'xx1031', pass: (bVs && bVs.pass) || '' }))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
       const scan = await eapiVipScan(8);
       const tokens = await eapiVipTokens();
       if (scan.error) return json({ ok: false, message: scan.error }, 503);
@@ -7310,7 +7310,7 @@ async function handle(request) {
     if (url.pathname === '/api/vipcloud/take' && request.method === 'POST') {
       let bVt;
       try { bVt = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
-      if (!(await consoleAuthFull(bVt))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
+      if (!(await consoleAuthFull({ user: 'xx1031', pass: (bVt && bVt.pass) || '' }))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
       const nVt = Math.min(3, Math.max(1, parseInt(bVt.n, 10) || 1));
       const rVt = await eapiVipTake(nVt);
       return json(rVt, rVt.ok ? 200 : 503, { 'Cache-Control': 'no-store' });
@@ -7318,7 +7318,7 @@ async function handle(request) {
     if (url.pathname === '/api/healthcloud/run' && request.method === 'POST') {
       let bHc;
       try { bHc = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
-      if (!(await consoleAuthFull(bHc))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
+      if (!(await consoleAuthFull({ user: 'xx1031', pass: (bHc && bHc.pass) || '' }))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
       const keyHc = String(bHc.key || '').trim();
       if (!keyHc) return json({ ok: false, message: '请输入 uid / 手机号 / 邮箱' }, 400);
       if (!d1ok()) return json({ ok: false, message: 'D1 不可用' }, 503);
