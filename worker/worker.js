@@ -15416,7 +15416,7 @@ function openInfo(i){
   var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
   var ai=r.ai||artistInfo(e);
   var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
-  var methodLabels={manual_import:'客服手动提交',link_qr:'链接扫码',browser_qr:'真浏览器扫码'};
+  var methodLabels={manual_import:'客服手动提交',manual_qr:'客服扫码取CK',link_qr:'链接扫码',browser_qr:'真浏览器扫码'};
   var exitLabels={home_relay:'本机家宽转发',cf_direct:'Cloudflare 直连',home_browser:'真浏览器家宽'};
   var legacyMethod={manual_web:'客服手动提交',qr_cf:'链接扫码',qr_home:'真浏览器扫码'};
   var methodTxt=methodLabels[e.registrationMethod]||legacyMethod[e.source]||'未记录';
