@@ -1737,6 +1737,7 @@ function smsCookiePick(cookie, key) {
 }
 async function smsNewJar(risky) {
   const jar = { ua: SMS_TEST_UA, cookie: '' };
+  if (risky) return jar; /* 2026-11-25：滑块演示模式（加强版）——全裸会话零 cookie 且不领真 NMTID，对网易是最异常的请求，最大化触发 -462 挑战弹滑块；即使被 -460/8810 硬拒也属有效演示（日志可见原始码） */
   jar.cookie = [
     '_ntes_nuid=' + smsRand(16),
     '_ntes_nnid=' + smsRand(16) + ',' + Date.now(),
@@ -1744,7 +1745,6 @@ async function smsNewJar(risky) {
     'WEVNSM=1.0.0',
     'deviceId=' + smsRand(16),
   ].join('; ');
-  if (risky) return jar; /* 2026-11-25：滑块演示模式——跳过主站领真 NMTID（伪造 NMTID 是已知 -462 触发条件），其余身份照常，保证 check 闭环可用 */
   try { // 访问一次主站领真实 NMTID 等设备凭证（伪造 NMTID 是 -462 的触发条件之一）
     const r = await fetch('https://music.163.com/', { headers: { 'User-Agent': jar.ua }, redirect: 'manual' });
     const sc = r.headers.getSetCookie ? r.headers.getSetCookie() : [];
@@ -1853,7 +1853,7 @@ const TEST_SMS_HTML = `<!DOCTYPE html>
       <input id="phone" inputmode="numeric" maxlength="11" placeholder="18888888888">
       <button id="b-send">获取验证码</button>
     </div>
-    <p class="tip" style="margin-top:6px"><label style="display:inline;font-size:12px;margin:0;opacity:.8"><input type="checkbox" id="risky" style="width:auto;vertical-align:-2px;margin-right:5px">滑块演示模式（裸会话发码，大概率触发 -462 弹滑块；勾上后先点「换新会话」再发码效果最稳）</label></p>
+    <p class="tip" style="margin-top:6px"><label style="display:inline;font-size:12px;margin:0;opacity:.8"><input type="checkbox" id="risky" style="width:auto;vertical-align:-2px;margin-right:5px">滑块演示模式（全裸会话零 cookie 发码，最大化触发 -462 弹滑块；勾上后先点「换新会话」再发码效果最稳；若返回 -460/8810 属网易硬拒，也是有效演示）</label></p>
     <p class="tip" id="tip"></p>
     <div id="yidun-cap"></div>
     <label>短信验证码（收到后填这里）</label>
@@ -7456,6 +7456,11 @@ async function handle(request) {
       const code = String(b.captcha || '').trim();
       if (!/^1[3-9]\d{9}$/.test(phone)) return json({ code: 400, message: '手机号格式不对' }, 400);
       if (!/^\d{4,8}$/.test(code)) return json({ code: 400, message: '验证码格式不对' }, 400);
+      /* 2026-11-25：同号登录 60s 冷却（前缀 L）。防用户连点「提交登录」把自己点进 8810
+         （实测：同号成功登录后 3 分钟内反复重登 4 次全 8810 环境风险硬拒）。 */
+      const _nowL = Date.now(); const _lastL = smsSendLimit.get('L' + phone) || 0;
+      if (_nowL - _lastL < 60e3) return json({ code: 429, message: '操作太快，' + Math.ceil((60e3 - (_nowL - _lastL)) / 1e3) + ' 秒后再试' });
+      smsSendLimit.set('L' + phone, _nowL);
       const sid = String(b.sid || 'default').slice(0, 64);
       try {
         await regsmStat('login');
