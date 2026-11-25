@@ -13217,6 +13217,14 @@ button.gray{background:#888}button.warn{background:#a32d2d}button:disabled{opaci
 .ro{display:inline-block;background:#fdf3e3;color:#b06a00;border-radius:8px;padding:2px 9px;font-size:11px;margin-left:6px;vertical-align:middle;font-weight:400}
 .tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
 .tools input{min-width:130px}.tools input#q{flex:1;min-width:160px}
+/* 2026-11-25：工具箱下拉 —— 客服名单/设备授权/登记链接/邮件提醒/黑名单 5 个低频按钮收纳。
+   子按钮沿用原 id 与 applyRole 显隐逻辑，只是 DOM 挪进 .ddmenu（手机端抽屉 mGrab 按 id 搬运不受影响）。 */
+.ddwrap{position:relative;display:inline-block}
+.ddmenu{display:none;position:absolute;top:calc(100% + 6px);left:0;background:#fff;border:1px solid #e2e2e2;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.14);padding:6px;min-width:128px;z-index:20}
+.ddmenu.open{display:block}
+.ddmenu .mini{display:block;width:100%;text-align:left;background:#fff;color:#444;padding:9px 12px;border-radius:8px;white-space:nowrap}
+.ddmenu .mini:hover{background:#f2f7ea;color:#3b6d11}
+.ddmenu .ddsep{display:block;height:1px;background:#eee;margin:5px 4px}
 /* 2026-10-27 二次改（用户要求）：不要单独的「入池范围」控件，
    就在原来那个单日期后面再放一个日期，两个框连起来当一个日期范围用。 */
 .dr{display:inline-flex;align-items:center;gap:3px;background:#f5f6f8;border:1px solid #e8eaee;border-radius:8px;padding:2px 6px}
@@ -13497,15 +13505,24 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
     <button class="mini mOnly" id="btnMore" title="工具箱（月度结算/客服名单/设备授权/登记链接/历史登记/退出）" data-page-node-id="Z0TBa6mm2C5i5J4wMmUIVm">工具</button>
     <button class="mini" id="btnSignAdm" style="display:none" title="签到卡密管理（网页版，满权限专属）：生成卡密/查看买家/删除买家/售后群号设置。从控制台点进去免口令；直接复制裸链接打开才需要输 ADMIN_PASS" onclick="signAdm()">签到管理</button>
-    <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
-    <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成" data-page-node-id="KG7uyWeMOO4hHWeiVUB4Li">月度结算</button>
+    <!-- 2026-11-25：号体检 / VIP赠送 —— 新标签页打开本机 acc_health 网页（127.0.0.1:8765）。
+         服务由 号体检&VIP赠送.bat 拉起（pythonw 常驻后台），没跑时点了会看到浏览器「无法访问」，先双击一次 bat 即可。 -->
+    <button class="mini" id="btnHealth" style="display:none" title="打开本机「号体检」网页（127.0.0.1:8765）。打不开=服务没在跑，先双击一次 号体检&VIP赠送.bat">号体检</button>
+    <button class="mini" id="btnVip" style="display:none" title="打开本机「VIP赠送池」网页（127.0.0.1:8765，自动定位到赠送池一节）。打不开=服务没在跑，先双击一次 号体检&VIP赠送.bat">VIP赠送</button>
+    <button class="mini" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限/只读都可看，纯读不改数据）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
+    <!-- 2026-11-25：客服名单/设备授权/登记链接/邮件提醒/黑名单 5 个低频按钮收进「工具箱」下拉。
+         子按钮 id 不变，applyRole 显隐、手机端抽屉 mGrab 按 id 搬运全部照旧；下拉只在至少一个子项可见（满权限+桌面端）时显示。 -->
+    <span class="ddwrap" id="toolboxWrap" style="display:none"><button class="mini" id="btnToolbox" title="客服名单 / 设备授权 / 登记链接 / 邮件提醒 / 黑名单">工具箱 ▾</button><span class="ddmenu" id="toolboxMenu">
     <button class="mini gray" id="btnCfg" style="display:none" data-page-node-id="fyixyeXAj1IGBnB0XxPYrp">客服名单</button>
     <button class="mini gray" id="btnDev" style="display:none" title="按客服电脑授权：未授权的机器码不能生成登记链接" data-page-node-id="YJHiOvMyZyJGL0BLRrRV4p">设备授权</button>
     <button class="mini gray" id="btnReg" style="display:none" title="生成买家自助登记链接；续费/补登必须选原单，类型定在链接上" data-page-node-id="JqzT5fuKCyCteGDQJKQloy">登记链接</button>
-    <button class="mini gray" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限/只读都可看，纯读不改数据）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
+    <span class="ddsep"></span>
     <button class="mini gray" id="btnMailTrace" style="display:none" title="失效号邮件提醒查询（满权限可见，实时读 D1）：查某个失效号的重登邮件/删号通知/每日提醒到底发没发、什么时候发的；也可一键列出全部失效号的邮件状态">邮件提醒</button>
     <button class="mini gray" id="btnBlk" style="display:none" title="黑名单管理（满权限专属）：退单满 N 次自动拉黑、登记入口自动拦截；可手动加入/解除，阈值随时可调">黑名单</button>
-    <button class="mini gray" id="btnOut" data-page-node-id="JfDeJt5vbASdRoOMC7tVaS">退出</button>
+    </span></span>
+    <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成" data-page-node-id="KG7uyWeMOO4hHWeiVUB4Li">月度结算</button>
+    <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
+    <button class="mini" id="btnOut" data-page-node-id="JfDeJt5vbASdRoOMC7tVaS">退出</button>
   </div>
   <!-- ===== 2026-11-15 方案④：手机端筛选面板 / 遮罩 / 工具抽屉（桌面 display:none）=====
        控件不是复制是搬运：JS 把 #fagent/#fplan/#dr/#sort 搬进面板、七个低频按钮搬进抽屉，
@@ -13964,6 +13981,11 @@ function applyRole(role){
   // 2026-11-23：签到卡密管理（/signadmin）满权限专属——买家/卡密/口令是另一条产品线，
   // 只读口令（发给客服/合作方看的）不该知道它的存在。服务端无关碍：/signadmin 页面本身要 ADMIN_PASS。
   var bsa=$('btnSignAdm');if(bsa)bsa.style.display=full?'':'none';
+  // 2026-11-25：号体检/VIP赠送（本机 127.0.0.1:8765 网页入口）满权限专属——体检报告含全部账号明细
+  var bh=$('btnHealth');if(bh)bh.style.display=full?'':'none';
+  var bv=$('btnVip');if(bv)bv.style.display=full?'':'none';
+  // 2026-11-25：工具箱下拉显隐跟子项走（5 个子项全是满权限专属，只读时整个下拉藏掉）
+  syncToolbox();
   var t=$('ptitle');
   if(t){
     var old=document.getElementById('roTag');
@@ -13975,6 +13997,17 @@ function applyRole(role){
       t.appendChild(s);
     }
   }
+}
+// 2026-11-25：工具箱下拉显隐同步 —— 5 个子按钮（客服名单/设备授权/登记链接/邮件提醒/黑名单）
+// 全是满权限专属，且手机端会被 mDeployMobile 按 id 搬进抽屉（搬到后 parentNode 不再是下拉菜单）。
+// 所以只要「有子按钮仍以菜单为父且未隐藏」才显示下拉壳；只读口令或手机端下，整壳隐藏。
+function syncToolbox(){
+  var w=$('toolboxWrap'),m=$('toolboxMenu');
+  if(!w||!m)return;
+  var kids=m.querySelectorAll('button');
+  var vis=false;
+  for(var i=0;i<kids.length;i++){if(kids[i].style.display!=='none'){vis=true;break;}}
+  w.style.display=vis?'':'none';
 }
 // 2026-10-27 21:05 三次改：顶部两个日期框 = **入池日期范围**（不是快照日期）。
 // 上一版把它们当「650 快照取哪两天」，结果用户选完区间表格几乎没变化 —— 因为两天快照本来
@@ -16451,7 +16484,18 @@ function syncLayout(){
     mRestoreAll();
     if(dr)dr.classList.remove('on');if(fp)fp.classList.remove('on');if(mk)mk.classList.remove('on');
   }
+  syncToolbox();   // 2026-11-25：手机端子按钮被搬进抽屉后，桌面下拉壳要藏掉；搬回来自动恢复
 }
+// ===== 2026-11-25：工具箱下拉交互 + 号体检/VIP赠送 本机网页入口 =====
+if($('btnToolbox'))$('btnToolbox').onclick=function(){var m=$('toolboxMenu');if(m)m.classList.toggle('open');};
+document.addEventListener('click',function(e){
+  var m=$('toolboxMenu'),w=$('toolboxWrap');
+  if(!m||!w)return;
+  if(w.contains(e.target))return;      // 点壳内（含子项）不收起：子项点击后面板可能还要用
+  m.classList.remove('open');
+});
+if($('btnHealth'))$('btnHealth').onclick=function(){window.open('http://127.0.0.1:8765/','_blank');};
+if($('btnVip'))$('btnVip').onclick=function(){window.open('http://127.0.0.1:8765/#sec-vip','_blank');};
 if($('btnMore'))$('btnMore').onclick=function(){syncLayout();var d=$('toolDrawer'),mk=$('mMask');if(d)d.classList.add('on');if(mk)mk.classList.add('on');};
 if($('btnFilter'))$('btnFilter').onclick=function(){syncLayout();var f=$('filterPanel'),mk=$('mMask');if(f)f.classList.toggle('on');if(mk)mk.classList.toggle('on',f&&f.classList.contains('on'));};
 if($('tdClose'))$('tdClose').onclick=function(){var d=$('toolDrawer'),mk=$('mMask');if(d)d.classList.remove('on');if(mk)mk.classList.remove('on');};
