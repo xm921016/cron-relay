@@ -6393,9 +6393,13 @@ async function handle(request) {
           expQ = { ok: true, exp: pl2.exp };
         }
       }
+      /* 2026-11-25：EXE 登记请求带 cksrc（qr=扫码取CK / web=网页验证码登录 / paste=手动粘贴）。
+         扫码来源落独立标签 manual_qr——11-25 数据实锤扫码批被网易延迟清算、验证码批 0 真死，
+         两类必须分开统计备查。老版本 EXE 不带该字段，一律照旧 manual_import，行为不变。 */
+      const _ckSrc = String(body.cksrc || '').trim().toLowerCase();
       const ent = { ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: phone || ('qr:' + v.uid), uid: v.uid, email: email, phone: phone, grp: isG2 ? 2 : 1, exp: expQ.exp || (pl2 ? pl2.exp : undefined),
         agent: normAgent(body.agent), plan: pl2 ? pl2.label : normAgent(body.plan).slice(0, 8), source: 'manual_web',
-        registrationMethod: 'manual_import', loginEgress: '' };
+        registrationMethod: _ckSrc === 'qr' ? 'manual_qr' : 'manual_import', loginEgress: '' };
       /* 2026-11-10：客服端也可以指定这一单是「续费」还是「补登」（主界面下拉框）。
          不传 / 传 auto → 保持原来的自动判定（号在池里=续费；号不在池但台账原单没到期=补登），
          老版本 EXE 不带这个字段，行为完全不变。
@@ -6424,7 +6428,7 @@ async function handle(request) {
             + '换绑只给还在池里的号用，掉线的号请发「补登」链接免费补回。' }, 404);
         }
         sTgtM.ck = ent.ck;
-        sTgtM.registrationMethod = 'manual_import';
+        sTgtM.registrationMethod = _ckSrc === 'qr' ? 'manual_qr' : 'manual_import';
         sTgtM.loginEgress = '';
         if (sTgtM.relogin) sTgtM.relogin = 0;
         let kvOkM = true;
@@ -15073,7 +15077,7 @@ function openInfo(i){
   var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
   var ai=r.ai||artistInfo(e);
   var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
-  var methodLabels={manual_import:'客服手动提交',link_qr:'链接扫码',browser_qr:'真浏览器扫码'};
+  var methodLabels={manual_import:'客服手动提交',manual_qr:'客服扫码取CK',link_qr:'链接扫码',browser_qr:'真浏览器扫码'};
   var exitLabels={home_relay:'本机家宽转发',cf_direct:'Cloudflare 直连',home_browser:'真浏览器家宽'};
   var legacyMethod={manual_web:'客服手动提交',qr_cf:'链接扫码',qr_home:'真浏览器扫码'};
   var methodTxt=methodLabels[e.registrationMethod]||legacyMethod[e.source]||'未记录';
