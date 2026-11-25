@@ -6471,7 +6471,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
         try { E('b-sub').textContent = '完成换绑'; } catch(e) {}
         sub = '这是「换绑登录」链接：给原来登记的号换一条全新的登录凭证（免费，有效期、歌曲、邮箱都不变'
             + (j.fix_name_m ? '，原登记手机号 ' + j.fix_name_m : '')
-            + '）· 请用原来登记的那个网易云账号扫码 · 本链接 ' + j.left_h + ' 小时内有效';
+            + '）· 请用原来登记的那个网易云账号登录（推荐短信验证码：用原账号的手机号收码；也可切「扫码登记」）· 本链接 ' + j.left_h + ' 小时内有效';
       } else {
         sub = (j.planLabel ? '套餐：' + j.planLabel + ' · ' : '') + '本链接 ' + j.left_h + ' 小时内有效（只能登记 1 个账号）';
       }
@@ -6482,10 +6482,10 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
          号码本身要自己打一遍（手机号本来就是必填项，不影响判定）。 */
       show('m-box', true);
       st.dev = getDev();
-      /* 2026-11-25：默认短信通道；ckswap（换绑）只认「原账号」，隐藏切换条走扫码。
+      /* 2026-11-25 晚：全部链接类型默认短信通道、可切扫码——ckswap 同样开放（服务端只认
+         mu 换出的 uid 且必须与链接原单对得上，短信登录天然满足，无安全缺口）。
          二维码在切到扫码页签时才出（newQr），短信模式不占 bridge 实例。 */
-      if (KIND === 'ckswap') { show('sw-bar', false); showMode('qr'); newQr(); }
-      else { showMode('sms'); }
+      showMode('sms');
     }).catch(function(e){ fail(e.message || '网络异常，请刷新重试'); });
   }
 
