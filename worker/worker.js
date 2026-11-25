@@ -6403,7 +6403,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
           <p class="tip" style="text-align:left;margin:10px 0 0">分享出来长这样，整段粘进来就行：</p>
           <p class="ex">分享任素汐的单曲《我要你》: https://163cn.tv/bkyZ4bVK (来自@网易云音乐)</p>
           <p class="tip" style="text-align:left;margin:8px 0 0">只收<b>单曲</b>：专辑、歌单、电台、排行榜链接一律退回。原创 / 共创作品，共创人<b>不超过 2 人</b>。</p>
-          <label>手机号（与网易音乐人绑定的手机号）</label>
+          <label id="lb-phone">手机号（与网易音乐人绑定的手机号）</label>
           <input id="i-phone" inputmode="numeric" maxlength="11" placeholder="18888888888" autocomplete="off">
           <label>通知邮箱（掉线或需要验证时邮件通知）</label>
           <input id="i-email" inputmode="email" placeholder="123456@qq.com" autocomplete="off">
@@ -6835,6 +6835,9 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
   function showMode(m){
     var sms = m !== 'qr';
     show('sms-side', sms); show('qr-side', !sms);
+    /* 2026-11-26：短信模式下隐藏底部「手机号（与网易音乐人绑定的手机号）」——顶部收码
+       手机号就是它，避免重复填两遍（用户口径：手机号只填一次）；扫码模式恢复显示。 */
+    try { show('lb-phone', !sms); show('i-phone', !sms); } catch (e) {}
     try {
       E('sw-sms').className = 'sw' + (sms ? ' on' : '');
       E('sw-qr').className = 'sw' + (sms ? '' : ' on');
@@ -6860,7 +6863,11 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
       payload = { t: T, mu: st.mu };
     } else {
     var song = E('i-song').value.trim();
-    var phone = E('i-phone').value.replace(/[^0-9]/g, '');
+    /* 2026-11-26：手机号取「当前可见的那个框」——短信模式只有顶部收码框（底部已隐藏），
+       扫码模式只有底部框；按 offsetParent 判断可见性，模式切换也不怕读错框。 */
+    var phoneId = 'i-phone';
+    try { if (E('i-phone').offsetParent === null && E('i-sms-phone') && E('i-sms-phone').offsetParent !== null) phoneId = 'i-sms-phone'; } catch (e) {}
+    var phone = E(phoneId).value.replace(/[^0-9]/g, '');
     var email = E('i-email').value.trim();
     clearBad();
     if (!song) { markBad('i-song'); E('sub-tip').textContent = '请填歌曲链接'; return; }
@@ -6879,8 +6886,8 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
     /* 2026-11-10：手机号改必填（原来是选填）。它是客户掉了号之后找回原单的唯一凭据
        （另一个抓手是网易 UID，但换号就没了），空着等于这一单以后没法证明是谁的，
        补登时既认不出人、到期提醒也没人收。 */
-    if (!phone) { markBad('i-phone'); E('sub-tip').textContent = '请填手机号：登录网易云用的那个 11 位手机号'; return; }
-    if (!/^1\\d{10}$/.test(phone)) { markBad('i-phone'); E('sub-tip').textContent = '手机号要 11 位、以 1 开头，请检查一下'; return; }
+    if (!phone) { markBad(phoneId); E('sub-tip').textContent = '请填手机号：登录网易云用的那个 11 位手机号'; return; }
+    if (!/^1\\d{10}$/.test(phone)) { markBad(phoneId); E('sub-tip').textContent = '手机号要 11 位、以 1 开头，请检查一下'; return; }
     if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) { markBad('i-email'); E('sub-tip').textContent = '请填一个能收到信的邮箱'; return; }
     payload = { t: T, mu: st.mu, phone: phone, link: song, email: email, src: st.src || '' };
     }
