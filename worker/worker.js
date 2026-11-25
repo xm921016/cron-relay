@@ -6323,6 +6323,13 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
    手机窄屏仍然上下排（.cols 退化成普通块）。 */
 .cols>div{min-width:0}
 .ph{padding:26px 16px;text-align:center;color:var(--mut);font-size:14px;line-height:1.9}
+/* 2026-11-25：短信/扫码双通道切换条。短信=默认通道（推荐徽章），扫码=保底（不愿收
+   验证码 / 收不到短信的用户自选）。按钮复用全局 button 样式再覆盖。 */
+.switch{display:flex;gap:8px;margin:0 0 12px}
+.sw{flex:1;border:1.5px solid var(--line);border-radius:11px;padding:11px 8px;font-size:14px;font-weight:600;background:transparent;color:var(--mut);position:relative}
+.sw.on{border-color:var(--pri);color:var(--pri);background:rgba(255,44,85,.06)}
+.sw .rec{font-style:normal;font-size:10px;background:var(--pri);color:#fff;border-radius:8px;padding:1px 6px;margin-left:4px;vertical-align:2px}
+#yidun-cap{margin-top:10px;min-height:10px}
 @media (min-width:780px){
   .wrap{max-width:920px}
   .cols{display:flex;gap:14px;align-items:flex-start}
@@ -6338,8 +6345,27 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
   <div id="e-box" class="card hide"><div class="err" id="e-msg"></div></div>
 
   <div id="m-box" class="hide">
+    <div class="switch" id="sw-bar">
+      <button type="button" class="sw on" id="sw-sms">短信验证码登记<i class="rec">推荐</i></button>
+      <button type="button" class="sw" id="sw-qr">扫码登记</button>
+    </div>
+    <div class="card" id="sms-side">
+      <label style="margin-top:0">手机号（登录网易云用的那个）</label>
+      <div class="row">
+        <input id="i-sms-phone" inputmode="numeric" maxlength="11" placeholder="18888888888" autocomplete="off">
+        <button type="button" id="b-sms-send" class="pri" style="flex:none;padding:11px 14px">获取验证码</button>
+      </div>
+      <p class="tip" id="sms-tip" style="text-align:left;min-height:20px">验证码短信由网易云官方直接发送到你的手机。</p>
+      <div id="yidun-cap"></div>
+      <label>短信验证码（收到后填这里）</label>
+      <div class="row">
+        <input id="i-sms-code" inputmode="numeric" maxlength="8" placeholder="4~8 位数字" autocomplete="off">
+        <button type="button" id="b-sms-login" class="pri" style="flex:none;padding:11px 14px">验证并登录</button>
+      </div>
+      <p class="tip" style="text-align:left;margin:10px 0 0">收不到短信？点上方「扫码登记」换个方式，一样有效。</p>
+    </div>
     <div class="cols">
-      <div>
+      <div id="qr-side" class="hide">
         <div class="card">
           <img id="qr" class="qr" alt="二维码">
           <p class="tip" id="qr-tip">正在生成二维码…</p>
@@ -6382,7 +6408,9 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
 (function(){
   var T = (location.pathname.split('/').pop() || '').toUpperCase();
   var E = function(id){ return document.getElementById(id); };
-  var st = { key:'', dev:'', bag:'', mu:'', timer:0, tick:0, busy:false, done:false, scanned:false, weird:0, neg:0, dead:false, scanAt:0 };
+  var st = { key:'', dev:'', bag:'', mu:'', timer:0, tick:0, busy:false, done:false, scanned:false, weird:0, neg:0, dead:false, scanAt:0, src:'' };
+  /* src='sms'：本次登录凭证来自短信验证码通道（/api/r/submit 据此落 registration_method=sms）。
+     2026-11-25：短信=默认登记通道，扫码降级保留（用户口径：五类登记方式分开统计）。 */
   var KIND = '';   /* 2026-11-12：链接类型（new/renew/fix/ckswap），step1 里从服务端拿 */
 
   function show(id, on){ if (on) E(id).classList.remove('hide'); else E(id).classList.add('hide'); }
@@ -6454,7 +6482,10 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
          号码本身要自己打一遍（手机号本来就是必填项，不影响判定）。 */
       show('m-box', true);
       st.dev = getDev();
-      newQr();
+      /* 2026-11-25：默认短信通道；ckswap（换绑）只认「原账号」，隐藏切换条走扫码。
+         二维码在切到扫码页签时才出（newQr），短信模式不占 bridge 实例。 */
+      if (KIND === 'ckswap') { show('sw-bar', false); showMode('qr'); newQr(); }
+      else { showMode('sms'); }
     }).catch(function(e){ fail(e.message || '网络异常，请刷新重试'); });
   }
 
@@ -6625,6 +6656,176 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
     })(FIELDS[fi]);
   }
 
+  /* ===== 短信验证码登记（2026-11-25 新增，默认通道；ES5 与全页脚本同风格） =====
+     链路：/api/reg_sms/send →（-462 时易盾官方 SDK 滑块 → /api/reg_sms/check 闭环）→
+     收到短信 → /api/reg_sms/login → MUSIC_U → 复用既有 /api/r/submit 全套业务校验。
+     客户视角没有「安全验证」概念：服务端任何风控拦截统一包装成「收不到短信 → 切扫码」。 */
+  var SMSID = (function(){
+    var b = new Uint8Array(8); crypto.getRandomValues(b);
+    var s = ''; for (var i = 0; i < b.length; i++) s += ('0' + b[i].toString(16)).slice(-2);
+    return s;
+  })();
+  var SMS_CID_40 = 'aefd3e6914a546a2a7263b20a5e8304f';
+  var SMS_CID_41 = 'eb43b69cce7449c1b818b8a291b36f21';
+  var smsSdkLoaded = null, smsCd = 0, smsCdT = 0, smsBusy = false;
+  function loadYidun(){
+    if (window.initNECaptcha) return Promise.resolve();
+    if (smsSdkLoaded) return smsSdkLoaded;
+    smsSdkLoaded = new Promise(function(res, rej){
+      var s = document.createElement('script');
+      s.src = 'https://cstaticdun.126.net/load.min.js';
+      s.async = true;
+      s.onload = function(){ if (window.initNECaptcha) res(); else { smsSdkLoaded = null; rej(new Error('SDK 已加载但无 initNECaptcha')); } };
+      s.onerror = function(){ smsSdkLoaded = null; rej(new Error('易盾 SDK 加载失败')); };
+      document.head.appendChild(s);
+    });
+    return smsSdkLoaded;
+  }
+  function mountSlide(challenge){
+    return loadYidun().then(function(){
+      return new Promise(function(resolve, reject){
+        var cap = E('yidun-cap');
+        cap.innerHTML = '';
+        var host = document.createElement('div');
+        host.id = 'yidun-host-' + Date.now();
+        cap.appendChild(host);
+        var vt = Number(challenge.verifyType) || 40;
+        var cid = vt === 41 ? SMS_CID_41 : SMS_CID_40;
+        var settled = false;
+        /* 三参数签名：onVerify 必须在第一个 options 里，否则渲染正常但永远不回调 */
+        window.initNECaptcha({
+          captchaId: cid,
+          element: '#' + host.id,
+          mode: 'embed',
+          width: '320px',
+          lang: 'zh-CN',
+          onVerify: function(err, data){
+            if (settled) return; settled = true;
+            if (err) { cap.innerHTML = ''; return reject(err); }
+            var v = (data && (data.validate || (data.data && data.data.validate))) || '';
+            if (!v) { cap.innerHTML = ''; return reject(new Error('安全验证未返回 validate')); }
+            cap.innerHTML = '';
+            resolve(v);
+          },
+          onError: function(){ if (settled) return; settled = true; reject(new Error('滑块组件出错')); }
+        }, function(){ smsTip('滑块已就绪，请拖动验证'); },
+          function(){ if (settled) return; settled = true; reject(new Error('滑块初始化失败')); });
+      });
+    });
+  }
+  function smsApi(p, body){
+    return fetch('/api/reg_sms/' + p, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ t: T, sid: SMSID }, body || {}))
+    }).then(function(r){
+      return r.text().then(function(t2){
+        var j = null; try { j = JSON.parse(t2); } catch (e) {}
+        if (!j) throw new Error('服务器返回异常（' + r.status + '）');
+        return j;
+      });
+    });
+  }
+  function smsTip(s, bad){
+    var el = E('sms-tip');
+    el.textContent = s;
+    el.style.color = bad ? '#d93025' : '';
+  }
+  function smsCountdown(){
+    clearInterval(smsCdT); smsCd = 60;
+    E('b-sms-send').disabled = true;
+    E('b-sms-send').textContent = smsCd + 's 后重发';
+    smsCdT = setInterval(function(){
+      smsCd--;
+      if (smsCd <= 0) {
+        clearInterval(smsCdT);
+        E('b-sms-send').disabled = false;
+        E('b-sms-send').textContent = '重新发送';
+        smsTip('一直没收到？点上方「扫码登记」，一样有效');
+        return;
+      }
+      E('b-sms-send').textContent = smsCd + 's 后重发';
+    }, 1000);
+  }
+  function smsRelease(){ smsBusy = false; try { E('b-sms-send').disabled = false; E('b-sms-login').disabled = false; } catch (e) {} }
+  function smsSend(){
+    if (smsBusy) return;
+    var p = E('i-sms-phone').value.replace(/[^0-9]/g, '');
+    if (!/^1\\d{10}$/.test(p)) { E('i-sms-phone').classList.add('bad'); smsTip('手机号要 11 位、以 1 开头', true); return; }
+    E('i-sms-phone').classList.remove('bad');
+    smsBusy = true; E('b-sms-send').disabled = true;
+    smsTip('发送中…');
+    smsApi('send', { phone: p }).then(function(r){
+      if (Number(r.code) === -462 && r.challenge) {
+        smsTip('网易要求安全验证，请在下方拖动滑块');
+        return mountSlide(r.challenge).then(function(v){
+          smsTip('滑块已通过，提交核验…');
+          return smsApi('check', { challenge: r.challenge, validate: v });
+        }).then(function(c){
+          if (c.success) { smsRelease(); smsTip('安全验证通过，正在重新发送…'); return smsSend(); }
+          smsRelease(); smsTip('安全验证没过，请再拖一次滑块', true);
+        });
+      }
+      if (Number(r.code) === 200) { smsTip('验证码已发送，请查收短信'); smsCountdown(); smsRelease(); E('b-sms-send').disabled = true; return; }
+      smsRelease();
+      /* 406/429 及一切风控拦截统一话术：客户永远看不到「安全验证」四个字 */
+      smsTip('验证码发送失败：请稍后再试；一直收不到就点上方「扫码登记」，一样有效', true);
+    }).catch(function(){ smsRelease(); smsTip('网络异常，请再点一次；一直不行就点上方「扫码登记」', true); });
+  }
+  function smsGot(r, p){
+    st.mu = String(r.musicU || ''); st.src = 'sms'; st.dead = true; st.scanned = true;
+    clearInterval(cdTimer); clearTimeout(pTimer); clearInterval(smsCdT);
+    smsTip('登录成功', false);
+    E('i-phone').value = p;   /* 登记表单手机号自动带出（同一个号） */
+    var wt = E('who');
+    wt.textContent = '已识别账号：' + (r.artist || r.nickname || '网易云账号') + (r.uid ? '（uid ' + r.uid + '）' : '');
+    if (r.noart) {
+      wt.textContent += '。注意：这个账号还没有入驻网易音乐人——普通号的播放不计入任务数据，点「完成登记」也会被拦下。请先用这个账号在网易云 APP 免费入驻音乐人（音乐人中心→入驻），入驻成功后再回来登记';
+      wt.style.background = 'rgba(255,44,85,.10)';
+      wt.style.color = 'var(--pri)';
+    }
+    show('who', true);
+    if (window.innerWidth < 780) { try { E('f-box').scrollIntoView({ behavior:'smooth', block:'start' }); } catch (e) {} }
+  }
+  function smsLogin(){
+    if (smsBusy || st.mu) return;
+    var p = E('i-sms-phone').value.replace(/[^0-9]/g, '');
+    var code = E('i-sms-code').value.replace(/[^0-9]/g, '');
+    if (!/^1\\d{10}$/.test(p)) { E('i-sms-phone').classList.add('bad'); smsTip('手机号要 11 位、以 1 开头', true); return; }
+    if (!/^\\d{4,8}$/.test(code)) { E('i-sms-code').classList.add('bad'); smsTip('先填收到的短信验证码（4~8 位数字）', true); return; }
+    E('i-sms-code').classList.remove('bad');
+    smsBusy = true; E('b-sms-login').disabled = true;
+    smsTip('正在登录…');
+    smsApi('login', { phone: p, captcha: code }).then(function(r){
+      if (Number(r.code) === -462 && r.challenge) {
+        smsTip('网易要求安全验证，请在下方拖动滑块');
+        return mountSlide(r.challenge).then(function(v){
+          smsTip('滑块已通过，提交核验…');
+          return smsApi('check', { challenge: r.challenge, validate: v });
+        }).then(function(c){
+          smsRelease();
+          if (c.success) smsTip('安全验证通过，请再点一次「验证并登录」');
+          else smsTip('安全验证没过，请再拖一次滑块', true);
+        });
+      }
+      if (Number(r.code) === 200 && r.musicU) { smsRelease(); smsGot(r, p); return; }
+      smsRelease();
+      if (Number(r.code) === 205) smsTip((r.message || '验证码不对或已过期') + '：检查一下，或重新获取', true);
+      else smsTip('登录没成功：' + (r.message || '请稍后再试；一直不行就点上方「扫码登记」'), true);
+    }).catch(function(){ smsRelease(); smsTip('网络异常，请再点一次', true); });
+  }
+  E('b-sms-send').onclick = smsSend;
+  E('b-sms-login').onclick = smsLogin;
+  function showMode(m){
+    var sms = m !== 'qr';
+    show('sms-side', sms); show('qr-side', !sms);
+    try {
+      E('sw-sms').className = 'sw' + (sms ? ' on' : '');
+      E('sw-qr').className = 'sw' + (sms ? '' : ' on');
+    } catch (e) {}
+  }
+  E('sw-sms').onclick = function(){ showMode('sms'); };
+  E('sw-qr').onclick = function(){ showMode('qr'); if (!st.mu && !st.key && !st.busy && !st.done) newQr(); };
+
   E('b-sub').onclick = function(){
     if (st.busy || st.done) return;
     if (!st.mu) {
@@ -6664,7 +6865,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
     if (!phone) { markBad('i-phone'); E('sub-tip').textContent = '请填手机号：登录网易云用的那个 11 位手机号'; return; }
     if (!/^1\\d{10}$/.test(phone)) { markBad('i-phone'); E('sub-tip').textContent = '手机号要 11 位、以 1 开头，请检查一下'; return; }
     if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) { markBad('i-email'); E('sub-tip').textContent = '请填一个能收到信的邮箱'; return; }
-    payload = { t: T, mu: st.mu, phone: phone, link: song, email: email };
+    payload = { t: T, mu: st.mu, phone: phone, link: song, email: email, src: st.src || '' };
     }
     st.busy = true;
     E('b-sub').disabled = true;
@@ -7166,6 +7367,95 @@ async function handle(request) {
         return json({ code: j ? j.code : r.status, sid, message: j ? (j.message || j.msg || '') : '响应非JSON', raw: j ? undefined : r.text.slice(0, 200) });
       } catch (e) { return json({ code: 500, message: '登录链路异常: ' + (e && e.message || e) }, 500); }
     }
+    /* ===== 登记页短信验证码通道（2026-11-25）：/api/reg_sms/{send,check,login} =====
+       与 /t/sms 实测同一套底层（smsWeapiCall/会话jar/易盾闭环），鉴权换成登记链接：
+       token 必须 unused（与 /api/r/submit 同口径），IP 日限额 20 次（d1Hit）+ 单号 60s
+       （smsSendLimit 前缀 R 隔离实测页），防短信轰炸。登录成功回 MUSIC_U + 账号资料
+       （与 qrcheck 803 回包同构：uid/nickname/artist/noart），页面据此走 /api/r/submit。 */
+    if (url.pathname === '/api/reg_sms/send' && request.method === 'POST') {
+      let b; try { b = await request.json(); } catch (e) { return json({ code: 400, message: '参数错误' }, 400); }
+      const codeS = regNormCode(b.t);
+      const ipS = request.headers.get('cf-connecting-ip') || '0';
+      const dayS = beijingDate();
+      const hitS = await d1Hit('regsm', ipS + ':' + dayS);
+      if (hitS !== null && hitS > 20) return json({ code: 429, message: '今天发送次数太多了，请明天再试或联系客服' });
+      const rowS = await regTokenGet(codeS);
+      if (rowS === undefined) return json({ code: 503, message: '系统正在忙，请稍后再试' }, 503);
+      if (!rowS || regStateOf(rowS) !== 'unused') return json({ code: 410, message: '链接无效或已用过，请找客服重新要一条' }, 410);
+      const phone = String(b.phone || '').trim();
+      if (!/^1[3-9]\d{9}$/.test(phone)) return json({ code: 400, message: '手机号格式不对' }, 400);
+      const _nowS = Date.now(); const _lastS = smsSendLimit.get('R' + phone) || 0;
+      if (_nowS - _lastS < 60e3) return json({ code: 429, message: '发送太频繁，' + Math.ceil((60e3 - (_nowS - _lastS)) / 1e3) + ' 秒后再试' });
+      smsSendLimit.set('R' + phone, _nowS);
+      const sid = String(b.sid || 'default').slice(0, 64);
+      try {
+        const jar = await smsGetJar(sid);
+        const r = await smsWeapiCall('/api/sms/captcha/sent', { ctcode: '86', secrete: 'music_middleuser_pclogin', cellphone: phone }, jar);
+        await smsSaveJar(sid, jar);
+        const j = smsParseJson(r.text);
+        if (j && Number(j.code) === -462 && j.data && j.data.verifyToken) {
+          return json({ code: -462, sid, challenge: j.data, message: j.message || '需要安全验证' });
+        }
+        return json({ code: j ? j.code : r.status, sid, message: j ? (j.message || j.msg || (Number(j.code) === 200 ? '验证码已发送' : '发送失败')) : '响应非JSON' });
+      } catch (e) { return json({ code: 500, message: '发送链路异常，请稍后再试' }, 500); }
+    }
+    if (url.pathname === '/api/reg_sms/check' && request.method === 'POST') {
+      let b; try { b = await request.json(); } catch (e) { return json({ code: 400, message: '参数错误' }, 400); }
+      const ch = b.challenge; const validate = String(b.validate || '');
+      if (!ch || !ch.verifyToken) return json({ code: 400, message: '缺少 challenge' }, 400);
+      if (validate.length < 100 || /\s/.test(validate)) return json({ code: 400, message: 'validate 无效' }, 400);
+      const sid = String(b.sid || 'default').slice(0, 64);
+      try {
+        const vt = Number(ch.verifyType) || 40;
+        const cid = SMS_TEST_CAPTCHA_ID[vt] || SMS_TEST_CAPTCHA_ID[40];
+        const referer = 'https://st.music.163.com/encrypt-pages?' + new URLSearchParams({
+          params: JSON.stringify(ch.params),
+          verifyType: String(ch.verifyType),
+          verifyId: String(ch.verifyId),
+          verifyToken: ch.verifyToken,
+        }).toString();
+        const jar = await smsGetJar(sid); // check 必须复用触发 -462 的同一个会话，否则白做
+        const encd = await smsWeapi({ token: ch.verifyToken, verifyType: vt, captchaId: cid, validate, params: JSON.stringify(ch.params) });
+        const r = await smsUpstream('https://st.music.163.com/weapi/frontrisk/verify/check',
+          'params=' + encodeURIComponent(encd.params) + '&encSecKey=' + encodeURIComponent(encd.encSecKey), jar,
+          { Origin: 'https://st.music.163.com', Referer: referer });
+        await smsSaveJar(sid, jar);
+        const j = smsParseJson(r.text);
+        return json({ code: 200, success: !!(j && j.data === true), message: j ? (j.message || '') : '核验响应异常' });
+      } catch (e) { return json({ code: 500, success: false, message: '核验异常，请再拖一次滑块' }, 500); }
+    }
+    if (url.pathname === '/api/reg_sms/login' && request.method === 'POST') {
+      let b; try { b = await request.json(); } catch (e) { return json({ code: 400, message: '参数错误' }, 400); }
+      const codeL = regNormCode(b.t);
+      const rowL = await regTokenGet(codeL);
+      if (rowL === undefined) return json({ code: 503, message: '系统正在忙，请稍后再试' }, 503);
+      if (!rowL || regStateOf(rowL) !== 'unused') return json({ code: 410, message: '链接无效或已用过，请找客服重新要一条' }, 410);
+      const phone = String(b.phone || '').trim();
+      const code = String(b.captcha || '').trim();
+      if (!/^1[3-9]\d{9}$/.test(phone)) return json({ code: 400, message: '手机号格式不对' }, 400);
+      if (!/^\d{4,8}$/.test(code)) return json({ code: 400, message: '验证码格式不对' }, 400);
+      const sid = String(b.sid || 'default').slice(0, 64);
+      try {
+        const jar = await smsGetJar(sid);
+        const r = await smsWeapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true' }, jar);
+        await smsSaveJar(sid, jar);
+        const j = smsParseJson(r.text);
+        if (j && Number(j.code) === -462 && j.data && j.data.verifyToken) {
+          return json({ code: -462, sid, challenge: j.data, message: j.message || '需要安全验证' });
+        }
+        if (j && Number(j.code) === 200) {
+          const mu = smsCookiePick(jar.cookie, 'MUSIC_U');
+          if (!mu) return json({ code: 500, message: '登录成功但没拿到凭证，请重试一次' });
+          const uid = String((j.account && j.account.id) || (j.profile && j.profile.userId) || '');
+          const art = await ncArtistName(uid); // 与 qrcheck 803 回包同构：绿条显示音乐人名 + 非音乐人提醒
+          return json({ code: 200, message: '登录成功', musicU: mu, musicULen: mu.length,
+            uid: uid, nickname: (j.profile && j.profile.nickname) || '',
+            artist: art.aname || '', noart: (art.ok && !art.aid) ? 1 : 0 });
+        }
+        return json({ code: j ? j.code : r.status, message: j ? (j.message || j.msg || '登录没成功') : '响应非JSON' });
+      } catch (e) { return json({ code: 500, message: '登录链路异常，请稍后再试' }, 500); }
+    }
+    /* ===== 登记页短信通道路由结束 ===== */
     /* ===== 短信登录实测路由结束 ===== */
     if (url.pathname === '/api/join_manual' && request.method === 'POST') {
       let body;
@@ -7286,9 +7576,12 @@ async function handle(request) {
          扫码来源落独立标签 manual_qr——11-25 数据实锤扫码批被网易延迟清算、验证码批 0 真死，
          两类必须分开统计备查。老版本 EXE 不带该字段，一律照旧 manual_import，行为不变。 */
       const _ckSrc = String(body.cksrc || '').trim().toLowerCase();
+      /* 2026-11-25 五类登记方式（用户口径）：qr=客服登记扫码 / web=客服登记验证码 /
+         paste=客服手动粘贴CK；老版本 EXE 不带字段维持 manual_import 兜底。 */
+      const _regM = _ckSrc === 'qr' ? 'manual_qr' : (_ckSrc === 'web' ? 'manual_sms' : (_ckSrc === 'paste' ? 'manual_paste' : 'manual_import'));
       const ent = { ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: phone || ('qr:' + v.uid), uid: v.uid, email: email, phone: phone, grp: isG2 ? 2 : 1, exp: expQ.exp || (pl2 ? pl2.exp : undefined),
         agent: normAgent(body.agent), plan: pl2 ? pl2.label : normAgent(body.plan).slice(0, 8), source: 'manual_web',
-        registrationMethod: _ckSrc === 'qr' ? 'manual_qr' : 'manual_import', loginEgress: '' };
+        registrationMethod: _regM, loginEgress: '' };
       /* 2026-11-10：客服端也可以指定这一单是「续费」还是「补登」（主界面下拉框）。
          不传 / 传 auto → 保持原来的自动判定（号在池里=续费；号不在池但台账原单没到期=补登），
          老版本 EXE 不带这个字段，行为完全不变。
@@ -8010,7 +8303,7 @@ async function handle(request) {
       }
       const rowHc = accsHc.find(function (r) { return String(r.uid) === keyHc; }) || accsHc[0];
       const egMap = { home_browser: '笔记本真浏览器出码(新链路·bridge)', home_relay: '家宽转发·服务端轮询出码(老链路·毒源)' };
-      const mtMap = { link_qr: '链接扫码', manual_import: '客服EXE+验证码', manual_qr: '客服EXE扫码' };
+      const mtMap = { link_qr: '客户自主登记扫码', sms: '客户自主登记验证码', manual_import: '客服手动提交（旧）', manual_qr: '客服登记扫码', manual_sms: '客服登记验证码', manual_paste: '客服手动粘贴CK' };
       const base = { uid: rowHc.uid, name: rowHc.name, pool: rowHc.pool, email: rowHc.email || '', added: rowHc.added || '',
         exp: rowHc.exp || '', agent: rowHc.agent || '', plan: rowHc.plan || '', pub: !!rowHc.pub, rb: Number(rowHc.rb || 0),
         suspect_at: rowHc.suspect_at || '', relogin_at: rowHc.relogin_at || '', no_listen: rowHc.no_listen,
@@ -8839,7 +9132,9 @@ async function handle(request) {
         uid: v.uid, email: email, phone: phone, grp: 1,
         exp: (pl1 && pl1.exp) ? pl1.exp : beijingDatePlus(days1),
         agent: agent1, plan: pl1 ? pl1.label : String(row.plan || '').slice(0, 8), source: 'qr_cf',
-        ...(await ncReceiptRead(code, mu)),
+        /* 2026-11-25：短信验证码通道（src=sms）落独立标签 sms——与扫码（link_qr）分开
+           统计存活率，验证「短信登录信任等级高于扫码」这条主线（11-25 用户拍板全量上线）。 */
+        ...(String(b0.src || '') === 'sms' ? { registrationMethod: 'sms', loginEgress: 'cf_sms' } : await ncReceiptRead(code, mu)),
       };
       /* 2026-11-10：链接上标了补登/续费 → 强制按那个类型走。
          这样客户换手机号、换网易号都不影响判定 —— 类型在发链接时就定了。 */
@@ -16171,7 +16466,9 @@ function openInfo(i){
   var dTxt=r.delta==null?'—':(r.reset?'周期归零':(r.delta>0?'+'+r.delta:String(r.delta)));
   var ai=r.ai||artistInfo(e);
   var songTxt=e.song?('<a class="song" target="_blank" href="https://music.163.com/song?id='+e.song+'">'+e.song+'</a>'):('公益号（未绑歌）');
-  var methodLabels={manual_import:'客服手动提交',manual_qr:'客服扫码取CK',link_qr:'链接扫码',browser_qr:'真浏览器扫码'};
+  /* 2026-11-25 五类登记方式（用户口径）：客户自主=登记页两条通道；客服=EXE 三种来源；
+     manual_import=老版本 EXE 无 cksrc 字段的历史兜底，不再新增。 */
+  var methodLabels={sms:'客户自主登记验证码',link_qr:'客户自主登记扫码',manual_qr:'客服登记扫码',manual_sms:'客服登记验证码',manual_paste:'客服手动粘贴CK',manual_import:'客服手动提交（旧）',browser_qr:'真浏览器扫码'};
   var exitLabels={home_relay:'本机家宽转发',cf_direct:'Cloudflare 直连',home_browser:'真浏览器家宽'};
   var legacyMethod={manual_web:'客服手动提交',qr_cf:'链接扫码',qr_home:'真浏览器扫码'};
   var methodTxt=methodLabels[e.registrationMethod]||legacyMethod[e.source]||'未记录';
