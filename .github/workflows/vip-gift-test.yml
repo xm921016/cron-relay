@@ -27,7 +27,7 @@ jobs:
           python vip_cloud_test.py 2>&1 | tee vip_test_out.txt
           if grep -q "RESULT=CREATE_OK" vip_test_out.txt; then
             echo "RESULT=CREATE_OK（链接已 base64 输出，拉取方本地解码）" >> $GITHUB_STEP_SUMMARY
-            grep -E "^PAGE=" vip_test_out.txt >> $GITHUB_STEP_SUMMARY
+            grep -E "^PAGE " vip_test_out.txt >> $GITHUB_STEP_SUMMARY
             grep -E "^LINK_B64=" vip_test_out.txt >> $GITHUB_STEP_SUMMARY
           else
             echo "### 未成功，退出码见 job status" >> $GITHUB_STEP_SUMMARY
