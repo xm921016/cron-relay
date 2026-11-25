@@ -1,0 +1,34 @@
+# 海外 IP 发卡真数据验证（2026-11-25，手动触发，一次一卡）
+# 用途：验证 GitHub runner（海外 IP）能否调通网易 eapi token/create 生成 VIP 邀请卡。
+# 安全：CK 走 repo secret VIP_TEST_CK，绝不入日志；脚本只调 page/info + token/create + shorturl，绝不调 accept。
+name: vip-gift-test
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install --quiet requests pycryptodome
+      - name: Create one gift card from overseas IP
+        env:
+          VIP_TEST_CK: ${{ secrets.VIP_TEST_CK }}
+        run: |
+          python vip_cloud_test.py 2>&1 | tee vip_test_out.txt
+          if grep -q "RESULT=CREATE_OK" vip_test_out.txt; then
+            echo "RESULT=CREATE_OK（链接已 base64 输出，拉取方本地解码）" >> $GITHUB_STEP_SUMMARY
+            grep -E "^PAGE=" vip_test_out.txt >> $GITHUB_STEP_SUMMARY
+            grep -E "^LINK_B64=" vip_test_out.txt >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### 未成功，退出码见 job status" >> $GITHUB_STEP_SUMMARY
+            cat vip_test_out.txt >> $GITHUB_STEP_SUMMARY
+          fi
