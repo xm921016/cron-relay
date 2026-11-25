@@ -23,6 +23,7 @@ jobs:
         env:
           VIP_TEST_CK: ${{ secrets.VIP_TEST_CK }}
         run: |
+          set -o pipefail
           python vip_cloud_test.py 2>&1 | tee vip_test_out.txt
           if grep -q "RESULT=CREATE_OK" vip_test_out.txt; then
             echo "RESULT=CREATE_OK（链接已 base64 输出，拉取方本地解码）" >> $GITHUB_STEP_SUMMARY
