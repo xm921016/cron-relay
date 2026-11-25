@@ -4227,7 +4227,12 @@ function buildPlanAccel(live, songs, listeners, today, idle, shifts) {
      整轮 8.8h；PAR 自动到 28 后同一片 1 轮，整轮 7.0h。模拟（tmp/_sim_autopar_1111.mjs）：
      813~1440 号整轮都稳定 7.0~7.7h、恒 3 波 1 轮，池子增长不用再手改任何数字。
      M < 500（dz）分支不变：APS=12、PAR_ASSUME 只在此分支不参与 per 计算，仍给 24。 */
-  const JOB_CONC = 20, TARGET_WAVES = 3, KNIFE_MIN = 520, MIN_PER_SONG = 1.52;
+  /* 2026-11-25：门闩 520→720（用户拍板：没有「9 点前必须播完」的硬时限，窗口可以延长）。
+     520 的毛病：M≥1921 就涨到 5 波 → 上限 60，池子 S/M 一过 60 就整批稀释（11-25 实锤触发，
+     加速档 118 只能拿 ~60）。720 = 00:10 起跑最晚 12:10 收工；M=2206/5波 → 上限 86（稀释解除），
+     M=2400/6波 → 71 还有余量。实际整轮 4.5h 收工，只有极端拥挤才会用满窗口。
+     ⚠ 此常量与 dz 必须逐字同步（两边必须算出同一份 plan）。 */
+  const JOB_CONC = 20, TARGET_WAVES = 3, KNIFE_MIN = 720, MIN_PER_SONG = 1.52;
   const PER0_ASSUME = M >= 500 ? Math.max(8, Math.ceil(M / (TARGET_WAVES * JOB_CONC))) : 12;
   const PAR_ASSUME = M >= 500 ? Math.min(48, Math.max(24, Math.ceil(PER0_ASSUME * 2.0))) : 24;
   const APS_ASSUME = M >= 500
@@ -13505,10 +13510,11 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <button class="mini mOnly" id="btnFilter" title="展开筛选面板（客服/套餐/入池日期）" data-page-node-id="tEGTPJl3PWFnhN9fNgrQgx">筛选</button>
     <button class="mini mOnly" id="btnMore" title="工具箱（月度结算/客服名单/设备授权/登记链接/历史登记/退出）" data-page-node-id="Z0TBa6mm2C5i5J4wMmUIVm">工具</button>
     <button class="mini" id="btnSignAdm" style="display:none" title="签到卡密管理（网页版，满权限专属）：生成卡密/查看买家/删除买家/售后群号设置。从控制台点进去免口令；直接复制裸链接打开才需要输 ADMIN_PASS" onclick="signAdm()">签到管理</button>
-    <!-- 2026-11-25：号体检 / VIP赠送 —— 新标签页打开本机 acc_health 网页（127.0.0.1:8765）。
-         服务由 号体检&VIP赠送.bat 拉起（pythonw 常驻后台），没跑时点了会看到浏览器「无法访问」，先双击一次 bat 即可。 -->
-    <button class="mini" id="btnHealth" style="display:none" title="打开本机「号体检」网页（127.0.0.1:8765）。打不开=服务没在跑，先双击一次 号体检&VIP赠送.bat">号体检</button>
-    <button class="mini" id="btnVip" style="display:none" title="打开本机「VIP赠送池」网页（127.0.0.1:8765，自动定位到赠送池一节）。打不开=服务没在跑，先双击一次 号体检&VIP赠送.bat">VIP赠送</button>
+    <!-- 2026-11-25：号体检 / VIP赠送 —— 新标签页打开本机 acc_health 网页。两个功能已拆成独立页：
+         号体检=/ 首页，VIP赠送=/vip 独立页。服务由 号体检&VIP赠送.bat 拉起（pythonw 常驻后台），
+         没跑时点了会看到浏览器「无法访问」，先双击一次 bat 即可。顺序：VIP赠送 在前（用户要求换位）。 -->
+    <button class="mini" id="btnVip" style="display:none" title="打开本机「VIP赠送池」独立页（127.0.0.1:8765/vip）。打不开=服务没在跑，先双击一次 号体检&VIP赠送.bat">VIP赠送</button>
+    <button class="mini" id="btnHealth" style="display:none" title="打开本机「号体检」独立页（127.0.0.1:8765）。打不开=服务没在跑，先双击一次 号体检&VIP赠送.bat">号体检</button>
     <button class="mini" id="btnRescue" style="display:none" title="历史登记查询 + 待挽回清单（满权限/只读都可看，纯读不改数据）。2026-11-15 修复：按钮此前漏加进工具栏，$('btnRescue') 为 null 在加载期抛 TypeError，把排在它后面的 btnDev/btnReg/btnCtrl 绑定全部带崩 —— 表现为客服名单/设备授权/登记链接点了没反应" data-page-node-id="EZagMnnY3uASwZOo4EK4Of">历史登记</button>
     <!-- 2026-11-25：客服名单/设备授权/登记链接/邮件提醒/黑名单 5 个低频按钮收进「工具箱」下拉。
          子按钮 id 不变，applyRole 显隐、手机端抽屉 mGrab 按 id 搬运全部照旧；下拉只在至少一个子项可见（满权限+桌面端）时显示。 -->
@@ -16495,7 +16501,7 @@ document.addEventListener('click',function(e){
   m.classList.remove('open');
 });
 if($('btnHealth'))$('btnHealth').onclick=function(){window.open('http://127.0.0.1:8765/','_blank');};
-if($('btnVip'))$('btnVip').onclick=function(){window.open('http://127.0.0.1:8765/#sec-vip','_blank');};
+if($('btnVip'))$('btnVip').onclick=function(){window.open('http://127.0.0.1:8765/vip','_blank');};
 if($('btnMore'))$('btnMore').onclick=function(){syncLayout();var d=$('toolDrawer'),mk=$('mMask');if(d)d.classList.add('on');if(mk)mk.classList.add('on');};
 if($('btnFilter'))$('btnFilter').onclick=function(){syncLayout();var f=$('filterPanel'),mk=$('mMask');if(f)f.classList.toggle('on');if(mk)mk.classList.toggle('on',f&&f.classList.contains('on'));};
 if($('tdClose'))$('tdClose').onclick=function(){var d=$('toolDrawer'),mk=$('mMask');if(d)d.classList.remove('on');if(mk)mk.classList.remove('on');};

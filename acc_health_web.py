@@ -372,8 +372,63 @@ button.ghost{background:#fff;color:#64748b;border:1px solid #cbd5e1;font-size:13
   </div>
   <div id="status"></div>
 </div>
-<div id="result"></div>
-<div class="card" style="margin-top:18px">
+  <div id="result"></div>
+<div style="text-align:center;color:#94a3b8;font-size:12px;margin-top:18px">
+  号体检服务常驻本机后台：关掉网页不影响，双击 号体检&amp;VIP赠送.bat 随时再开；重启电脑自动消失。<br>
+  VIP 赠送池已拆分为独立页：<a href="/vip" style="color:#2563eb">点这里打开 VIP 赠送池</a>
+</div>
+<script>
+function run(){
+  const k=document.getElementById('key').value.trim();
+  if(!k){alert('请输入手机号或 uid');return}
+  const b=document.getElementById('go');b.disabled=true;
+  const st=document.getElementById('status');st.className='';
+  const extra=document.getElementById('refresh').checked?'，含强制重导镜像，失败会自动重试':'';
+  st.innerHTML='<span class="spin"></span>正在体检 '+k+' …'+extra+'（实时复核约需 10~30 秒，请勿关闭页面）';
+  document.getElementById('result').innerHTML='';
+  fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:k,no_live:!document.getElementById('live').checked,
+      refresh:document.getElementById('refresh').checked,
+      pool:document.getElementById('pool').value})})
+  .then(r=>r.json()).then(d=>{
+    if(d.ok){st.textContent='✅ 完成，文本版已存档到 tmp\\\\体检_'+k+'_'+d.ts+'.txt';
+      document.getElementById('result').innerHTML=d.html;
+      document.getElementById('result').scrollIntoView({behavior:'smooth'});}
+    else{st.className='err';st.textContent='❌ '+(d.error||'未知错误');}
+  }).catch(e=>{st.className='err';st.textContent='❌ 请求失败：'+e})
+    .finally(()=>{b.disabled=false});
+}
+document.getElementById('key').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
+</script></body></html>"""
+
+# 2026-11-25：VIP 赠送池拆为独立页（/vip），与号体检彻底分开（用户要求两个界面完全不一样）。
+PAGE_VIP = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VIP 赠送池</title>
+<style>
+body{background:#f3f4f6;color:#1f2937;font-family:"Microsoft YaHei",system-ui,sans-serif;
+     font-size:14px;line-height:1.6;margin:0}
+.wrap{max-width:980px;margin:0 auto;padding:32px 16px 60px}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:24px 28px;
+      margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+h1{font-size:20px;margin:0 0 16px}
+label{font-size:13px;color:#475569}
+input[type=text]{width:320px;max-width:100%;padding:8px 12px;border:1px solid #cbd5e1;
+                 border-radius:8px;font-size:15px}
+button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:9px 22px;
+       font-size:15px;cursor:pointer}
+button:disabled{background:#93c5fd;cursor:not-allowed}
+button.ghost{background:#fff;color:#64748b;border:1px solid #cbd5e1;font-size:13px}
+.opts{margin:14px 0;display:flex;gap:22px;flex-wrap:wrap;align-items:center}
+#status{margin-top:12px;font-size:13px;color:#64748b}
+#status.err{color:#dc2626}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid #cbd5e1;
+      border-top-color:#2563eb;border-radius:50%;animation:r 0.8s linear infinite;
+      vertical-align:-2px;margin-right:6px}
+@keyframes r{to{transform:rotate(360deg)}}
+</style></head><body><div class="wrap">
+<div class="card">
   <h1 id="sec-vip">🎁 VIP 赠送池 <span style="font-size:12px;color:#64748b;font-weight:400">黑胶 V2+ 且本月从未赠送的号，排队依次生成赠送链接</span></h1>
   <div id="vipstats" style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0"></div>
   <div class="opts">
@@ -399,32 +454,10 @@ button.ghost{background:#fff;color:#64748b;border:1px solid #cbd5e1;font-size:13
   </div>
 </div>
 <div style="text-align:center;color:#94a3b8;font-size:12px">
-  体检服务常驻本机后台：关掉网页不影响，双击 号体检.bat 随时再开；重启电脑自动消失。
+  赠送服务与号体检共用一个本机后台：关掉网页不影响，双击 号体检&amp;VIP赠送.bat 随时再开；重启电脑自动消失。
 </div>
 <script>
-function run(){
-  const k=document.getElementById('key').value.trim();
-  if(!k){alert('请输入手机号或 uid');return}
-  const b=document.getElementById('go');b.disabled=true;
-  const st=document.getElementById('status');st.className='';
-  const extra=document.getElementById('refresh').checked?'，含强制重导镜像，失败会自动重试':'';
-  st.innerHTML='<span class="spin"></span>正在体检 '+k+' …'+extra+'（实时复核约需 10~30 秒，请勿关闭页面）';
-  document.getElementById('result').innerHTML='';
-  fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({key:k,no_live:!document.getElementById('live').checked,
-      refresh:document.getElementById('refresh').checked,
-      pool:document.getElementById('pool').value})})
-  .then(r=>r.json()).then(d=>{
-    if(d.ok){st.textContent='✅ 完成，文本版已存档到 tmp\\\\体检_'+k+'_'+d.ts+'.txt';
-      document.getElementById('result').innerHTML=d.html;
-      document.getElementById('result').scrollIntoView({behavior:'smooth'});}
-    else{st.className='err';st.textContent='❌ '+(d.error||'未知错误');}
-  }).catch(e=>{st.className='err';st.textContent='❌ 请求失败：'+e})
-    .finally(()=>{b.disabled=false});
-}
-document.getElementById('key').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
-
-// ---------------- VIP 赠送池 ----------------
+// ---------------- VIP 赠送池（独立页 /vip 专用；号体检脚本已内联在首页，两个页面互不依赖） ----------------
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
 function chip(label,val,cls){return '<span class="badge '+(cls||'b-gray')+'" style="font-size:13px;padding:4px 12px">'+esc(label)+' <b>'+esc(val)+'</b></span>'}
 function vipRender(d){
@@ -497,6 +530,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self._send(200, PAGE, "text/html; charset=utf-8")
+        elif self.path in ("/vip", "/vip.html"):
+            self._send(200, PAGE_VIP, "text/html; charset=utf-8")
         elif self.path == "/ping":
             self._send(200, '{"ok":true}')
         elif self.path == "/api/vip_status":
