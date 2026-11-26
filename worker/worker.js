@@ -7861,9 +7861,18 @@ async function handle(request) {
       const sid = String(b.sid || 'default').slice(0, 64);
       try {
         await regsmStat('login');
+        /* 登录成功回包（weapi / eapi 两条通道共用，页面拿到的结构必须完全一致） */
+        const okLogin = async (jx, jarx) => {
+          const mu = smsCookiePick(jarx.cookie, 'MUSIC_U');
+          if (!mu) return json({ code: 500, message: '登录成功但没拿到凭证，请重试一次' });
+          const uid = String((jx.account && jx.account.id) || (jx.profile && jx.profile.userId) || '');
+          const art = await ncArtistName(uid); // 与 qrcheck 803 回包同构：绿条显示音乐人名 + 非音乐人提醒
+          return json({ code: 200, message: '登录成功', musicU: mu, musicULen: mu.length,
+            uid: uid, nickname: (jx.profile && jx.profile.nickname) || '',
+            artist: art.aname || '', noart: (art.ok && !art.aid) ? 1 : 0 });
+        };
         const jar = await smsGetJar(sid);
-        const r = await smsWeapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true' }, jar);
-        await smsSaveJar(sid, jar);
+        const r = await smsWeapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true' }, jar);        await smsSaveJar(sid, jar);
         const j = smsParseJson(r.text);
         if (j && Number(j.code) === -462 && j.data && j.data.verifyToken) {
           await regsmStat('e462l');
@@ -7871,16 +7880,25 @@ async function handle(request) {
         }
         if (j && Number(j.code) === 200) {
           await regsmStat('loginok');
-          const mu = smsCookiePick(jar.cookie, 'MUSIC_U');
-          if (!mu) return json({ code: 500, message: '登录成功但没拿到凭证，请重试一次' });
-          const uid = String((j.account && j.account.id) || (j.profile && j.profile.userId) || '');
-          const art = await ncArtistName(uid); // 与 qrcheck 803 回包同构：绿条显示音乐人名 + 非音乐人提醒
-          return json({ code: 200, message: '登录成功', musicU: mu, musicULen: mu.length,
-            uid: uid, nickname: (j.profile && j.profile.nickname) || '',
-            artist: art.aname || '', noart: (art.ok && !art.aid) ? 1 : 0 });
+          return await okLogin(j, jar);
         }
-        if (j && Number(j.code) === 8810) await regsmStat('e8810');
-        else if (!j || Number(j.code) !== 200) await regsmStat('loginfail');
+        /* 2026-11-26：8810 环境硬拒（今日实测占登录 19%，是概率触发而非整段封 IP）——
+           同码立刻改走 eapi 画像通道重试一次：独立会话（sid::eapi）、PC 客户端 UA、
+           每请求现取反作弊 token。仅 weapi 已 8810 才触发，正常路径零影响；
+           eapi 仍不行就照旧走页面话术，绝不把网易原话裸露给客户。 */
+        if (j && Number(j.code) === 8810) {
+          await regsmStat('e8810');
+          try {
+            const jarE = await smsGetJar(sid + '::eapi');
+            const rE = await smsEapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true', secrete: 'music_middleuser_pclogin' }, jarE);
+            await smsSaveJar(sid + '::eapi', jarE);
+            const jE = smsParseJson(rE.text);
+            if (jE && Number(jE.code) === 200) { await regsmStat('eapi_loginok'); return await okLogin(jE, jarE); }
+            if (jE && Number(jE.code) === 8810) await regsmStat('eapi_8810');
+            else if (jE && Number(jE.code) === 8821) await regsmStat('eapi_8821');
+            else await regsmStat('eapi_other');
+          } catch (eE) { await regsmStat('eapi_err'); }
+        } else if (!j || Number(j.code) !== 200) { await regsmStat('loginfail'); }
         return json({ code: j ? j.code : r.status, message: j ? (j.message || j.msg || '登录没成功') : '响应非JSON' });
       } catch (e) { await regsmStat('loginfail'); return json({ code: 500, message: '登录链路异常，请稍后再试' }, 500); }
     }
@@ -8050,7 +8068,9 @@ async function handle(request) {
             + '换绑只给还在池里的号用，掉线的号请发「补登」链接免费补回。' }, 404);
         }
         sTgtM.ck = ent.ck;
-        sTgtM.registrationMethod = _ckSrc === 'qr' ? 'manual_qr' : 'manual_import';
+        /* 2026-11-26：换绑的登记方式标签改用与上面新登记同一条五类映射（_regM）——
+           原来只分 qr/其他，EXE 用验证码方式换绑会被误落成 manual_import（旧）。 */
+        sTgtM.registrationMethod = _regM;
         sTgtM.loginEgress = '';
         if (sTgtM.relogin) sTgtM.relogin = 0;
         let kvOkM = true;
