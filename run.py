@@ -79,9 +79,10 @@ C_EXP_SONGS = {s.strip() for s in os.environ.get("C_EXP_SONGS", "").replace("，
 C_EXP_SECONDS = (40, 42)    # C 组口径：随机 40~42 秒（2026-11-19 用户拍板 38→40 起步更稳，38 留作后续下探档）
 
 # ---- 2026-11-18：全池上报口径总开关（C 组判定成立后的终态切换用，默认关）----
-# 机制：环境变量/Secret POOL_PLAY_SECONDS = "下限,上限"（如 "38,42"）。非空时：所有非实验/非下探
-#   名单歌的上报时长改为该区间随机（取代 55%~70% 过半口径）；AB/C 名单分支仍优先。
-# 安全性：为空 → 与现网逐字节一致（默认关）。C 组判定后全池切换=配这个 Secret；回退=清空。
+# 机制：环境变量/Secret POOL_PLAY_SECONDS = "下限,上限"（现配 "40,50"）。非空时：所有非实验/非下探
+#   名单歌的时长按 2026-11-26 混合口径（hz/dz 逐字一致）——50% 概率歌长 55%~70% 比例（原自然口径）、
+#   50% 概率该区间随机；背景：11-24 起官方对恒定 40~42s 单一时长指纹逐歌标记「异常播放」并截留计数。
+# 安全性：为空 → 纯 55%~70% 口径（11-21 前现网）；回退=清空。AB/C 名单分支仍优先。
 POOL_PLAY_SECONDS = tuple(
     int(x) for x in os.environ.get("POOL_PLAY_SECONDS", "").replace("，", ",").replace(" ", "").split(",") if x.strip()
 ) or None
@@ -924,8 +925,13 @@ def main():
                 t = max(t, min(MIN_PLAY_SECONDS, base - 3))
             else:
                 if POOL_PLAY_SECONDS:
-                    # 2026-11-18 全池口径总开关（默认关；C 组判定成立后配 POOL_PLAY_SECONDS 启用）
-                    t = random.randint(*POOL_PLAY_SECONDS)
+                    # 2026-11-26 混合口径（风控特征治理，hz/dz 逐字一致）：时长不再恒定 40~42s 单一指纹——
+                    # 50% 概率按歌长 55%~70% 比例（原自然口径），50% 概率取 POOL_PLAY_SECONDS 区间随机
+                    # （Secret 配 40,50），再按歌长封顶/保底。
+                    if random.random() < 0.5:
+                        t = int(base * random.uniform(PLAY_RATIO_MIN, PLAY_RATIO_MAX))
+                    else:
+                        t = random.randint(*POOL_PLAY_SECONDS)
                     t = min(t, base - 3)
                     t = max(t, min(MIN_PLAY_SECONDS, base - 3))
                 else:
