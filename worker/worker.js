@@ -15796,33 +15796,29 @@ body:has(.modal:not([hidden])){overflow:hidden}
      设置 EXE / APK 最低版本要求：宽限期（可选 0/6/12/24/48 小时）内老版本能用、客户端启动会弹
      更新提醒；到期后服务端对所有客服工作请求（登记/生成链接/续费/查原单/号池管理）回 426 拒绝。
      配置存 D1（hz/dz 共用）→ 这里设一次两个站同时生效。重复设置会重置宽限计时。 -->
-<div class="modal" id="verModal" hidden><div class="mbox" style="width:640px;max-height:92vh;overflow:auto">
+<div class="modal" id="verModal" hidden><div class="mbox" style="width:560px;padding:18px;max-height:92vh;overflow:auto">
   <h3>版本管理（EXE / APK 最低版本要求）</h3>
-  <p style="font-size:12px;color:#888;margin:4px 0 8px;line-height:1.75">发布新版后在这里设一个<b>最低版本</b>：宽限期内老版还能用（客户端每次打开会弹更新提醒倒计时），到期后老版登记 / 生成链接 / 续费 / 号池管理全部被服务端拒绝。<b>EXE 和 APK 是两条独立版本线，分别设置。</b>这里设置一次，互助版（xx1031.xyz）和定制版（dingzhi）同时生效，不用设两遍。</p>
+  <p style="font-size:12px;color:#888;margin:4px 0 8px;line-height:1.7">发布新版后在这里设一个<b>最低版本</b>：宽限期内老版还能用（客户端每次打开会弹更新提醒倒计时），到期后老版登记 / 生成链接 / 续费 / 号池管理全部被服务端拒绝。<b>EXE 和 APK 是两条独立版本线，分别设置。</b>这里设一次，互助版（xx1031.xyz）和定制版（dingzhi）同时生效。</p>
   <div id="verBody" style="font-size:13px;color:#333"></div>
-  <div style="border:1px solid #e3e9f5;background:#f6f9ff;border-radius:9px;padding:10px 12px;margin:10px 0 4px">
+  <div style="border:1px solid #e3e9f5;background:#f6f9ff;border-radius:9px;padding:10px 14px;margin:10px 0 2px">
     <div style="font-weight:600;font-size:12.5px;color:#2c5aa8;margin-bottom:8px">设置 / 更新要求</div>
-    <div style="border:1px solid #dfe8f7;background:#fff;border-radius:8px;padding:8px 10px;margin-bottom:8px">
-      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-        <div style="font-weight:600;font-size:12.5px;color:#333;padding:7px 0;min-width:118px">EXE（电脑）</div>
-        <div><label style="margin-top:0">最低版本</label><input id="verMinExe" placeholder="如 3.10" style="width:110px"></div>
-        <div><label style="margin-top:0">宽限</label><select id="verHoursExe" style="width:150px"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select></div>
-        <button class="mini" id="verGoExe" style="margin-top:0;padding:9px 14px">设置</button>
-        <button class="mini gray" id="verClrExe" style="margin-top:0;padding:9px 14px" title="解除 EXE 的版本限制（所有版本恢复可用）">解除</button>
-      </div>
-    </div>
-    <div style="border:1px solid #dfe8f7;background:#fff;border-radius:8px;padding:8px 10px">
-      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-        <div style="font-weight:600;font-size:12.5px;color:#333;padding:7px 0;min-width:118px">APK（手机）</div>
-        <div><label style="margin-top:0">最低版本</label><input id="verMinApk" placeholder="如 2.30" style="width:110px"></div>
-        <div><label style="margin-top:0">宽限</label><select id="verHoursApk" style="width:150px"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select></div>
-        <button class="mini" id="verGoApk" style="margin-top:0;padding:9px 14px">设置</button>
-        <button class="mini gray" id="verClrApk" style="margin-top:0;padding:9px 14px" title="解除 APK 的版本限制（所有版本恢复可用）">解除</button>
-      </div>
+    <div style="display:grid;grid-template-columns:86px minmax(110px,1fr) 152px auto;gap:10px 10px;align-items:center">
+      <div></div>
+      <div style="font-size:11.5px;color:#888;text-align:center">最低版本</div>
+      <div style="font-size:11.5px;color:#888;text-align:center">宽限</div>
+      <div></div>
+      <div style="font-weight:600;font-size:12.5px;color:#333">EXE（电脑）</div>
+      <input id="verMinExe" placeholder="如 3.10">
+      <select id="verHoursExe"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select>
+      <div style="display:flex;gap:6px;justify-content:flex-end"><button class="mini" id="verGoExe" style="padding:8px 15px">设置</button><button class="mini gray" id="verClrExe" style="padding:8px 15px" title="解除 EXE 的版本限制（所有版本恢复可用）">解除</button></div>
+      <div style="font-weight:600;font-size:12.5px;color:#333">APK（手机）</div>
+      <input id="verMinApk" placeholder="如 2.30">
+      <select id="verHoursApk"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select>
+      <div style="display:flex;gap:6px;justify-content:flex-end"><button class="mini" id="verGoApk" style="padding:8px 15px">设置</button><button class="mini gray" id="verClrApk" style="padding:8px 15px" title="解除 APK 的版本限制（所有版本恢复可用）">解除</button></div>
     </div>
     <p style="font-size:11.5px;color:#5a7bb5;margin:8px 0 0;line-height:1.7">填当前最新版号（如 EXE 发了 3.10 就填 3.10）。版本比较按数值逐段算，3.10 &gt; 3.9。给已设过要求的客户端重新设置会<b>重新起算</b>宽限时间。</p>
   </div>
-  <div class="row2"><button class="gray" id="verClose">关 闭</button></div>
+  <div style="text-align:center;margin-top:12px"><button class="gray" id="verClose" style="padding:9px 48px">关 闭</button></div>
   <div class="msg" id="verMsg"></div>
 </div></div>
 <!-- ===== 2026-11-10：客服机器授权 ===== -->
