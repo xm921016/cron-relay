@@ -8004,7 +8004,9 @@ async function handle(request) {
           { Origin: 'https://st.music.163.com', Referer: referer });
         await smsSaveJar(sid, jar);
         const j = smsParseJson(r.text);
-        return json({ code: 200, success: !!(j && j.data === true), message: j ? (j.message || '') : '核验响应异常' });
+        const okL = !!(j && j.data === true);
+        await regsmStat(okL ? 'check_ok' : 'check_bad');   /* 2026-11-26 补打点：本地（机房）链路滑块核验此前无计数，用户滑没滑过是计量盲区；住宅侧已有 relay_check_ok/bad */
+        return json({ code: 200, success: okL, message: j ? (j.message || '') : '核验响应异常' });
       } catch (e) { return json({ code: 500, success: false, message: '核验异常，请再拖一次滑块' }, 500); }
     }
     if (url.pathname === '/api/reg_sms/login' && request.method === 'POST') {
