@@ -10468,6 +10468,18 @@ async function handle(request) {
       const gLast = gPrev && gPrev.t ? Date.parse(gPrev.t) : 0;
       const gRemain = gLast ? (gDays * 86400000 - (gNow - gLast)) : 0;
       const gSend = !(gRemain > 0);
+      // 2026-11-26：250 提醒邮件新增「售后群：」行——群号在这里按 reg_cfg 现查随响应带回
+      //（口径同 dead_pending：不写死、不落 KV，客服改群号立即生效）。
+      // 只在「即将发信」(gSend=true) 时才查，冷却期直接跳过，省 D1 读配额。
+      let gGroup = '';
+      if (gSend) {
+        try {
+          const gRc = await regCfg();
+          const gAcc = await d1All('SELECT agent FROM accounts WHERE pool=? AND (uid=? OR name=?) LIMIT 1',
+                                   [POOL_NAME, gId, gId]);
+          gGroup = agentGroupOf(gRc, (gAcc && gAcc[0] && gAcc[0].agent) || '');
+        } catch (e) { gGroup = ''; }   // D1 未绑定/查失败 → 降级空串，notify 侧回落通用话术
+      }
       if (gSend && String(bg.mark || '') === '1') {
         const gRec = { t: new Date(gNow).toISOString(), n: ((gPrev && gPrev.n) || 0) + 1 };
         try { await POOL.put(gKey, JSON.stringify(gRec)); } catch (e) {}
@@ -10475,6 +10487,7 @@ async function handle(request) {
       }
       return json({ ok: true, send: gSend, last: (gPrev && gPrev.t) || '',
                     count: (gPrev && gPrev.n) || 0,
+                    group: gGroup,
                     remainDays: gRemain > 0 ? Math.ceil(gRemain / 86400000) : 0 });
     }
     // ---- 2026-11-04：号主重登提醒的「已发信」回执（纯新增路由）----
