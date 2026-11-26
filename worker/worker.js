@@ -7367,7 +7367,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
     if (!phone) { markBad(phoneId); E('sub-tip').textContent = '请填手机号：登录网易云用的那个 11 位手机号'; return; }
     if (!/^1\\d{10}$/.test(phone)) { markBad(phoneId); E('sub-tip').textContent = '手机号要 11 位、以 1 开头，请检查一下'; return; }
     if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) { markBad('i-email'); E('sub-tip').textContent = '请填一个能收到信的邮箱'; return; }
-    payload = { t: T, mu: st.mu, phone: phone, link: song, email: email, src: st.src || '' };
+    payload = { t: T, mu: st.mu, phone: phone, link: song, email: email, src: st.src || '', sid: SMSID || '' };
     }
     st.busy = true;
     E('b-sub').disabled = true;
@@ -8032,7 +8032,12 @@ async function handle(request) {
       try {
         await regsmStat('login');
         /* 登录成功回包（三条通道共用：住宅中继 / weapi / eapi，页面拿到的结构必须完全一致） */
-        const okLoginAs = async (mu, uid, nick) => {
+        /* 2026-11-26：eg=登录实际走的出口（relay_main/relay_bak=住宅中继·笔记本/本机，
+           cf_sms=中继未配或挂了回落机房）。成功时写入 KV sms_eg:<sid>（2h 过期），
+           提交登记时按 sid 回读落 login_egress——之前硬编码 cf_sms，把住宅链路也标成了机房。 */
+        const _egKey = 'sms_eg:' + (String(b.sid || '').replace(/[^0-9A-Za-z|_-]/g, '').slice(0, 70) || 'default');
+        const okLoginAs = async (mu, uid, nick, eg) => {
+          if (eg) { try { await POOL.put(_egKey, String(eg), { expirationTtl: 7200 }); } catch (e) {} }
           if (!mu) return json({ code: 500, message: '登录成功但没拿到凭证，请重试一次' });
           const art = await ncArtistName(uid); // 与 qrcheck 803 回包同构：绿条显示音乐人名 + 非音乐人提醒
           return json({ code: 200, message: '登录成功', musicU: mu, musicULen: mu.length,
@@ -8041,7 +8046,7 @@ async function handle(request) {
         };
         const okLogin = async (jx, jarx) => {
           const uid = String((jx.account && jx.account.id) || (jx.profile && jx.profile.userId) || '');
-          return await okLoginAs(smsCookiePick(jarx.cookie, 'MUSIC_U'), uid, (jx.profile && jx.profile.nickname) || '');
+          return await okLoginAs(smsCookiePick(jarx.cookie, 'MUSIC_U'), uid, (jx.profile && jx.profile.nickname) || '', 'cf_sms');
         };
         /* 第一优先：住宅出口中继（8810 的根治位）。?ch=eapi 是显式测试开关，测试时不走中继，
            保证测到的是 eapi 本身；中继没配 / 挂了 / 超时 一律静静回落下面两条本地链路。 */
@@ -8054,7 +8059,7 @@ async function handle(request) {
               if (rc === 200 && rr.musicU) {
                 await regsmStat('relay_ok');
                 if (rr._via === 'bak') await regsmStat('relay_ok_bak'); // 主链不通、备线接手成功
-                return await okLoginAs(rr.musicU, rr.uid, rr.nick);
+                return await okLoginAs(rr.musicU, rr.uid, rr.nick, rr._via === 'bak' ? 'relay_bak' : 'relay_main');
               }
               if (rc === 8810 || rc === 8821) { await regsmStat('relay_8810'); }
               else if (rc === 503 || rc === 502) { await regsmStat('relay_biz'); return json({ code: 205, message: '验证码不对或已过期' }); }
@@ -8249,7 +8254,9 @@ async function handle(request) {
       const _regM = _ckSrc === 'qr' ? 'manual_qr' : (_ckSrc === 'web' ? 'manual_sms' : (_ckSrc === 'paste' ? 'manual_paste' : 'manual_import'));
       const ent = { ck: 'MUSIC_U=' + mu, song: song.song, added: beijingDateTime(), name: phone || ('qr:' + v.uid), uid: v.uid, email: email, phone: phone, grp: isG2 ? 2 : 1, exp: expQ.exp || (pl2 ? pl2.exp : undefined),
         agent: normAgent(body.agent), plan: pl2 ? pl2.label : normAgent(body.plan).slice(0, 8), source: 'manual_web',
-        registrationMethod: _regM, loginEgress: '' };
+        /* 2026-11-26（用户拍板精确版）：EXE 扫码/验证码登录都在客服机真机上直打网易（qr_login.py/web_login 内嵌页直连），
+           → client_real；手动粘贴的 CK 取得出口无从知晓 → 空着显示未记录，不猜。 */
+        registrationMethod: _regM, loginEgress: (_ckSrc === 'qr' || _ckSrc === 'web') ? 'client_real' : '' };
       /* 2026-11-10：客服端也可以指定这一单是「续费」还是「补登」（主界面下拉框）。
          不传 / 传 auto → 保持原来的自动判定（号在池里=续费；号不在池但台账原单没到期=补登），
          老版本 EXE 不带这个字段，行为完全不变。
@@ -8281,7 +8288,7 @@ async function handle(request) {
         /* 2026-11-26：换绑的登记方式标签改用与上面新登记同一条五类映射（_regM）——
            原来只分 qr/其他，EXE 用验证码方式换绑会被误落成 manual_import（旧）。 */
         sTgtM.registrationMethod = _regM;
-        sTgtM.loginEgress = '';
+        sTgtM.loginEgress = (_ckSrc === 'qr' || _ckSrc === 'web') ? 'client_real' : '';
         if (sTgtM.relogin) sTgtM.relogin = 0;
         let kvOkM = true;
         try { await POOL.put(entryKeyOf(sTgtM), JSON.stringify(sTgtM)); }
@@ -8973,7 +8980,7 @@ async function handle(request) {
           runs: dhRuns.map(function (r) { const b = hcBJ(r.at); return { day: r.day, slice: r.slice, at_bj: b ? b.str : '' }; }) }, 200, { 'Cache-Control': 'no-store' });
       }
       const rowHc = accsHc.find(function (r) { return String(r.uid) === keyHc; }) || accsHc[0];
-      const egMap = { home_browser: '笔记本真浏览器出码(新链路·bridge)', home_relay: '家宽转发·服务端轮询出码(老链路·毒源)' };
+      const egMap = { home_browser: '笔记本真浏览器出码(新链路·bridge)', home_relay: '家宽转发·服务端轮询出码(老链路·毒源)', relay_main: '住宅中继·笔记本(短信)', relay_bak: '住宅中继·本机(短信)', cf_sms: 'CF机房直连(短信兜底)', client_real: '客服机真机直出', cf_direct: 'Cloudflare直连' };
       const mtMap = { link_qr: '客户自主登记扫码', sms: '客户自主登记验证码', manual_import: '客服手动提交（旧）', manual_qr: '客服登记扫码', manual_sms: '客服登记验证码', manual_paste: '客服手动粘贴CK' };
       const base = { uid: rowHc.uid, name: rowHc.name, pool: rowHc.pool, email: rowHc.email || '', added: rowHc.added || '',
         exp: rowHc.exp || '', agent: rowHc.agent || '', plan: rowHc.plan || '', pub: !!rowHc.pub, rb: Number(rowHc.rb || 0),
@@ -9805,7 +9812,17 @@ async function handle(request) {
         agent: agent1, plan: pl1 ? pl1.label : String(row.plan || '').slice(0, 8), source: 'qr_cf',
         /* 2026-11-25：短信验证码通道（src=sms）落独立标签 sms——与扫码（link_qr）分开
            统计存活率，验证「短信登录信任等级高于扫码」这条主线（11-25 用户拍板全量上线）。 */
-        ...(String(b0.src || '') === 'sms' ? { registrationMethod: 'sms', loginEgress: 'cf_sms' } : await ncReceiptRead(code, mu)),
+        /* 2026-11-26（用户拍板精确版）：出口不再硬编码 cf_sms——登录成功时已把实际链路
+           （relay_main/relay_bak/cf_sms）写进 KV sms_eg:<sid>，这里按 sid 回读；
+           读不到（旧缓存页没带 sid）→ 空着显示未记录，不猜。 */
+        ...((String(b0.src || '') === 'sms')
+          ? { registrationMethod: 'sms', loginEgress: await (async () => {
+              const _k = String(b0.sid || '').replace(/[^0-9A-Za-z|_-]/g, '').slice(0, 70);
+              if (!_k) return '';
+              try { const _v = await POOL.get('sms_eg:' + _k);
+                return (_v === 'relay_main' || _v === 'relay_bak' || _v === 'cf_sms') ? _v : ''; } catch (e) { return ''; }
+            })() }
+          : await ncReceiptRead(code, mu)),
       };
       /* 2026-11-10：链接上标了补登/续费 → 强制按那个类型走。
          这样客户换手机号、换网易号都不影响判定 —— 类型在发链接时就定了。 */
@@ -17272,7 +17289,9 @@ function openInfo(i){
   /* 2026-11-25 五类登记方式（用户口径）：客户自主=登记页两条通道；客服=EXE 三种来源；
      manual_import=老版本 EXE 无 cksrc 字段的历史兜底，不再新增。 */
   var methodLabels={sms:'客户自主登记验证码',link_qr:'客户自主登记扫码',manual_qr:'客服登记扫码',manual_sms:'客服登记验证码',manual_paste:'客服手动粘贴CK',manual_import:'客服手动提交（旧）',browser_qr:'真浏览器扫码'};
-  var exitLabels={home_relay:'本机家宽转发',cf_direct:'Cloudflare 直连',home_browser:'真浏览器家宽'};
+  /* 2026-11-26（用户拍板精确版）出口标签补齐：短信通道按实际走的链路落 relay_main/relay_bak/cf_sms；
+     EXE 扫码/验证码登记落 client_real；手动粘贴/旧数据出口真未知 → 维持未记录。 */
+  var exitLabels={home_relay:'本机家宽转发',cf_direct:'Cloudflare 直连',home_browser:'真浏览器家宽',relay_main:'住宅中继·笔记本',relay_bak:'住宅中继·本机',cf_sms:'CF 机房直连（短信兜底）',client_real:'客服机真机直出'};
   var legacyMethod={manual_web:'客服手动提交',qr_cf:'链接扫码',qr_home:'真浏览器扫码'};
   var methodTxt=methodLabels[e.registrationMethod]||legacyMethod[e.source]||'未记录';
   var exitTxt=exitLabels[e.loginEgress]||'未记录';
