@@ -13807,10 +13807,10 @@ async function fetchActionsStatus() {
       } catch (e) { return null; }
     }))).filter(Boolean);
   }
-  // 2026-11-20：灰度机进度透出（本机 slice0-4 + 笔记本 slice5-7）。灰度机每日北京 00:10
-  // 预播 D+1 名单（run.py run_day=ASSIGN_DAY=明天），落账 runs 表 day=明天、slice 0-7；
-  // GitHub 轮落账 day=今天，两者天然错开 → day=明天且 slice 0-7 的行只可能来自灰度机。
-  // 查询极轻：单天单池 GROUP BY slice（≤8 行），走 (day,pool,uid) 主键前缀；
+  // 2026-11-20：灰度机进度透出（本机 slice0-7 + 笔记本 slice8-15，2026-11-26 扩量前为本机0-4+笔记本5-7）。
+  // 灰度机每日北京 00:10 预播 D+1 名单（run.py run_day=ASSIGN_DAY=明天），落账 runs 表 day=明天、
+  // slice 0-15；GitHub 轮落账 day=今天，两者天然错开 → day=明天且 slice 0-15 的行只可能来自灰度机。
+  // 查询极轻：单天单池 GROUP BY slice（≤16 行），走 (day,pool,uid) 主键前缀；
   // 结果随 actions 缓存（60s/300s），不新增请求面。挂了不影响主卡展示。
   if (hzOut) {
     try {
@@ -13820,7 +13820,7 @@ async function fetchActionsStatus() {
         .bind(_grayDay).all();
       const _gSl = (_gRows.results || [])
         .map(r => ({ s: Number(r.slice), n: Number(r.n) || 0, at: String(r.at || '') }))
-        .filter(r => Number.isInteger(r.s) && r.s >= 0 && r.s <= 7)
+        .filter(r => Number.isInteger(r.s) && r.s >= 0 && r.s <= 15)
         .sort((a, b) => a.s - b.s);
       hzOut.gray = { day: _grayDay, slices: _gSl };
     } catch (e) { /* 灰度进度查询失败不影响主卡 */ }
@@ -13830,48 +13830,57 @@ async function fetchActionsStatus() {
   // 与 GitHub 实际片数一致——白天 watchdog 删号会让实时 buildPlan 算出 59 而当晚实跑 60，
   // 11-20 实测 60/59 就是这个坑）；无快照回退实时 buildPlan，再回退 max(slice)+1。
   // 分子=今天 runs 落账 distinct slice（≥0；slice 有哨兵 -1=watchdog 补漏落账，必须排除）。
-  if (hzOut) {
-    try {
-      const _bjDay = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
-      const _nsCalc = (_nP) => {
-        const _per0 = Math.max(8, Math.ceil(_nP / 60));
-        const _par = Math.max(24, Math.min(48, Math.ceil(_per0 * 2.0)));
-        const _per = Math.max(8, Math.min(_per0, Math.floor(_par / 2)));
-        return Math.max(4, Math.min(250, Math.ceil(_nP / _per)));
-      };
-      let _ns = 0, _nsSrc = '', _snapN = 0;
+  // 2026-11-26：泛化到两池（dz 也显示片数；此前 dz 只有 job 数、拉取偶发失败时什么都不显示）。
+  {
+    const _bjDay = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+    let _planCache = null;
+    for (const _pk of ['hz', 'dz']) {
+      const _pOut = out.find(x => x && x.pool === _pk);
+      if (!_pOut) continue;
       try {
-        const _snap = await planSnapGet(_bjDay, 'hz');
-        if (_snap && _snap.n > 0) { _snapN = _snap.n; _ns = _nsCalc(_snap.n); _nsSrc = 'snap'; }
-      } catch (e) { /* 快照读失败走实时 */ }
-      if (!_ns) try {
-        const _plan = await buildPlan(_bjDay);
-        if (_plan && _plan.ok) {
-          const _nP = _plan.plans.filter(x => x.pool === 'hz').length;
-          if (_nP > 0) { _ns = _nsCalc(_nP); _nsSrc = 'live'; }
+        const _nsCalc = (_nP) => {
+          const _per0 = Math.max(8, Math.ceil(_nP / 60));
+          const _par = Math.max(24, Math.min(48, Math.ceil(_per0 * 2.0)));
+          const _per = Math.max(8, Math.min(_per0, Math.floor(_par / 2)));
+          return Math.max(4, Math.min(250, Math.ceil(_nP / _per)));
+        };
+        let _ns = 0, _nsSrc = '', _snapN = 0;
+        try {
+          const _snap = await planSnapGet(_bjDay, _pk);
+          if (_snap && _snap.n > 0) { _snapN = _snap.n; _ns = _nsCalc(_snap.n); _nsSrc = 'snap'; }
+        } catch (e) { /* 快照读失败走实时 */ }
+        if (!_ns) {
+          if (!_planCache) try {
+            const _plan = await buildPlan(_bjDay);
+            if (_plan && _plan.ok) _planCache = _plan;
+          } catch (e) { /* ns 公式失败走回退 */ }
+          if (_planCache) {
+            const _nP = _planCache.plans.filter(x => x.pool === _pk).length;
+            if (_nP > 0) { _ns = _nsCalc(_nP); _nsSrc = 'live'; }
+          }
         }
-      } catch (e) { /* ns 公式失败走回退 */ }
-      // ⚠ slice 有哨兵值 -1（watchdog 补漏/回刷落账），必须排除，否则 done 会大于 ns。
-      const _tRow = await DB.prepare(
-        "SELECT COUNT(DISTINCT CASE WHEN CAST(slice AS INTEGER)>=0 THEN CAST(slice AS INTEGER) END) AS ds, "
-        + "MAX(CAST(slice AS INTEGER)) AS ms, COUNT(*) AS n FROM runs WHERE day=? AND pool='hz'")
-        .bind(_bjDay).first();
-      let _vals = [];
-      try {
-        const _vr = await DB.prepare("SELECT DISTINCT CAST(slice AS INTEGER) AS s FROM runs WHERE day=? AND pool='hz' ORDER BY s")
-          .bind(_bjDay).all();
-        _vals = (_vr.results || []).map(r => Number(r.s));
-      } catch (e) {}
-      const _ms = Number((_tRow && _tRow.ms) || -1) + 1;
-      // 分母取两者大者：快照/实时公式（排片时刻池数）可能比实际少 1（11-20 实测 59 vs 60，
-      // GitHub 00:25 pool_stat 池数 > 快照写入时刻），而 GitHub 真跑到 slice 59 后 ms+1=60 收敛为真值。
-      const _nsFinal = Math.max(_ns, _ms) || 0;
-      hzOut.day_slices = { day: _bjDay, gen: new Date().toISOString().slice(11, 19),
-        done: Number((_tRow && _tRow.ds) || 0),
-        ns: _nsFinal,
-        nsSrc: _nsSrc, snapN: _snapN,
-        accounts: Number((_tRow && _tRow.n) || 0) };
-    } catch (e) { hzOut.day_slices_err = String((e && e.message) || e).slice(0, 100); }
+        // ⚠ slice 有哨兵值 -1（watchdog 补漏/回刷落账），必须排除，否则 done 会大于 ns。
+        const _tRow = await DB.prepare(
+          "SELECT COUNT(DISTINCT CASE WHEN CAST(slice AS INTEGER)>=0 THEN CAST(slice AS INTEGER) END) AS ds, "
+          + "MAX(CAST(slice AS INTEGER)) AS ms, COUNT(*) AS n FROM runs WHERE day=? AND pool=?")
+          .bind(_bjDay, _pk).first();
+        let _vals = [];
+        try {
+          const _vr = await DB.prepare("SELECT DISTINCT CAST(slice AS INTEGER) AS s FROM runs WHERE day=? AND pool=? ORDER BY s")
+            .bind(_bjDay, _pk).all();
+          _vals = (_vr.results || []).map(r => Number(r.s));
+        } catch (e) {}
+        const _ms = Number((_tRow && _tRow.ms) || -1) + 1;
+        // 分母取两者大者：快照/实时公式（排片时刻池数）可能比实际少 1（11-20 实测 59 vs 60，
+        // GitHub 00:25 pool_stat 池数 > 快照写入时刻），而 GitHub 真跑到 slice 59 后 ms+1=60 收敛为真值。
+        const _nsFinal = Math.max(_ns, _ms) || 0;
+        _pOut.day_slices = { day: _bjDay, gen: new Date().toISOString().slice(11, 19),
+          done: Number((_tRow && _tRow.ds) || 0),
+          ns: _nsFinal,
+          nsSrc: _nsSrc, snapN: _snapN,
+          accounts: Number((_tRow && _tRow.n) || 0) };
+      } catch (e) { _pOut.day_slices_err = String((e && e.message) || e).slice(0, 100); }
+    }
   }
   // 2026-11-04：有 run 在跑时缓存只留 60 秒（进度要看得见在动）；全部结束才用 5 分钟，
   // 避免控制台每刷一次就去打 2 个仓库 x (1 次 runs + 1~3 次 jobs) 的 GitHub 接口。
@@ -17222,7 +17231,8 @@ function renderRunbar(){
       var repoTxt='',nodeTxt='';
       // 2026-11-20（用户口径）：hz 只剩 016 一个活仓，「仓库 1/1」没信息量——改按「片数」：
       // 服务端 day_slices={done,ns}（今天 runs 落账 distinct slice / plan 公式 ns），全绿「片数 59/59」。
-      if(a.pool==='hz'&&a.day_slices&&a.day_slices.ns>0)repoTxt=' · 片数 '+a.day_slices.done+'/'+a.day_slices.ns;
+      // 2026-11-26：day_slices 泛化到两池，dz 也显示片数（无则回退 jobTxt）。
+      if(a.day_slices&&a.day_slices.ns>0)repoTxt=' · 片数 '+a.day_slices.done+'/'+a.day_slices.ns;
       if(a.pool==='hz'&&Array.isArray(a.nodes)){
         var act=a.nodes.filter(function(n){return n&&n.created&&(Date.now()-new Date(n.created).getTime())<86400000;});
         var lvMain=[],lvBack=[],flNames=[];
@@ -17237,7 +17247,7 @@ function renderRunbar(){
         if(lvBack.length)nodeTxt+='<span style="color:#185FA5"> · 补跑中 '+lvBack.join(',')+'</span>';
         if(flNames.length)nodeTxt+='<span class="bad"> · '+flNames.join(',')+'仓失败</span>';
       }
-      // 2026-11-20：灰度机进度（本机 slice0-4 + 笔记本 slice5-7，每日 00:10 预播 D+1 名单）。
+      // 2026-11-20：灰度机进度（2026-11-26 扩量后=本机 slice0-7 + 笔记本 slice8-15，每日 00:10 预播 D+1 名单）。
       // 服务端 hz 条目已附 gray={day,slices:[{s,n,at}]}（runs 表 day=明天的落账只可能来自灰度机），
       // 前端纯本地计算。片齐=绿色，部分=蓝色（在跑/未齐），0 片=灰色。
       var grayTxt='';
@@ -17245,12 +17255,12 @@ function renderRunbar(){
         var gs=a.gray.slices;
         var doneOf=function(ids){var d=0;for(var i=0;i<ids.length;i++)for(var j=0;j<gs.length;j++)if(gs[j].s===ids[i]){d++;break;}return d;};
         var lastOf=function(ids){var t='';for(var i=0;i<ids.length;i++)for(var j=0;j<gs.length;j++)if(gs[j].s===ids[i]&&gs[j].at&&gs[j].at>t)t=gs[j].at;return t;};
-        var dL=doneOf([0,1,2,3,4]),dN=doneOf([5,6,7]);
-        var tMax=lastOf([0,1,2,3,4,5,6,7]);
+        var dL=doneOf([0,1,2,3,4,5,6,7]),dN=doneOf([8,9,10,11,12,13,14,15]);
+        var tMax=lastOf([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]);
         var mSpan=function(d,tot,nm){var c=d>=tot?'good':(d>0?'':'muted');return '<span class="'+c+'"'+(d>0&&d<tot?' style="color:#185FA5"':'')+'>'+nm+' '+d+'/'+tot+'</span>';};
         var gDay=esc(String(a.gray.day||'').slice(5));
-        grayTxt=' · <span class="muted" title="灰度机（本机 slice0-4 + 笔记本 slice5-7）预播 '+gDay+' 名单的落账进度，来自 runs 表">灰度('+gDay+')</span> '
-          +mSpan(dL,5,'本机')+' '+mSpan(dN,3,'笔记本');
+        grayTxt=' · <span class="muted" title="灰度机（本机 slice0-7 + 笔记本 slice8-15）预播 '+gDay+' 名单的落账进度，来自 runs 表">灰度('+gDay+')</span> '
+          +mSpan(dL,8,'本机')+' '+mSpan(dN,8,'笔记本');
         if(tMax)grayTxt+=' · 末次 '+esc(bjTime(tMax));
       }
       var head;
@@ -17264,9 +17274,9 @@ function renderRunbar(){
           if(a.jobs_ok&&dn>a.jobs_ok)head+='<span class="muted"> · 成功 '+a.jobs_ok+'</span>';
         }
       }else if(a.conclusion==='success'){
-        head='<span class="good">✓ 成功'+esc(a.pool==='hz'?repoTxt:jobTxt)+'</span>'+nodeTxt;
+        head='<span class="good">✓ 成功'+esc(repoTxt||jobTxt)+'</span>'+nodeTxt;
       }else{
-        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(a.pool==='hz'?repoTxt:jobTxt)+'</span>'+nodeTxt;
+        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(repoTxt||jobTxt)+'</span>'+nodeTxt;
       }
       if(a.pool==='hz'&&grayTxt)head+=grayTxt;
       // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，

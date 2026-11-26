@@ -1,10 +1,11 @@
 name: gray-check
 
 # 2026-11-19 新增：本机（办公室台式）+ 笔记本（家宽）灰度播放核验。
-# 背景：GitHub 封号危机下，播放算力迁往本机+笔记本（slice 0-7，每天北京时间 00:10 起
-# 预播「明天」的名单，跑完远早于 GitHub 对该名单的次日 0:25 快照，零双播）。
+# 背景：GitHub 封号危机下，播放算力迁往本机+笔记本（2026-11-26 扩量后 slice 0-15：
+# 本机 0-7 + 笔记本 8-15，每天北京时间 00:10 起预播「明天」的名单，
+# 跑完远早于 GitHub 对该名单的次日 0:25 快照，零双播）。
 # 本 workflow 每天早上（北京 07:40，GitHub cron 常延迟 0.5~1.5h）自动核验：
-#   1) 昨天(=今天视角的 tomorrow 名单) slice 0-7 是否全部落库（灰度机的活）
+#   1) 昨天(=今天视角的 tomorrow 名单) slice 0-15 是否全部落库（灰度机的活）
 #   2) 今天名单全池落库进度（GitHub 昨夜 + 前夜灰度机合计）
 # 结果每天发一封邮件到 ALERT_TO，无需人工查。
 on:
@@ -33,7 +34,7 @@ jobs:
           UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
           BASE = "https://xx1031.xyz"
           NS = 59
-          GRAY_SLICES = list(range(8))
+          GRAY_SLICES = list(range(16))
 
           def bjdate(offset):
               return (datetime.utcnow() + timedelta(hours=8 + offset)).date().isoformat()
@@ -64,7 +65,7 @@ jobs:
               lines.append("  slice %d: %d/%d 已播 %s" % (job, len(uids) - len(miss), len(uids), tag))
 
           all_ok = missing_total == 0 and gray_total > 0
-          subject = "[gray-check] %s 灰度核验: slice0-7 %s (%d/%d) | 全池昨日 %d" % (
+          subject = "[gray-check] %s 灰度核验: slice0-15 %s (%d/%d) | 全池昨日 %d" % (
               gray_day, "全齐" if all_ok else "有缺", gray_total - missing_total,
               gray_total, len(done_main))
           body = (
