@@ -278,21 +278,22 @@ jobs:
           _only = [int(x) for x in (os.environ.get("ONLY_SLICES") or "").replace(" ", "").split(",") if x.isdigit()]
           # 2026-11-19 多节点分摊（015 被封后负载摊薄改造，用户拍板「新号低强度+016 收剩余」）：
           #   follower 清单与每日片数上限：
-          #     013=xm921013 ≤10 片 / 014=xm921014 ≤10 片 / 011=xm921011 ≤10 片 / 010=xm921010 ≤10 片
           #     016=xm921016 收全部剩余（无上限，同时是兜底海绵：任何 follower 死掉其份额自动落给它）
           #   plan 时逐号健康检查（GET /repos/<acc>/relay-node，public 仓无需特权）：
           #     200=存活参与分配；403=账号被封（suspended）/404=仓不存在 → 本轮跳过（::warning 显式暴露）；
           #     网络/5xx 异常 → 保守当存活（dispatch 侧失败另有 warning，双保险不静默丢片）。
-          #   分配算法：存活 follower 按 013→014→011→010 顺序各领 ≤cap 片（连续块），016 收全部剩余；
+          #   分配算法：存活 follower 按清单顺序各领 ≤cap 片（连续块），016 收全部剩余；
           #     全部片并集恒等于 0..ns-1，分片键与旧对半分完全一致（sliceBucket 未动）。
           #   输出 follower_plan=紧凑 JSON（alive 且非空的派发清单），由「派 follower 片」单步循环 dispatch。
           #   兜底：ns < 6 时 fanout 关闭（片太少分摊无意义），回退 master 全跑原语义。
           #   带 ns_override / only_slices 的补跑/排查保持原语义：master 全跑/定向跑、不派 follower。
           #   历史：2026-11-15 阶段二对半分（N2=015）→ 2026-11-17 Phase 2 master 0 片（016=N2b 前一半）
-          #   → 2026-11-19 015 被 GitHub 封禁，N2 换 014 并升级为多点分摊。
-          _FOLLOWS = [("013", "xm921013", 10), ("014", "xm921014", 10),
-                      ("011", "xm921011", 10), ("010", "xm921010", 10),
-                      ("016", "xm921016", None)]
+          #   → 2026-11-19 015 被 GitHub 封禁，N2 换 014 并升级为多点分摊
+          #   → 2026-11-26 014/013/011/010/015 节点账号确认全部长期封禁，清单只留 016。
+          #   2026-11-26 清理：015/014/013/011/010 节点账号已全部被 GitHub 封禁（长期封死，无解封计划），
+          #     清单只留 016。行为不变：此前死仓每晚健康检查 403 后自动跳过、份额本就全落 016。
+          #     若将来新开节点账号，把 ("XXX", "xmXXXXXX", cap) 加回列表即可（按顺序连续块分配，016 恒收剩余）。
+          _FOLLOWS = [("016", "xm921016", None)]
           def _node_alive(_owner):
               try:
                   _req = urllib.request.Request(
@@ -354,20 +355,16 @@ jobs:
                 + (" 跳过(封禁/无仓): " + ",".join(_dead) if _dead else ""))
           EOF
 
-      # 2026-11-19 多节点分摊派发：单步循环 plan 产出的 follower_plan（013/014/011/010 各 ≤10 片、
-      # 016 收剩余；plan 已对封号节点做过健康检查跳过）。每个 follower 一次 dispatch 带自己的
-      # only_slices；入参 ns/day/par 与 master 完全一致保证分片键相同，各 follower 的
-      # only_slices 互斥且并集=0..ns-1。continue-on-error：单节点 dispatch 失败只打 warning
-      # （封号节点的 dispatch 也会 204 但 run 永远 queued —— 由 watchdog 两轮补漏 + 判定兜底）。
+      # 2026-11-19 多节点分摊派发：单步循环 plan 产出的 follower_plan
+      # （2026-11-26 起清单只留 016，其余节点账号已封禁清理；plan 已对存活做过健康检查）。
+      # 每个 follower 一次 dispatch 带自己的 only_slices；入参 ns/day/par 与 master 完全一致保证
+      # 分片键相同，各 follower 的 only_slices 互斥且并集=0..ns-1。continue-on-error：单节点
+      # dispatch 失败只打 warning（dispatch 也会 204 但 run 永远 queued —— 由 watchdog 两轮补漏 + 判定兜底）。
       - name: 派 follower 片（多节点分摊，plan 产出 follower_plan）
         if: steps.plan.outputs.fanout == '1'
         continue-on-error: true
         env:
-          NODE010_TOKEN: ${{ secrets.NODE010_TOKEN }}
-          NODE011_TOKEN: ${{ secrets.NODE011_TOKEN }}
-          NODE013_TOKEN: ${{ secrets.NODE013_TOKEN }}
-          NODE014_TOKEN: ${{ secrets.NODE014_TOKEN }}
-          NODE016_TOKEN: ${{ secrets.NODE016_TOKEN }}
+          NODE016_TOKEN: ${{ secrets.NODE016_TOKEN }}   # 2026-11-26 清理：015/014/013/011/010 已封禁，NODE010~014_TOKEN 从 secrets 移除
           FOLLOWER_PLAN: ${{ steps.plan.outputs.follower_plan }}
           NS: ${{ steps.plan.outputs.ns }}
           DAY: ${{ steps.plan.outputs.day }}
