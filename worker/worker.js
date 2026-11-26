@@ -2065,14 +2065,14 @@ async function smsRelayCfg() {
   SMS_RELAY_MEM = { t: now, v: v };
   return v;
 }
-async function smsRelayOne(url, key, phone, code, ms) {
+async function smsRelayPostOne(url, key, path, payload, ms) {
   const ac = new AbortController();
   const tm = setTimeout(() => { try { ac.abort(); } catch (e) {} }, ms);
   try {
-    const r = await fetch(url + '/login', {
+    const r = await fetch(url + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Relay-Key': key },
-      body: JSON.stringify({ phone: phone, code: code }),
+      body: JSON.stringify(payload || {}),
       signal: ac.signal,
     });
     if (!r.ok) return null;
@@ -2084,22 +2084,24 @@ async function smsRelayOne(url, key, phone, code, ms) {
     clearTimeout(tm);
   }
 }
-/* 主→备顺序调用：网络失败 / 非 JSON 直接换下一台；8810、8821 是「这台出口被风控」，
-   换一台出口有实际意义（两台住宅宽带 IP 不同），也换下一台再试一次；
+/* 主→备顺序调用：网络失败 / 非 JSON 直接换下一台；retryCodes 里的码（默认 8810/8821）
+   视为「这台出口被风控」，换一台出口有实际意义，也换下一台再试一次；
    业务码（501/502/503 = 号或验证码问题）立即返回，不浪费第二台。
    返回结果带 _via 标记走了哪台，供计量统计。 */
-async function smsRelayLogin(cfgR, phone, code) {
+async function smsRelayPost(cfgR, path, payload, retryCodes, statPrefix) {
   const targets = [];
   if (cfgR.url) targets.push(cfgR.url);
   if (cfgR.bak && cfgR.bak !== cfgR.url) targets.push(cfgR.bak);
+  const retry = retryCodes || [8810, 8821];
+  const pre = statPrefix || 'relay_8810';
   let last = null;
   for (let i = 0; i < targets.length; i++) {
-    const j = await smsRelayOne(targets[i], cfgR.key, phone, code, 8000);
+    const j = await smsRelayPostOne(targets[i], cfgR.key, path, payload, 8000);
     const tag = i === 0 ? 'main' : 'bak';
     if (!j) continue;
     const c = Number(j.code);
-    if ((c === 8810 || c === 8821) && i < targets.length - 1) {
-      await regsmStat('relay_8810_' + tag);
+    if (retry.indexOf(c) >= 0 && i < targets.length - 1) {
+      await regsmStat(pre + '_' + tag);
       last = j;
       continue;
     }
@@ -2108,6 +2110,20 @@ async function smsRelayLogin(cfgR, phone, code) {
   }
   if (last) last._via = 'main';
   return last;
+}
+async function smsRelayLogin(cfgR, phone, code, sid) {
+  return await smsRelayPost(cfgR, '/login', { phone: phone, code: code, sid: sid || '' });
+}
+/* 2026-11-26：发码也走住宅。之前只有登录走中继，发码仍从 CF 机房 IP 出，
+   而「发码那一步的出口信誉」同样会被网易记账，等于只补了一半。 */
+async function smsRelaySend(cfgR, phone, sid) {
+  return await smsRelayPost(cfgR, '/send', { phone: phone, sid: sid || '' }, [8810, 8821], 'relay_send_8810');
+}
+/* 易盾滑块校验必须回住宅机做：会话 jar 在那边，换回机房等于换了设备/出口，
+   网易侧 verifyToken 与 challenge 的上下文对不上，必失败。 */
+async function smsRelayCheck(cfgR, sid, challenge, validate) {
+  return await smsRelayPost(cfgR, '/check',
+    { sid: sid || '', challenge: challenge, validate: validate }, [], 'relay_check');
 }
 
 const TEST_SMS_HTML = `<!DOCTYPE html>
@@ -7206,6 +7222,9 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
     smsBusy = true; E('b-sms-send').disabled = true;
     smsTip('发送中…');
     smsApi('send', { phone: p }).then(function(r){
+      /* 2026-11-26：住宅侧发码成功会回一个带 r| 前缀的 sid，必须带回去给 check/login，
+         否则后续请求又回到机房会话，网易看到「发码住宅、登录机房」直接判错。 */
+      if (r && r.sid) SMSID = String(r.sid);
       if (Number(r.code) === -462 && r.challenge) {
         smsTip('网易要求安全验证，请在下方拖动滑块');
         return mountSlide(r.challenge).then(function(v){
@@ -7883,8 +7902,36 @@ async function handle(request) {
       const _nowS = Date.now(); const _lastS = smsSendLimit.get('R' + phone) || 0;
       if (_nowS - _lastS < 60e3) return json({ code: 429, message: '发送太频繁，' + Math.ceil((60e3 - (_nowS - _lastS)) / 1e3) + ' 秒后再试' });
       smsSendLimit.set('R' + phone, _nowS);
-      const sid = String(b.sid || 'default').slice(0, 64);
+      /* 重发（滑块通过后自动重发）带回来的 sid 已经是 r| 前缀，剥掉再用，保证还是同一条住宅会话 */
+      const sidRawS = String(b.sid || 'default').slice(0, 64);
+      const sid = sidRawS.indexOf('r|') === 0 ? sidRawS.slice(2) : sidRawS;
       try {
+        /* 第一优先：住宅出口发码（2026-11-26 补）。之前只有登录走中继、发码还在 CF 机房 IP，
+           但「发码那一刻的出口信誉」同样会被网易记账，等于只补了一半。
+           200 / -462 都在住宅侧闭环，sid 加 r| 前缀，后续 check/login 据此回到同一台。
+           8810/8821 或中继不可用 → 静默回落机房本地链路，客户侧无感。 */
+        const cfgS = await smsRelayCfg();
+        if (cfgS && cfgS.on) {
+          const rs = await smsRelaySend(cfgS, phone, sid);
+          if (rs) {
+            const cS = Number(rs.code);
+            if (cS === 200) {
+              await regsmStat('send'); await regsmStat('relay_send_ok');
+              return json({ code: 200, sid: 'r|' + sid, message: '验证码已发送' });
+            }
+            if (cS === -462 && rs.challenge) {
+              await regsmStat('send'); await regsmStat('slider'); await regsmStat('relay_send_slider');
+              return json({ code: -462, sid: 'r|' + sid, challenge: rs.challenge, message: rs.message || '需要安全验证' });
+            }
+            if (cS > 0 && cS !== 8810 && cS !== 8821) {
+              await regsmStat('send'); await regsmStat('relay_send_biz');
+              return json({ code: cS, sid: sid, message: rs.message || '发送失败' });
+            }
+            await regsmStat('relay_send_fallback');   // 8810/8821/异常码 → 回落机房链路
+          } else {
+            await regsmStat('relay_send_err');
+          }
+        }
         const jar = await smsGetJar(sid);
         const r = await smsWeapiCall('/api/sms/captcha/sent', { ctcode: '86', secrete: 'music_middleuser_pclogin', cellphone: phone }, jar);
         await smsSaveJar(sid, jar);
@@ -7903,8 +7950,23 @@ async function handle(request) {
       const ch = b.challenge; const validate = String(b.validate || '');
       if (!ch || !ch.verifyToken) return json({ code: 400, message: '缺少 challenge' }, 400);
       if (validate.length < 100 || /\s/.test(validate)) return json({ code: 400, message: 'validate 无效' }, 400);
-      const sid = String(b.sid || 'default').slice(0, 64);
+      const sidRaw = String(b.sid || 'default').slice(0, 64);
       try {
+        /* 住宅侧触发的滑块必须回住宅机校验：challenge 绑的是那边的会话 jar 与出口 IP，
+           换回机房等于换了设备，网易侧上下文对不上必失败。 */
+        if (sidRaw.indexOf('r|') === 0) {
+          const cfgC = await smsRelayCfg();
+          if (cfgC && cfgC.on) {
+            const rc2 = await smsRelayCheck(cfgC, sidRaw.slice(2), ch, validate);
+            if (rc2) {
+              await regsmStat(rc2.success ? 'relay_check_ok' : 'relay_check_bad');
+              return json({ code: 200, success: !!rc2.success, message: rc2.message || '' });
+            }
+          }
+          await regsmStat('relay_check_err');
+          return json({ code: 409, success: false, message: '验证已过期，请重新获取验证码' });
+        }
+        const sid = sidRaw;
         const vt = Number(ch.verifyType) || 40;
         const cid = SMS_TEST_CAPTCHA_ID[vt] || SMS_TEST_CAPTCHA_ID[40];
         const referer = 'https://st.music.163.com/encrypt-pages?' + new URLSearchParams({
@@ -7938,7 +8000,11 @@ async function handle(request) {
       const _nowL = Date.now(); const _lastL = smsSendLimit.get('L' + phone) || 0;
       if (_nowL - _lastL < 60e3) return json({ code: 429, message: '操作太快，' + Math.ceil((60e3 - (_nowL - _lastL)) / 1e3) + ' 秒后再试' });
       smsSendLimit.set('L' + phone, _nowL);
-      const sid = String(b.sid || 'default').slice(0, 64);
+      const sidRaw = String(b.sid || 'default').slice(0, 64);
+      /* r| 前缀 = 发码是在住宅机那条会话上做的，登录必须回到同一台同一会话，
+         否则网易看到「机房会话 + 住宅 IP」或会话对不上，验证码直接判错。 */
+      const isRelaySid = sidRaw.indexOf('r|') === 0;
+      const sid = isRelaySid ? sidRaw.slice(2) : sidRaw;
       try {
         await regsmStat('login');
         /* 登录成功回包（三条通道共用：住宅中继 / weapi / eapi，页面拿到的结构必须完全一致） */
@@ -7958,7 +8024,7 @@ async function handle(request) {
         if (String(b.ch || '') !== 'eapi') {
           const cfgR = await smsRelayCfg();
           if (cfgR && cfgR.on) {
-            const rr = await smsRelayLogin(cfgR, phone, code);
+            const rr = await smsRelayLogin(cfgR, phone, code, isRelaySid ? sid : '');
             if (rr) {
               const rc = Number(rr.code);
               if (rc === 200 && rr.musicU) {
