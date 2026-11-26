@@ -2427,6 +2427,115 @@ async function saveRegCfg(o) {
 }
 
 // ====================================================================
+// 客户端版本闸口（2026-11-26 新增）
+// 背景：用户发布新版后，要求老版本在宽限期后停止可用（客服必须跟着更新）。
+// 存放：D1 kv_misc 的 k='ver_gate'（hz/dz 共用同一个 D1 库 → 控制台设一份，两站同时生效）；
+//       KV 键 VER_GATE 只作兜底镜像（与 reg_cfg 同口径）。
+// 结构：{ exe:{min:'3.10',at:1735200000000,hours:24}, apk:{...} }（at=强制拦截时间戳 ms）
+//       min 空 / 条目缺 = 该端不设限制；hours=0 表示设置后立刻拒绝（无宽限）。
+// 口径（2026-11-26 用户确认）：
+//   ① 控制台设置最低版本时可选宽限时长（0/6/12/24/48 小时）；宽限期内老版本能用，
+//      客户端启动查 /api/ver_check 弹提醒；到期后服务端对工作请求直接回 426 拒绝。
+//   ② 客户端识别顺序：新版自报 body.client（exe/apk）→ UA 含 Android 判 apk →
+//      UA 以 'Mozilla/5.0 Chrome/' 开头判 exe（EXE 独有字面量，用户脚本都是完整
+//      Windows NT UA 或裸 Mozilla/5.0，不会误伤）→ join_manual 端点必为 exe →
+//      带 dev 无 user 判 exe；带 user（控制台会话）/其余一律豁免。
+//      自助登记页 /api/r/*、播放链路（assign/pool_stat/mail_*）、用户脚本不受影响。
+//   ③ fail-open：配置读不到/解析失败 → 放行，绝不因存储抖动把客服锁在门外。
+// ====================================================================
+const VER_GATE_KEY = 'ver_gate';
+const VER_GATE_KV = 'VER_GATE';
+
+function verGateNorm(o) {
+  const src = (o && typeof o === 'object') ? o : {};
+  const out = {};
+  for (const k of ['exe', 'apk']) {
+    const it = src[k];
+    if (!it || typeof it !== 'object') continue;
+    const min = String(it.min == null ? '' : it.min).trim().replace(/[^0-9.]/g, '').slice(0, 16);
+    if (!min) continue;
+    const at = Number(it.at);
+    const hours = Number(it.hours);
+    out[k] = { min: min, at: isFinite(at) ? Math.floor(at) : 0,
+               hours: (isFinite(hours) && hours >= 0 && hours <= 24 * 30) ? hours : 24 };
+  }
+  return out;
+}
+
+async function verGateCfg() {
+  let raw = null;
+  if (d1ok()) {
+    try {
+      const rows = await d1All('SELECT v FROM kv_misc WHERE k=?', [VER_GATE_KEY]);
+      if (rows && rows.length) raw = rows[0].v;
+    } catch (e) { console.error('读 ver_gate(D1) 失败:', e && e.message); }
+  }
+  if (!raw) { try { raw = await POOL.get(VER_GATE_KV); } catch (e) {} }
+  try { return verGateNorm(raw ? JSON.parse(raw) : null); } catch (e) { return {}; }
+}
+
+async function saveVerGate(o) {
+  const n = verGateNorm(o);
+  const s = JSON.stringify(n);
+  let d1 = false;
+  if (d1ok()) {
+    d1 = await d1Run('INSERT INTO kv_misc (k,v,updated_at) VALUES (?,?,?) ' +
+      'ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at',
+      [VER_GATE_KEY, s, new Date().toISOString()]);
+  }
+  try { await POOL.put(VER_GATE_KV, s); } catch (e) {}
+  return { ok: !!d1, cfg: n };
+}
+
+/* '3.9' → [3,9]；非数字字符丢弃；空串 → [] */
+function verTuple(x) {
+  const s = String(x == null ? '' : x).trim().replace(/[^0-9.]/g, '');
+  if (!s) return [];
+  return s.split('.').filter(t => t !== '').map(t => parseInt(t, 10) || 0);
+}
+/* -1: a<b；0: 相等；1: a>b。逐段数值比较，保证 3.10 > 3.9 */
+function verCmp(a, b) {
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a[i] || 0, y = b[i] || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+function verGateClientOf(request, body, hint) {
+  const cl = String((body && body.client) || '').trim().toLowerCase();
+  if (cl === 'exe') return 'exe';
+  if (cl === 'apk') return 'apk';
+  /* 老版本不自报，按请求特征兜底识别（口径见上） */
+  let ua = '';
+  try { ua = request.headers.get('User-Agent') || ''; } catch (e) {}
+  if (/Android/i.test(ua) && /Chrome|Mobile|Safari/i.test(ua)) return 'apk';
+  if (ua.indexOf('Mozilla/5.0 Chrome/') === 0) return 'exe';
+  if (hint === 'exe') return 'exe';
+  if (body && body.dev && !body.user) return 'exe';
+  return '';   // 控制台会话（带 user）/网页/脚本 → 豁免
+}
+
+/* 返回 null=放行；返回响应对象=426 拒绝。hint: 'exe'=端点级提示（join_manual 必为 EXE）。 */
+async function verGateCheck(request, body, hint) {
+  const who = verGateClientOf(request, body, hint);
+  if (!who) return null;
+  let gate;
+  try { gate = await verGateCfg(); } catch (e) { return null; }   // fail-open
+  const it = gate[who];
+  if (!it || !it.min) return null;
+  const vt = verTuple(body && body.ver);
+  /* 老版本没有 ver 字段 → [0]，视为低于任何要求 */
+  if (verCmp(vt.length ? vt : [0], verTuple(it.min)) >= 0) return null;
+  const now = Date.now();
+  if (it.at && now < it.at) return null;   // 宽限期内放行（客户端启动查 /api/ver_check 弹提醒）
+  return json({ ok: false, code: 'ver_too_old',
+    message: '【版本过低】本软件版本已停止服务（要求最低 v' + it.min + '）。请到客服群下载最新版更新后再用。' }, 426,
+    { 'Access-Control-Allow-Origin': '*' });
+}
+
+// ====================================================================
 // 2026-11-23 新增：签到产品售后群配置（独立产品独立群，与 650 的 reg_cfg 完全分开）。
 // 存放：D1 kv_misc 的 k='sign_cfg'（KV 键 SIGN_CFG 兜底镜像），结构 {"group":"数字群号"}。
 // 口径与 reg_cfg 一致：群号不入队，mail_pending 对 pool=sign 的行「发送时现查」——
@@ -7082,6 +7191,17 @@ async function handle(request) {
       const rc = await regCfg();
       return json({ ok: true, agents: rc.agents, plans: rc.plans, at: new Date().toISOString() }, 200, CORS);
     }
+    /* ---- 客户端版本闸口查询（2026-11-26）：EXE/APK 启动时查，低于要求且在宽限期内弹提醒 ----
+       免鉴权、带 CORS（file:// 页面可直接 fetch）；gate 为空 = 未设限制，exe/apk 字段为 null。 */
+    if (url.pathname === '/api/ver_check' && (request.method === 'GET' || request.method === 'POST')) {
+      const CORS = { 'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type' };
+      let gate = {};
+      try { gate = await verGateCfg(); } catch (e) {}
+      return json({ ok: true, now: Date.now(),
+        exe: gate.exe || null, apk: gate.apk || null }, 200, CORS);
+    }
     if (url.pathname === '/api/pool' && request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: {
         'Access-Control-Allow-Origin': '*',
@@ -7093,6 +7213,7 @@ async function handle(request) {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let body;
       try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      { const vg = await verGateCheck(request, body); if (vg) return vg; }   // 版本闸口（2026-11-26）
       const c = await cfg();
       /* 2026-11-11 v2.12：号池【查看】口令放宽 —— ADMIN_PASS / CONSOLE_PASS / CONSOLE_RO_PASS
          任一可读。背景：APK 号池页输满权/只读码报「管理密码错误」，因为这里原先只认 ADMIN_PASS，
@@ -7308,6 +7429,7 @@ async function handle(request) {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let body;
       try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      { const vg = await verGateCheck(request, body); if (vg) return vg; }   // 版本闸口（2026-11-26）
       const c = await cfg();
       if (!c.adminPass) return json({ message: '尚未设置管理密码' }, 503, CORS);
       if (!body.pass || body.pass !== c.adminPass) return json({ message: '管理密码错误' }, 403, CORS);
@@ -7509,6 +7631,7 @@ async function handle(request) {
     if (url.pathname === '/api/join_manual' && request.method === 'POST') {
       let body;
       try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400); }
+      { const vg = await verGateCheck(request, body, 'exe'); if (vg) return vg; }   // 版本闸口（2026-11-26，join_manual 必为 EXE）
       const c = await cfg();
       const gp2 = groupPassCheck(c, body);
       if (!gp2.ok) return json({ message: gp2.msg }, gp2.status);
@@ -7765,6 +7888,7 @@ async function handle(request) {
       const CORS = { 'Access-Control-Allow-Origin': '*' };
       let bR;
       try { bR = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400, CORS); }
+      { const vg = await verGateCheck(request, bR); if (vg) return vg; }   // 版本闸口（2026-11-26）
       const pwR = await regPass();
       let passOkR = !!pwR && String(bR.pass || '') === pwR;
       const fromConsoleR = !passOkR ? await consoleAuthFull(bR) : false;
@@ -9259,6 +9383,7 @@ async function handle(request) {
     if (url.pathname === '/api/regtoken_new' && request.method === 'POST') {
       let b1;
       try { b1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      { const vg = await verGateCheck(request, b1); if (vg) return vg; }   // 版本闸口（2026-11-26）
       const pw = await regPass();
       /* 2026-11-10：控制台也能生成链接（管理员自己补发、发补登链接）。
          先按客服口令判，不对再按控制台满权限口令判 —— 客服请求不带 user 字段，
@@ -9428,6 +9553,7 @@ async function handle(request) {
     if (url.pathname === '/api/regtoken_find' && request.method === 'POST') {
       let bf;
       try { bf = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      { const vg = await verGateCheck(request, bf); if (vg) return vg; }   // 版本闸口（2026-11-26）
       const CORSF = { 'Access-Control-Allow-Origin': '*' };
       const pwf = await regPass();
       let okf = !!pwf && String(bf.pass || '') === pwf;
@@ -9464,6 +9590,7 @@ async function handle(request) {
     if (url.pathname === '/api/regtoken_list' && request.method === 'POST') {
       let b2;
       try { b2 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      { const vg = await verGateCheck(request, b2); if (vg) return vg; }   // 版本闸口（2026-11-26）
       const pw2 = await regPass();
       let passOk2 = !!pw2 && String(b2.pass || '') === pw2;
       /* 2026-11-21：consoleAuthFull → consoleAuth —— 控制台满权限/只读都能查。
@@ -9525,6 +9652,7 @@ async function handle(request) {
     if (url.pathname === '/api/regtoken_void' && request.method === 'POST') {
       let b3;
       try { b3 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
+      { const vg = await verGateCheck(request, b3); if (vg) return vg; }   // 版本闸口（2026-11-26）
       const pw3 = await regPass();
       let passOk3 = !!pw3 && String(b3.pass || '') === pw3;
       if (!passOk3) passOk3 = await consoleAuthFull(b3);       // 2026-11-10：控制台也能作废
@@ -11206,6 +11334,56 @@ async function handle(request) {
       return json({ ok: true, d1: saved.ok, cfg: saved.cfg,
         message: '已保存：客服 ' + saved.cfg.agents.length + ' 人（' + withGrp + ' 人配了售后群）、套餐 ' + saved.cfg.plans.length + ' 档'
           + (saved.ok ? '' : '（⚠️ D1 写入失败，已写 KV 兜底，请稍后重试）') + hint }, 200, CORS);
+    }
+    /* ===== 2026-11-26：控制台「版本管理」卡（/api/console/ver_gate，满权限专属）=====
+       设置客户端最低版本要求：POST {client:'exe'|'apk', min:'3.10', hours:0~720}
+       —— min 为空/clear=1 表示解除该端限制。重复设置会重置宽限计时（重新起算 hours）。
+       配置存 D1 kv_misc k='ver_gate'（hz/dz 共用 D1 → 一次设置两站同时生效）。
+       GET 返回当前配置（各端含 min/at/hours 与服务端 now，前端自己算剩余时间）。 */
+    if (url.pathname === '/api/console/ver_gate' && request.method === 'POST') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      let body;
+      try { body = await request.json(); } catch (e) { return json({ message: '参数错误' }, 400, CORS); }
+      if (!(await consoleAuthFull(body))) {
+        const who = await consoleRole(body);
+        return json({ message: who === 'ro' ? '当前是只读口令，不能改版本要求' : '账号或密码错误' }, 403, CORS);
+      }
+      const cl = String(body.client || '').trim().toLowerCase();
+      if (cl !== 'exe' && cl !== 'apk') return json({ ok: false, message: 'client 必须是 exe 或 apk' }, 400, CORS);
+      const min = String(body.min == null ? '' : body.min).trim().replace(/[^0-9.]/g, '').slice(0, 16);
+      let gate;
+      try { gate = await verGateCfg(); } catch (e) { gate = {}; }
+      if (!min || body.clear === 1 || body.clear === true) {
+        delete gate[cl];   // 解除该端限制
+      } else {
+        let hours = Number(body.hours);
+        if (!isFinite(hours) || hours < 0) hours = 24;
+        hours = Math.min(720, hours);
+        gate[cl] = { min: min, hours: hours, at: Date.now() + hours * 3600 * 1000 };
+      }
+      const saved = await saveVerGate(gate);
+      const _fmt = it => it ? ('最低 v' + it.min + '，' + (it.hours > 0 ? '宽限 ' + it.hours + ' 小时' : '立即生效')) : '未设置';
+      return json({ ok: true, d1: saved.ok, cfg: saved.cfg,
+        message: (saved.cfg[cl] ? ('已设置 ' + cl.toUpperCase() + ' ' + _fmt(saved.cfg[cl])
+          + (saved.cfg[cl].hours > 0 ? '（到期后老版本停止服务）' : '（老版本已立即停止服务）'))
+          : ('已解除 ' + cl.toUpperCase() + ' 版本限制'))
+          + (saved.ok ? '' : '（⚠️ D1 写入失败，已写 KV 兜底，请稍后重试）') }, 200, CORS);
+    }
+    if (url.pathname === '/api/console/ver_gate' && request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      } });
+    }
+    if (url.pathname === '/api/console/ver_gate' && request.method === 'GET') {
+      const CORS = { 'Access-Control-Allow-Origin': '*' };
+      const who = await consoleRole({ user: url.searchParams.get('user'), pass: url.searchParams.get('pass') });
+      if (!who) return json({ message: '账号或密码错误' }, 403, CORS);
+      let gate = {};
+      try { gate = await verGateCfg(); } catch (e) {}
+      return json({ ok: true, now: Date.now(),
+        exe: gate.exe || null, apk: gate.apk || null }, 200, CORS);
     }
     /* ===== 2026-11-16：控制台「CF 额度」卡（满权限专属，/api/console/cfquota）=====
        背景：11-16 账号升级 Workers Paid（$5/月，按开通日每月 16 日扣费）。
@@ -15013,6 +15191,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <span class="ddsep"></span>
     <button class="mini gray" id="btnMailTrace" style="display:none" title="失效号邮件提醒查询（满权限可见，实时读 D1）：查某个失效号的重登邮件/删号通知/每日提醒到底发没发、什么时候发的；也可一键列出全部失效号的邮件状态">邮件提醒</button>
     <button class="mini gray" id="btnBlk" style="display:none" title="黑名单管理（满权限专属）：退单满 N 次自动拉黑、登记入口自动拦截；可手动加入/解除，阈值随时可调">黑名单</button>
+    <button class="mini gray" id="btnVer" style="display:none" title="版本管理（满权限专属）：设置 EXE/APK 最低版本要求；宽限期到后老版本停止服务">版本管理</button>
     </span></span>
     <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成" data-page-node-id="KG7uyWeMOO4hHWeiVUB4Li">月度结算</button>
     <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
@@ -15138,6 +15317,27 @@ body:has(.modal:not([hidden])){overflow:hidden}
   <p style="font-size:11.5px;color:#999;margin:6px 0 0" data-page-node-id="JP4OdIuHR5ij8O8jtHlCUw">例：<code data-page-node-id="NN1ilN2xz1w0ZoHTwzJzfz">1月=30=3</code> / <code data-page-node-id="va4pQ5IoFR7T9nE7EF113W">半年=180=10</code> / <code data-page-node-id="j3zm6brtwGwyCvKTS0O6ML">1年=365=15</code> / <code data-page-node-id="WFVGrDUnWzwaNPm1Ni71a3">2年=730=20</code> / <code data-page-node-id="aksU7jnUjRhfvDU3DOj3sb">永久=0=80</code>。<br data-page-node-id="RcThFKoPun6GOCJW5mW5Il">单价的第三段不写就等于「没定价」，月度结算里会把它单列成「待补价」，<b data-page-node-id="A2jTPlOFvzdKeEOgvQPZkl">不会当 0 元算进合计</b>。删掉某个套餐不影响已登记的号（它们的套餐名照旧显示）。</p>
   <div class="row2" data-page-node-id="zV4asHhVO80G6GThNHSFWe"><button id="cSave" data-page-node-id="7jTSaP7bW5IVzHsWw9dClP">保存</button><button class="gray" id="cCancel" data-page-node-id="HdW55PCWlplBq619IYgwl4">关闭</button></div>
   <div class="msg" id="cm" data-page-node-id="EbyLwChAbWXaFqWwDgs8LJ"></div>
+</div></div>
+<!-- ===== 2026-11-26：版本管理（满权限专属）=====
+     设置 EXE / APK 最低版本要求：宽限期（可选 0/6/12/24/48 小时）内老版本能用、客户端启动会弹
+     更新提醒；到期后服务端对所有客服工作请求（登记/生成链接/续费/查原单/号池管理）回 426 拒绝。
+     配置存 D1（hz/dz 共用）→ 这里设一次两个站同时生效。重复设置会重置宽限计时。 -->
+<div class="modal" id="verModal" hidden><div class="mbox" style="width:640px;max-height:92vh;overflow:auto">
+  <h3>版本管理（EXE / APK 最低版本要求）</h3>
+  <p style="font-size:12px;color:#888;margin:4px 0 8px;line-height:1.75">发布新版后在这里设一个<b>最低版本</b>：宽限期内老版还能用（客户端每次打开会弹更新提醒倒计时），到期后老版登记 / 生成链接 / 续费 / 号池管理全部被服务端拒绝。<b>EXE 和 APK 是两条独立版本线，分别设置。</b>这里设置一次，互助版（xx1031.xyz）和定制版（dingzhi）同时生效，不用设两遍。</p>
+  <div id="verBody" style="font-size:13px;color:#333"></div>
+  <div style="border:1px solid #e3e9f5;background:#f6f9ff;border-radius:9px;padding:10px 12px;margin:10px 0 4px">
+    <div style="font-weight:600;font-size:12.5px;color:#2c5aa8;margin-bottom:8px">设置 / 更新要求</div>
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <div><label style="margin-top:0">客户端</label><select id="verClient" style="width:110px"><option value="exe">EXE（电脑）</option><option value="apk">APK（手机）</option></select></div>
+      <div><label style="margin-top:0">最低版本</label><input id="verMin" placeholder="如 3.10" style="width:110px"></div>
+      <div><label style="margin-top:0">宽限</label><select id="verHours" style="width:150px"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select></div>
+      <button class="mini" id="verGo" style="margin-top:0;padding:9px 14px">设置</button>
+    </div>
+    <p style="font-size:11.5px;color:#5a7bb5;margin:8px 0 0;line-height:1.7">填当前最新版号（如 EXE 发了 3.10 就填 3.10）。版本比较按数值逐段算，3.10 &gt; 3.9。给已设过要求的客户端重新设置会<b>重新起算</b>宽限时间。</p>
+  </div>
+  <div class="row2"><button class="gray" id="verClose">关 闭</button></div>
+  <div class="msg" id="verMsg"></div>
 </div></div>
 <!-- ===== 2026-11-10：客服机器授权 ===== -->
 <div class="modal" id="devModal" hidden data-page-node-id="q54R2sDlDKZYPlYUpdHkOW"><div class="mbox" style="width:880px;max-height:90vh;overflow:auto" data-page-node-id="w7yK0eWE19L2VGhM0BCQOY">
@@ -15472,6 +15672,8 @@ function applyRole(role){
   // 2026-11-17：邮件提醒查询（涉及买家邮箱，满权限专属，服务端同拦）
   var bmt=$('btnMailTrace');if(bmt)bmt.style.display=full?'':'none';
   var bb=$('btnBlk');if(bb)bb.style.display=full?'':'none';
+  // 2026-11-26：版本管理（满权限专属）——设最低版本要求拦老版本
+  var bvr=$('btnVer');if(bvr)bvr.style.display=full?'':'none';
   // 2026-11-23：签到卡密管理（/signadmin）满权限专属——买家/卡密/口令是另一条产品线，
   // 只读口令（发给客服/合作方看的）不该知道它的存在。服务端无关碍：/signadmin 页面本身要 ADMIN_PASS。
   var bsa=$('btnSignAdm');if(bsa)bsa.style.display=full?'':'none';
@@ -17452,6 +17654,54 @@ function blRender(){
 function blMsg(t,ok){var m=$('blm');m.textContent=t;m.className='msg'+(ok?' good':' err');}
 $('btnBlk').onclick=function(){$('blm').textContent='';$('blBody').innerHTML='';$('blModal').hidden=false;blLoad();};
 $('blClose').onclick=function(){$('blModal').hidden=true;};
+// ===== 2026-11-26：版本管理（EXE/APK 最低版本要求，满权限专属）=====
+// GET /api/console/ver_gate 拉现状 → 渲染两端的当前要求与剩余宽限；
+// POST /api/console/ver_gate 设置/解除。配置在 D1（hz/dz 共用），一次设置两站生效。
+function verStateOf(it,now){
+  if(!it||!it.min)return '<span style="color:#888">未设置（所有版本都能用）</span>';
+  var at=Number(it.at)||0;
+  if(at&&now<at){
+    var left=Math.ceil((at-now)/3600000);
+    return '<span style="color:#b07a00">最低 v'+esc(it.min)+' · 宽限中（剩约 '+left+' 小时，'
+      +new Date(at).toLocaleString('zh-CN',{hour12:false})+' 到期后老版停服）</span>';
+  }
+  return '<span style="color:#c62828">最低 v'+esc(it.min)+' · 已强制（低于要求的版本已被拒绝）</span>';
+}
+function verLoad(){
+  var t=JSON.parse(TOKEN||'{}');
+  fetch('/api/console/ver_gate?user='+encodeURIComponent(t.user||'xx1031')+'&pass='+encodeURIComponent(t.pass||''))
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d&&d.ok){
+        var now=Number(d.now)||Date.now();
+        $('verBody').innerHTML=
+          '<div style="padding:8px 0;border-bottom:1px dashed #e5e5e5"><b>EXE（电脑 · CK助手）</b>：'+verStateOf(d.exe,now)+'</div>'
+          +'<div style="padding:8px 0"><b>APK（手机 · 号池管理）</b>：'+verStateOf(d.apk,now)+'</div>';
+      }else{
+        $('verBody').innerHTML='<span style="color:#c62828">'+esc((d&&d.message)||'读取失败')+'</span>';
+      }
+    })
+    .catch(function(){$('verBody').innerHTML='<span style="color:#c62828">网络错误，读取失败</span>';});
+}
+function verMsg(t,ok){var m=$('verMsg');m.textContent=t;m.className='msg'+(ok?' good':' err');}
+function verPost(payload){
+  var t=JSON.parse(TOKEN||'{}');
+  verMsg('提交中…',true);
+  payload.user=t.user||'xx1031';payload.pass=t.pass||'';
+  api('/api/console/ver_gate',payload).then(function(o){
+    if(o.ok&&o.d&&o.d.ok){verMsg(o.d.message||'已设置',true);verLoad();}
+    else verMsg((o.d&&o.d.message)||'设置失败（口令或参数问题）');
+  }).catch(function(){verMsg('网络错误，设置失败');});
+}
+$('btnVer').onclick=function(){verMsg('');$('verModal').hidden=false;verLoad();};
+$('verClose').onclick=function(){$('verModal').hidden=true;};
+$('verGo').onclick=function(){
+  var cl=$('verClient').value,min=($('verMin').value||'').trim().replace(/[^0-9.]/g,'');
+  var hours=parseInt($('verHours').value,10);
+  if(!min){verMsg('请填最低版本号，例如 3.10');return;}
+  if(min.split('.').filter(function(x){return x!=='';}).length<2){verMsg('版本号要带小数点，例如 3.10 / 2.30');return;}
+  verPost({client:cl,min:min,hours:isFinite(hours)?hours:24});
+};
 $('blRefresh').onclick=blLoad;
 $('blThrSave').onclick=function(){
   var t=JSON.parse(TOKEN||'{}'),v=parseInt($('blThr').value,10);
@@ -17962,7 +18212,7 @@ function mDeployMobile(){
   if(MOV.length)return;
   var fids=['fagent','fplan','dr'],fs=$('fpSlot');   // 2026-11-18：'sort' 已删
   if(fs){fids.forEach(function(id){var el=mGrab(id);if(el)fs.appendChild(el);});}
-  var tids=['btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnMailTrace','btnBlk','btnOut'],ts=$('tdSlot');
+  var tids=['btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnMailTrace','btnBlk','btnVer','btnOut'],ts=$('tdSlot');
   if(ts){tids.forEach(function(id){var el=mGrab(id);if(el)ts.appendChild(el);});}
   var kp=$('kjP');
   if(kp&&!$('kjWrap')){
