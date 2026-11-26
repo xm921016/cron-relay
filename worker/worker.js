@@ -4502,6 +4502,161 @@ async function artistSwapCandidate(aid, excludeSong, usedSet, excludeList) {
   } catch (e) { return null; }
 }
 
+// ===== 2026-11-26 shortswap：长歌换短歌静默处置（用户拍板，hz/dz 逐字一致）=====
+// 背景：11-24 起官方对部分歌标记「异常播放行为」并截留计数（播放照跑、rpc30/rate 不涨/回吐）。
+//   长歌（>2 分钟）播放暴露面大 → 优先换成作者名下短歌（60~119s）。
+// 两个入口（mail_scan 每日班内调用）：
+//   ① KV shortswap_force：JSON 数组 [uid,...] 定向处置（被官方提醒号）；候选优先短歌，
+//      无短歌退而取 fee=0 独唱任意时长；消费成功的 uid 从键里移除，失败留待下一班。
+//   ② 常规面：当前歌 song_meta.dur>120 的在池号（pub=0）；候选限定 60~119s，没有就算了。
+// 候选：作者(acc_meta.artist_id)名下本人独唱、fee!=1、不在池、非该号换歌史；
+//   优先 fee=0、同分取时长最短。非音乐人号/acc_meta 未同步不猜（nomus 链路管）。
+// 静默：accounts.song + song_meta + durs 三处同步写 + mail_queue 记一条 state='sent' 的
+//   songchange 流水（不发信：mail_pending 只领 pending；用途=冷却期/换歌史/控制台处置记录）。
+// 幂等：换歌后新歌 dur<120 自然退出常规面；7 天内查过没候选的号记 KV shortswap_try 暂歇，
+//   7 天后重试（作者可能上新歌）。
+// 配额：weapi 查询每班 force≤40 + 常规≤60。
+async function shortSwapCandidate(aid, excludeSong, usedSet, excludeList, shortOnly) {
+  const ctl = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(10000) : undefined;
+  try {
+    const p = await weapi({});
+    const r = await fetch(BASE + '/weapi/v1/artist/' + encodeURIComponent(String(aid)), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://music.163.com',
+      },
+      body: 'params=' + encodeURIComponent(p.params) + '&encSecKey=' + encodeURIComponent(p.encSecKey),
+      signal: ctl,
+    });
+    const d = await r.json();
+    if (!d || d.code !== 200) return null;
+    const songs = d.hotSongs || [];
+    let best = null, fallback = null;
+    for (const sg of songs) {
+      const id = String((sg && sg.id) || '');
+      if (!id || id === String(excludeSong)) continue;
+      if ((excludeList || []).indexOf(id) >= 0) continue;
+      if (usedSet && usedSet.has && usedSet.has(id)) continue;
+      const ar = sg.artists || sg.ar || [];
+      if (ar.length !== 1) continue;
+      if (String((ar[0] && ar[0].id) || '') !== String(aid)) continue;
+      const dur = Math.round(Number(sg.dt || sg.duration || 0) / 1000);
+      if (!dur) continue;
+      if (Number(sg.fee || 0) === 1) continue;
+      const score = Number(sg.fee || 0) === 0 ? 0 : 1;
+      const cand = { id: id, name: String(sg.name || ''), dur: dur, fee: Number(sg.fee || 0),
+        artistName: String((ar[0] && ar[0].name) || ''), score: score };
+      if (dur >= 60 && dur < 120) {
+        if (!best || cand.score < best.score || (cand.score === best.score && dur < best.dur)) best = cand;
+      } else if (!shortOnly) {
+        if (!fallback || cand.score < fallback.score || (cand.score === fallback.score && dur < fallback.dur)) fallback = cand;
+      }
+    }
+    return best || fallback;
+  } catch (e) { return null; }
+}
+
+async function shortSwapSweep() {
+  const out = { force_seen: 0, force_done: 0, force_left: 0, reg_scanned: 0, reg_done: 0, api: 0, err: '' };
+  const API_MAX_FORCE = 40, API_MAX_REG = 60, TRY_SKIP_DAYS = 7;
+  try {
+    const accs = await d1All("SELECT pool,uid,name,song,agent,exp FROM accounts WHERE pool=? AND pub=0 AND song<>''", [POOL_NAME]);
+    const meta = await d1All('SELECT song,dur,gone FROM song_meta', []);
+    const art = await d1All('SELECT uid,artist_id FROM acc_meta', []);
+    const hist = await d1All("SELECT uid,kind,ref,created_at FROM mail_queue WHERE kind IN ('songchange','songfix','songfix2','songfix3') AND pool=?", [POOL_NAME]);
+    if (accs === null || meta === null || art === null || hist === null) {
+      out.err = '读失败（' + (_d1LastErr || 'D1 异常') + '）';
+      return out;
+    }
+    const accMap = {}; for (const a of accs) accMap[String(a.uid)] = a;
+    const metaMap = {}; for (const m of meta) metaMap[String(m.song)] = m;
+    const artMap = {}; for (const x of art) artMap[String(x.uid)] = String(x.artist_id || '');
+    const lastTouch = {}; const frozenBefore = {};
+    for (const q of hist) {
+      const u = String(q.uid);
+      const ca = String(q.created_at || '');
+      if (ca && (!lastTouch[u] || ca > lastTouch[u])) lastTouch[u] = ca;
+      const fr = String(q.ref || '').split(':')[0];
+      if (fr) (frozenBefore[u] = frozenBefore[u] || []).push(fr);
+    }
+    let tryMemo = {};
+    try { tryMemo = JSON.parse((await POOL.get('shortswap_try')) || '{}') || {}; } catch (e) {}
+    if (!tryMemo || typeof tryMemo !== 'object' || Array.isArray(tryMemo)) tryMemo = {};
+    const today = beijingDate();
+    const today0 = Date.parse(today + 'T00:00:00Z');
+    const memoOk = (uid) => !(tryMemo['ss|' + uid]) || (today0 - Date.parse(tryMemo['ss|' + uid] + 'T00:00:00Z') >= TRY_SKIP_DAYS * 86400000);
+    const usedSongs = new Set();
+    for (const a of accs) { const s = String(a.song || ''); if (s) usedSongs.add(s); }
+    // 返回 'swapped' | 'nocand' | 'skip' | 'fail'
+    const swapOne = async (uid, shortOnly) => {
+      if (out.api >= API_MAX_FORCE + API_MAX_REG) return 'skip';
+      const a = accMap[uid];
+      if (!a) return 'skip';
+      const song = String(a.song || '');
+      if (!song) return 'skip';
+      const mine = artMap[uid];
+      if (!mine) return 'skip';   // 无音乐人身份/未同步不猜
+      const lt = lastTouch[uid];
+      if (lt && today0 - Date.parse(lt.slice(0, 10) + 'T00:00:00Z') < 3 * 86400000) return 'skip';
+      if (!memoOk(uid)) return 'skip';
+      out.api++;
+      const cand = await shortSwapCandidate(mine, song, usedSongs, frozenBefore[uid] || [], shortOnly);
+      if (!cand) return 'nocand';
+      const now = new Date().toISOString();
+      const okU = await d1Run('UPDATE accounts SET song=? WHERE pool=? AND uid=?', [cand.id, POOL_NAME, uid]);
+      if (!okU) { out.err = '写 accounts 失败'; return 'fail'; }
+      await d1Run('INSERT OR REPLACE INTO song_meta(song,name,dur,n_artists,artists,first_artist,gone,updated_at) VALUES (?,?,?,?,?,?,0,?)',
+        [cand.id, cand.name || '', cand.dur, 1, JSON.stringify([[mine, cand.artistName || '']]), String(mine), now]);
+      await d1Run('INSERT INTO durs (pool,uid,dur,updated_at) VALUES (?,?,?,?) ' +
+        'ON CONFLICT(pool,uid) DO UPDATE SET dur=excluded.dur, updated_at=excluded.updated_at',
+        [POOL_NAME, uid, cand.dur, now]);
+      // 静默流水：state='sent' 永不进发送队列（mail_pending 只领 pending），仅供冷却/换歌史/控制台记录
+      try {
+        await d1Run("INSERT OR IGNORE INTO mail_queue (pool,uid,kind,ref,email,name,agent,exp,state,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+          [POOL_NAME, uid, 'songchange', song + ':' + cand.id, '', String(a.name || ''), String(a.agent || ''), String(a.exp || ''), 'sent', bjStamp()]);
+      } catch (e) {}
+      usedSongs.delete(song); usedSongs.add(cand.id);
+      return 'swapped';
+    };
+    // ① force 面：KV shortswap_force = [uid,...]
+    let forceIds = [];
+    try { forceIds = JSON.parse((await POOL.get('shortswap_force')) || '[]') || []; } catch (e) {}
+    if (!Array.isArray(forceIds)) forceIds = [];
+    out.force_seen = forceIds.length;
+    if (forceIds.length) {
+      const doneIds = [];
+      for (const fu of forceIds) {
+        if (out.api >= API_MAX_FORCE) break;
+        const r = await swapOne(String(fu), false);
+        if (r === 'swapped') { doneIds.push(String(fu)); out.force_done++; }
+        else if (r === 'nocand') tryMemo['ss|' + String(fu)] = today;
+      }
+      const left = forceIds.filter((u) => doneIds.indexOf(String(u)) < 0);
+      out.force_left = left.length;
+      try { await POOL.put('shortswap_force', JSON.stringify(left)); } catch (e) {}
+    }
+    // ② 常规面：dur>120
+    if (out.api < API_MAX_FORCE + API_MAX_REG) {
+      for (const a of accs) {
+        if (out.api >= API_MAX_FORCE + API_MAX_REG) break;
+        const uid = String(a.uid);
+        if (!memoOk(uid)) continue;
+        const song = String(a.song || '');
+        const sm = song ? metaMap[song] : null;
+        if (!sm || Number(sm.dur) <= 120 || Number(sm.gone) === 1) continue;
+        out.reg_scanned++;
+        const r = await swapOne(uid, true);
+        if (r === 'nocand') tryMemo['ss|' + uid] = today;
+        else if (r === 'swapped') out.reg_done++;
+      }
+    }
+    if (out.api > 0) { try { await POOL.put('shortswap_try', JSON.stringify(tryMemo)); } catch (e) {} }
+  } catch (e) { out.err = String((e && e.message) || e); }
+  return out;
+}
+
 async function d1Run(sql, params) {
   if (!d1ok()) { if (!_d1LastErr) _d1LastErr = 'D1 未绑定（DB 为空）'; return false; }
   try {
@@ -10937,10 +11092,12 @@ async function handle(request) {
           }
         }
       }
+      // —— shortswap：长歌换短歌静默处置（2026-11-26 新增，用户拍板；说明见 shortSwapSweep 头注释）——
+      const ss = await shortSwapSweep();
       // 2026-11-13：闸门已前置（读全成功后立即落），走到这里说明本轮读写都完成。
       return json({ ok: true, dry: false, day: today, scanned: rows.length, will_enqueue: will.length,
         dropped_stale: dropped, songfix_found: sfCnt.found, songfix_enqueued: sfCnt.enq,
-        songfix_swapped: sfCnt.swapped, songfix_api: sfCnt.api });
+        songfix_swapped: sfCnt.swapped, songfix_api: sfCnt.api, shortswap: ss });
     }
     if (url.pathname === '/api/mail_pending' && request.method === 'POST') {
       let body;
