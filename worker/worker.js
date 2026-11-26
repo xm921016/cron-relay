@@ -8888,10 +8888,14 @@ async function handle(request) {
     }
     /* ===== 2026-11-25 云端 VIP赠送 /vipcloud + 云端号体检 /healthcloud =====
        换电脑/手机可直接访问（用户要求）。鉴权两路：
-       ① 控制台满权限点按钮 → /api/cloud/handoff 领一次性票据（KV 120 秒）→ 带 #tk 打开页面 →
-          页面 /api/cloud/redeem 换 CONSOLE_PASS 存 sessionStorage（同签到管理交接模式）。
+       ① 控制台点按钮 → /api/cloud/handoff 领一次性票据（KV 120 秒）→ 带 #tk 打开页面 →
+          页面 /api/cloud/redeem 换口令存 sessionStorage（同签到管理交接模式）。
        ② 直接开页面 → 手输满权限口令。
-       所有 API 只认满权限口令（与控制台按钮显隐口径一致）。发卡/体检口径与本地版一致。 */
+       2026-11-26：号体检对只读客服开放（用户要求：客服自查用户情况，从控制台进免口令）。
+         票据按角色分级存 KV（{scope,pass}）：full=满权限（redeem 仍换 CONSOLE_PASS，原口径不变）；
+         hc_ro=只读客服 → handoff 只放行 /healthcloud，redeem 只换出该客服自己的只读口令，
+         进页后 /api/healthcloud/run 已放宽到 consoleAuth（纯读）。/vipcloud 发卡涉及黑胶赠送，
+         仍满权限专属，只读票据换不出满权限口令，拿票据开 /vipcloud 也过不了它的 API。 */
     if (url.pathname === '/vipcloud' || url.pathname === '/healthcloud') {
       const pageH = url.pathname === '/vipcloud' ? VIPCLOUD_HTML : HEALTHCLOUD_HTML;
       return new Response(pageH, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
@@ -8899,9 +8903,13 @@ async function handle(request) {
     if (url.pathname === '/api/cloud/handoff' && request.method === 'POST') {
       let bC1;
       try { bC1 = await request.json(); } catch (e) { return json({ ok: false, message: '参数错误' }, 400); }
-      if (!(await consoleAuthFull(bC1))) return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
+      const pageC1 = String(bC1.page || '');
+      const roleC1 = await consoleRole(bC1);
+      if (!roleC1) return json({ ok: false, message: '需要控制台口令' }, 403, { 'Cache-Control': 'no-store' });
+      if (roleC1 !== 'full' && pageC1 !== '/healthcloud') return json({ ok: false, message: '需要满权限口令' }, 403, { 'Cache-Control': 'no-store' });
       const tkC1 = 'C' + signRand(24);
-      try { await POOL.put('cloud_handoff:' + tkC1, '1', { expirationTtl: 120 }); }
+      const kvC1 = roleC1 === 'full' ? '1' : JSON.stringify({ scope: 'hc_ro', pass: String(bC1.pass || '') });
+      try { await POOL.put('cloud_handoff:' + tkC1, kvC1, { expirationTtl: 120 }); }
       catch (e) { return json({ ok: false, message: '票据写入失败，请重试' }, 503, { 'Cache-Control': 'no-store' }); }
       return json({ ok: true, tk: tkC1 }, 200, { 'Cache-Control': 'no-store' });
     }
@@ -8914,6 +8922,14 @@ async function handle(request) {
       try { liveC2 = await POOL.get('cloud_handoff:' + tkC2); } catch (e) {}
       if (!liveC2) return json({ ok: false, message: '票据已失效（一次性、2 分钟），请回控制台重新点按钮' }, 403);
       try { await POOL.delete('cloud_handoff:' + tkC2); } catch (e) {}
+      /* 2026-11-26：'1'=满权限票据（老值兼容）→ 换 CONSOLE_PASS；hc_ro=只读客服号体检票据
+         → 只换出该客服自己的只读口令（进页后走 consoleAuth 的纯读接口），换不出满权限口令。 */
+      if (liveC2 !== '1') {
+        let scC2 = null;
+        try { scC2 = JSON.parse(liveC2); } catch (e) {}
+        if (!scC2 || scC2.scope !== 'hc_ro' || !scC2.pass) return json({ ok: false, message: '票据无效' }, 403);
+        return json({ ok: true, pass: scC2.pass, ro: true }, 200, { 'Cache-Control': 'no-store' });
+      }
       const cC2 = await cfg();
       if (!cC2.consolePass) return json({ ok: false, message: '未配置 CONSOLE_PASS' }, 503);
       return json({ ok: true, pass: cC2.consolePass }, 200, { 'Cache-Control': 'no-store' });
@@ -12304,11 +12320,52 @@ async function handle(request) {
       try { storeM = JSON.parse(await POOL.get('mt:cache') || 'null'); } catch (e) { storeM = null; }
       const cacheKeyM = qM ? 'one:' + qM.toLowerCase() + ':' + daysM : 'list:' + daysM;
       const mtMergeM = (baseM, dataM) => { for (const kM0 in dataM) baseM[kM0] = dataM[kM0]; return baseM; };
+      /* 2026-11-26（用户要求）：把 250 笔记验证提醒（verify）补进邮件查询 —— notify.py 直连
+         SMTP 直邮，从不写 mail_queue，只留指纹在 KV vmail:<pool>:<uid>（{t:ISO时间,n:次数}）。
+         这里读指纹合成一行 kind=verify 的记录（时间转北京时间）：
+           单号模式 → 挂进该号 mails 表（与队列邮件同表展示，无补发按钮，前端处理）；
+           清单模式 → 每行附 verify:{last,count} 供「250提醒」列和类型筛选。
+         每次实时读 KV 不进缓存：verify 不在版本指纹 verM 里，进缓存会漂移；KV 读不吃 D1 行读配额。
+         hz/dz 共用 KV，键按行内 pool 取，主 worker 能读到两池的指纹。 */
+      const mtVerifyRow = async (poolV, uidV) => {
+        try {
+          const rawV = await POOL.get('vmail:' + (String(poolV || 'hz')) + ':' + String(uidV || ''));
+          if (!rawV) return null;
+          const vV = JSON.parse(rawV);
+          if (!vV || !vV.t) return null;
+          const tBj = bjStamp(Date.parse(vV.t) || Date.now());
+          return { pool: String(poolV || 'hz'), uid: String(uidV || ''), kind: 'verify', ref: '',
+            state: 'sent', created_at: tBj, claimed_at: '', sent_at: tBj,
+            skip_reason: '直邮·不进邮件队列，累计 ' + (Number(vV.n) || 1) + ' 封',
+            attempts: Number(vV.n) || 1 };
+        } catch (eV) { return null; }
+      };
+      const mtAttachVerify = async (dataV, modeV) => {
+        const listV = (modeV === 'one') ? (dataV.accs || []) : (dataV.rows || []);
+        for (let iV = 0; iV < listV.length; iV += 40) {   // 40 一批并发读 KV，500 号也不拖慢响应
+          await Promise.all(listV.slice(iV, iV + 40).map(async aV => {
+            const vV = await mtVerifyRow(aV.pool, aV.uid);
+            if (modeV === 'one') {
+              // 先剥掉缓存里可能带进来的旧合成行再挂最新，防重复
+              aV.mails = (aV.mails || []).filter(mV => String(mV.kind || '') !== 'verify');
+              if (vV) {
+                aV.mails = aV.mails.concat([vV]).sort((xV, yV) =>
+                  String(yV.created_at || '').localeCompare(String(xV.created_at || '')));
+              }
+            } else {
+              aV.verify = vV ? { last: vV.created_at, count: vV.attempts } : null;
+            }
+          }));
+        }
+        return dataV;
+      };
       if (!forceM && storeM && storeM.v === verM && storeM.items && storeM.items[cacheKeyM]) {
         const hitM = storeM.items[cacheKeyM];
+        await mtAttachVerify(hitM.data, qM ? 'one' : 'list');   // 250 提醒指纹实时补挂，不随缓存漂移
         return json(mtMergeM({ ok: true, mode: qM ? 'one' : 'list', q: qM, cached: true, gen: nrmM(hitM.ts) }, hitM.data), 200, CORS);
       }
       const mtRespond = async (dataM, modeM) => {
+        await mtAttachVerify(dataM, modeM);   // 重建路径同样实时补挂
         try {
           const curM = (storeM && storeM.v === verM && storeM.items) ? storeM : { v: verM, items: {} };
           curM.items[cacheKeyM] = { ts: bjStamp(), data: dataM };
@@ -15969,6 +16026,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
       <option value="">全部类型</option>
       <option value="relogin2">重登提醒</option>
       <option value="reg">登记成功</option>
+      <option value="verify">笔记验证提醒</option>
       <option value="exp">到期提醒</option>
       <option value="song">换歌类</option>
       <option value="notice">删号通知</option>
@@ -17893,6 +17951,9 @@ function mtKindLabel(m){
     return '删号通知(dead)';
   }
   var k=String(m.kind||'');
+  // verify=250 笔记验证提醒（2026-11-26 补录：notify.py 直连 SMTP 直邮，不进 mail_queue，
+  // 记录在 KV vmail:<pool>:<uid>，服务端合成行注入；不走补发，受 3 天冷却闸门管）
+  if(k==='verify')return '笔记验证提醒(verify)';
   var MAP={reg:'登记成功',relogin2:'重登提醒',songchange:'已自动换歌',
     songfix:'换歌提醒·共创冻结',songfix2:'换歌提醒·独唱冻结',songfix3:'换歌提醒·绑错歌',
     nomus:'非音乐人提醒',songok:'冻结误报澄清',feenote:'VIP锁歌换歌引导',
@@ -17963,7 +18024,9 @@ function mtRenderOne(o){
         +'<td style="'+TD+'">'+mtTime(m.created_at)+'</td>'
         +'<td style="'+TD+'">'+(m.sent_at?('<span class="good">'+mtTime(m.sent_at)+'</span>'):'—')+'</td>'
         +'<td style="'+TD+';color:#777;max-width:220px;overflow:hidden;text-overflow:ellipsis">'+esc(m.skip_reason||'')+'</td>'
-        +(('<td style="'+TD+'"><button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="'+esc(m.__mq?(m.kind||''):(m.kind||'dead'))+'" data-ref="'+esc(m.__mq?(m.ref||''):(m.created_at||''))+'"'+(m.__mq?'':' data-dn="1"')+' style="padding:2px 10px;font-size:11px" title="'+(m.__mq?'把这封邮件重新入队，走原发信链路（约 30 分钟内）发出':'把这封删号通知重置为待发，由兜底链路补发（最长约 12 小时内）；判死超 3 天的会被放弃窗口自动跳过')+'">补发</button></td>'))
+        +(String(m.kind)==='verify'
+          ?('<td style="'+TD+'"><span class="muted" title="250 提醒由 notes 链路自动发、受 3 天冷却闸门管，不提供手动补发">自动</span></td>')
+          :(('<td style="'+TD+'"><button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="'+esc(m.__mq?(m.kind||''):(m.kind||'dead'))+'" data-ref="'+esc(m.__mq?(m.ref||''):(m.created_at||''))+'"'+(m.__mq?'':' data-dn="1"')+' style="padding:2px 10px;font-size:11px" title="'+(m.__mq?'把这封邮件重新入队，走原发信链路（约 30 分钟内）发出':'把这封删号通知重置为待发，由兜底链路补发（最长约 12 小时内）；判死超 3 天的会被放弃窗口自动跳过')+'">补发</button></td>')))
       +'</tr>';
     }
     h+='</tbody></table>';
@@ -17980,6 +18043,7 @@ function mtRenderList(d){
   if(selK){
     rs=rs.filter(function(r){
       if(selK==='notice')return !!r.notice;
+      if(selK==='verify')return !!(r.verify&&r.verify.last);
       if(selK==='relogin2')return (r.kinds||[]).indexOf('relogin2')>=0||(r.relogin_at&&String(r.relogin_at).slice(0,10)>=cutD);
       var ks=r.kinds||[];
       for(var i=0;i<ks.length;i++){
@@ -17998,6 +18062,7 @@ function mtRenderList(d){
     +'<th style="'+TH+'">群</th><th style="'+TH+'">账号</th><th style="'+TH+'">UID</th><th style="'+TH+'">邮箱</th>'
     +'<th style="'+TH+'" title="删号时间与原因（dead_log 流水；11-18 起失效号立即删号，清单以已删号为主体）">删号</th>'
     +'<th style="'+TH+'" title="每天一封的 relogin2 提醒，取最新一条">每日提醒</th>'
+    +'<th style="'+TH+'" title="250 笔记验证提醒（notify.py 直邮，不进邮件队列）：最近发送时间 + 累计封数，来自 KV vmail 指纹">250提醒</th>'
     +'<th style="'+TH+'" title="删号通知状态（dead_notice；直邮链路的删号无回执，显示 —）">删号通知</th><th style="'+TH+'">待复核</th><th style="'+TH+'">到期</th><th style="'+TH+'">邮件</th></tr></thead><tbody>';
   for(var i=0;i<rs.length;i++){var r=rs[i];
     var rel2=r.rel2,nt=r.notice,dd=r.dead;
@@ -18017,6 +18082,7 @@ function mtRenderList(d){
       +'<td style="'+TD+';max-width:130px;overflow:hidden;text-overflow:ellipsis">'+esc(r.email||'（未留）')+'</td>'
       +'<td style="'+TD+'">'+ddTxt+'</td>'
       +'<td style="'+TD+'">'+rel2Txt+'</td>'
+      +'<td style="'+TD+'">'+(r.verify&&r.verify.last?('<span class="good">'+mtTime(r.verify.last)+'</span> <span class="muted">'+esc(String(r.verify.count||1))+'封</span>'):'—')+'</td>'
       +'<td style="'+TD+'">'+(nt?(mtMailState(nt.state)+(nt.sent_at?(' '+mtTime(nt.sent_at)):'')):'—')+'</td>'
       +'<td style="'+TD+'">'+(r.suspect_at?esc(String(r.suspect_at).slice(5,16)):'—')+'</td>'
       +'<td style="'+TD+'">'+esc(r.exp||'—')+'</td>'
@@ -18026,7 +18092,7 @@ function mtRenderList(d){
   h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">'
     +(selK?('筛选后 '+rs.length+' / 共 '+totalAll+' 个失效相关号（类型筛选只在本机过滤已拉回的数据，切换不耗配额）。'):('共 '+rs.length+' 个失效相关号（时间窗口内已删号 + 在池待复核）。'))
     +(d.trunc?'<b style="color:#a32d2d">已删号超过 500 条，只显示最近的 500 条 —— 想看更早的请缩小时间范围。</b>':'')
-    +'每日提醒=最新一封 relogin2 邮件；删号通知一列显示 — 的号走的是系统判死直邮链路（无 dead_notice 回执），发送结果看该号「邮件」明细。</p>';
+    +'每日提醒=最新一封 relogin2 邮件；250提醒=笔记验证提醒直邮指纹（直连 SMTP 不进邮件队列，明细在该号「邮件」里）；删号通知一列显示 — 的号走的是系统判死直邮链路（无 dead_notice 回执），发送结果看该号「邮件」明细。</p>';
   return h;
 }
 var MT_LAST=null;   // 最近一次查询结果（含 mode），筛选切换/补发后在本机重渲染，不重复读库

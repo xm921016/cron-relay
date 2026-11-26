@@ -336,6 +336,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
     <span class="ddsep"></span>
     <button class="mini gray" id="btnMailTrace" style="display:none" title="失效号邮件提醒查询（满权限可见，实时读 D1）：查某个失效号的重登邮件/删号通知/每日提醒到底发没发、什么时候发的；也可一键列出全部失效号的邮件状态">邮件提醒</button>
     <button class="mini gray" id="btnBlk" style="display:none" title="黑名单管理（满权限专属）：退单满 N 次自动拉黑、登记入口自动拦截；可手动加入/解除，阈值随时可调">黑名单</button>
+    <button class="mini gray" id="btnVer" style="display:none" title="版本管理（满权限专属）：设置 EXE/APK 最低版本要求；宽限期到后老版本停止服务">版本管理</button>
     </span></span>
     <button class="mini" id="btnLedger" style="display:none" title="按月算钱：谁登记的、买了什么套餐、一共多少钱；补号单单独列出不计提成" data-page-node-id="KG7uyWeMOO4hHWeiVUB4Li">月度结算</button>
     <button class="mini" id="btnRefresh" data-page-node-id="cuZP5FFC4I1bsaglzis2KI">刷新</button>
@@ -462,6 +463,35 @@ body:has(.modal:not([hidden])){overflow:hidden}
   <div class="row2" data-page-node-id="zV4asHhVO80G6GThNHSFWe"><button id="cSave" data-page-node-id="7jTSaP7bW5IVzHsWw9dClP">保存</button><button class="gray" id="cCancel" data-page-node-id="HdW55PCWlplBq619IYgwl4">关闭</button></div>
   <div class="msg" id="cm" data-page-node-id="EbyLwChAbWXaFqWwDgs8LJ"></div>
 </div></div>
+<!-- ===== 2026-11-26：版本管理（满权限专属）=====
+     设置 EXE / APK 最低版本要求：宽限期（可选 0/6/12/24/48 小时）内老版本能用、客户端启动会弹
+     更新提醒；到期后服务端对所有客服工作请求（登记/生成链接/续费/查原单/号池管理）回 426 拒绝。
+     配置存 D1（hz/dz 共用）→ 这里设一次两个站同时生效。重复设置会重置宽限计时。 -->
+<div class="modal" id="verModal" hidden><div class="mbox" style="width:560px;padding:18px;max-height:92vh;overflow:auto">
+  <h3>版本管理（EXE / APK 最低版本要求）</h3>
+  <p style="font-size:12px;color:#888;margin:4px 0 8px;line-height:1.7">发布新版后在这里设一个<b>最低版本</b>：宽限期内老版还能用（客户端每次打开会弹更新提醒倒计时），到期后老版登记 / 生成链接 / 续费 / 号池管理全部被服务端拒绝。<b>EXE 和 APK 是两条独立版本线，分别设置。</b>这里设一次，互助版（xx1031.xyz）和定制版（dingzhi）同时生效。</p>
+  <div id="verBody" style="font-size:13px;color:#333"></div>
+  <div style="border:1px solid #e3e9f5;background:#f6f9ff;border-radius:9px;padding:10px 14px;margin:10px 0 2px">
+    <div style="font-weight:600;font-size:12.5px;color:#2c5aa8;margin-bottom:8px">设置 / 更新要求</div>
+    <div style="display:grid;grid-template-columns:86px minmax(110px,1fr) 152px auto;gap:10px 10px;align-items:center">
+      <div></div>
+      <div style="font-size:11.5px;color:#888;text-align:center">最低版本</div>
+      <div style="font-size:11.5px;color:#888;text-align:center">宽限</div>
+      <div></div>
+      <div style="font-weight:600;font-size:12.5px;color:#333">EXE（电脑）</div>
+      <input id="verMinExe" placeholder="如 3.10">
+      <select id="verHoursExe"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select>
+      <div style="display:flex;gap:6px;justify-content:flex-end"><button class="mini" id="verGoExe" style="padding:8px 15px">设置</button><button class="mini gray" id="verClrExe" style="padding:8px 15px" title="解除 EXE 的版本限制（所有版本恢复可用）">解除</button></div>
+      <div style="font-weight:600;font-size:12.5px;color:#333">APK（手机）</div>
+      <input id="verMinApk" placeholder="如 2.30">
+      <select id="verHoursApk"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select>
+      <div style="display:flex;gap:6px;justify-content:flex-end"><button class="mini" id="verGoApk" style="padding:8px 15px">设置</button><button class="mini gray" id="verClrApk" style="padding:8px 15px" title="解除 APK 的版本限制（所有版本恢复可用）">解除</button></div>
+    </div>
+    <p style="font-size:11.5px;color:#5a7bb5;margin:8px 0 0;line-height:1.7">填当前最新版号（如 EXE 发了 3.10 就填 3.10）。版本比较按数值逐段算，3.10 &gt; 3.9。给已设过要求的客户端重新设置会<b>重新起算</b>宽限时间。</p>
+  </div>
+  <div style="text-align:center;margin-top:12px"><button class="gray" id="verClose" style="padding:9px 48px">关 闭</button></div>
+  <div class="msg" id="verMsg"></div>
+</div></div>
 <!-- ===== 2026-11-10：客服机器授权 ===== -->
 <div class="modal" id="devModal" hidden data-page-node-id="q54R2sDlDKZYPlYUpdHkOW"><div class="mbox" style="width:880px;max-height:90vh;overflow:auto" data-page-node-id="w7yK0eWE19L2VGhM0BCQOY">
   <h3 data-page-node-id="W8ZkDmdVe4YYVMo5I3WSdX">设备授权（客服电脑）</h3>
@@ -569,6 +599,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
       <option value="">全部类型</option>
       <option value="relogin2">重登提醒</option>
       <option value="reg">登记成功</option>
+      <option value="verify">笔记验证提醒</option>
       <option value="exp">到期提醒</option>
       <option value="song">换歌类</option>
       <option value="notice">删号通知</option>
@@ -795,6 +826,8 @@ function applyRole(role){
   // 2026-11-17：邮件提醒查询（涉及买家邮箱，满权限专属，服务端同拦）
   var bmt=$('btnMailTrace');if(bmt)bmt.style.display=full?'':'none';
   var bb=$('btnBlk');if(bb)bb.style.display=full?'':'none';
+  // 2026-11-26：版本管理（满权限专属）——设最低版本要求拦老版本
+  var bvr=$('btnVer');if(bvr)bvr.style.display=full?'':'none';
   // 2026-11-23：签到卡密管理（/signadmin）满权限专属——买家/卡密/口令是另一条产品线，
   // 只读口令（发给客服/合作方看的）不该知道它的存在。服务端无关碍：/signadmin 页面本身要 ADMIN_PASS。
   var bsa=$('btnSignAdm');if(bsa)bsa.style.display=full?'':'none';
@@ -1887,7 +1920,9 @@ function openInfo(i){
   /* 2026-11-25 五类登记方式（用户口径）：客户自主=登记页两条通道；客服=EXE 三种来源；
      manual_import=老版本 EXE 无 cksrc 字段的历史兜底，不再新增。 */
   var methodLabels={sms:'客户自主登记验证码',link_qr:'客户自主登记扫码',manual_qr:'客服登记扫码',manual_sms:'客服登记验证码',manual_paste:'客服手动粘贴CK',manual_import:'客服手动提交（旧）',browser_qr:'真浏览器扫码'};
-  var exitLabels={home_relay:'本机家宽转发',cf_direct:'Cloudflare 直连',home_browser:'真浏览器家宽'};
+  /* 2026-11-26（用户拍板精确版）出口标签补齐：短信通道按实际走的链路落 relay_main/relay_bak/cf_sms；
+     EXE 扫码/验证码登记落 client_real；手动粘贴/旧数据出口真未知 → 维持未记录。 */
+  var exitLabels={home_relay:'本机家宽转发',cf_direct:'Cloudflare 直连',home_browser:'真浏览器家宽',relay_main:'住宅中继·笔记本',relay_bak:'住宅中继·本机',cf_sms:'CF 机房直连（短信兜底）',client_real:'客服机真机直出'};
   var legacyMethod={manual_web:'客服手动提交',qr_cf:'链接扫码',qr_home:'真浏览器扫码'};
   var methodTxt=methodLabels[e.registrationMethod]||legacyMethod[e.source]||'未记录';
   var exitTxt=exitLabels[e.loginEgress]||'未记录';
@@ -2489,6 +2524,9 @@ function mtKindLabel(m){
     return '删号通知(dead)';
   }
   var k=String(m.kind||'');
+  // verify=250 笔记验证提醒（2026-11-26 补录：notify.py 直连 SMTP 直邮，不进 mail_queue，
+  // 记录在 KV vmail:<pool>:<uid>，服务端合成行注入；不走补发，受 3 天冷却闸门管）
+  if(k==='verify')return '笔记验证提醒(verify)';
   var MAP={reg:'登记成功',relogin2:'重登提醒',songchange:'已自动换歌',
     songfix:'换歌提醒·共创冻结',songfix2:'换歌提醒·独唱冻结',songfix3:'换歌提醒·绑错歌',
     nomus:'非音乐人提醒',songok:'冻结误报澄清',feenote:'VIP锁歌换歌引导',
@@ -2559,7 +2597,9 @@ function mtRenderOne(o){
         +'<td style="'+TD+'">'+mtTime(m.created_at)+'</td>'
         +'<td style="'+TD+'">'+(m.sent_at?('<span class="good">'+mtTime(m.sent_at)+'</span>'):'—')+'</td>'
         +'<td style="'+TD+';color:#777;max-width:220px;overflow:hidden;text-overflow:ellipsis">'+esc(m.skip_reason||'')+'</td>'
-        +(('<td style="'+TD+'"><button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="'+esc(m.__mq?(m.kind||''):(m.kind||'dead'))+'" data-ref="'+esc(m.__mq?(m.ref||''):(m.created_at||''))+'"'+(m.__mq?'':' data-dn="1"')+' style="padding:2px 10px;font-size:11px" title="'+(m.__mq?'把这封邮件重新入队，走原发信链路（约 30 分钟内）发出':'把这封删号通知重置为待发，由兜底链路补发（最长约 12 小时内）；判死超 3 天的会被放弃窗口自动跳过')+'">补发</button></td>'))
+        +(String(m.kind)==='verify'
+          ?('<td style="'+TD+'"><span class="muted" title="250 提醒由 notes 链路自动发、受 3 天冷却闸门管，不提供手动补发">自动</span></td>')
+          :(('<td style="'+TD+'"><button class="mini" data-act="resend" data-pool="'+esc(a.pool)+'" data-uid="'+esc(a.uid)+'" data-kind="'+esc(m.__mq?(m.kind||''):(m.kind||'dead'))+'" data-ref="'+esc(m.__mq?(m.ref||''):(m.created_at||''))+'"'+(m.__mq?'':' data-dn="1"')+' style="padding:2px 10px;font-size:11px" title="'+(m.__mq?'把这封邮件重新入队，走原发信链路（约 30 分钟内）发出':'把这封删号通知重置为待发，由兜底链路补发（最长约 12 小时内）；判死超 3 天的会被放弃窗口自动跳过')+'">补发</button></td>')))
       +'</tr>';
     }
     h+='</tbody></table>';
@@ -2576,6 +2616,7 @@ function mtRenderList(d){
   if(selK){
     rs=rs.filter(function(r){
       if(selK==='notice')return !!r.notice;
+      if(selK==='verify')return !!(r.verify&&r.verify.last);
       if(selK==='relogin2')return (r.kinds||[]).indexOf('relogin2')>=0||(r.relogin_at&&String(r.relogin_at).slice(0,10)>=cutD);
       var ks=r.kinds||[];
       for(var i=0;i<ks.length;i++){
@@ -2594,6 +2635,7 @@ function mtRenderList(d){
     +'<th style="'+TH+'">群</th><th style="'+TH+'">账号</th><th style="'+TH+'">UID</th><th style="'+TH+'">邮箱</th>'
     +'<th style="'+TH+'" title="删号时间与原因（dead_log 流水；11-18 起失效号立即删号，清单以已删号为主体）">删号</th>'
     +'<th style="'+TH+'" title="每天一封的 relogin2 提醒，取最新一条">每日提醒</th>'
+    +'<th style="'+TH+'" title="250 笔记验证提醒（notify.py 直邮，不进邮件队列）：最近发送时间 + 累计封数，来自 KV vmail 指纹">250提醒</th>'
     +'<th style="'+TH+'" title="删号通知状态（dead_notice；直邮链路的删号无回执，显示 —）">删号通知</th><th style="'+TH+'">待复核</th><th style="'+TH+'">到期</th><th style="'+TH+'">邮件</th></tr></thead><tbody>';
   for(var i=0;i<rs.length;i++){var r=rs[i];
     var rel2=r.rel2,nt=r.notice,dd=r.dead;
@@ -2613,6 +2655,7 @@ function mtRenderList(d){
       +'<td style="'+TD+';max-width:130px;overflow:hidden;text-overflow:ellipsis">'+esc(r.email||'（未留）')+'</td>'
       +'<td style="'+TD+'">'+ddTxt+'</td>'
       +'<td style="'+TD+'">'+rel2Txt+'</td>'
+      +'<td style="'+TD+'">'+(r.verify&&r.verify.last?('<span class="good">'+mtTime(r.verify.last)+'</span> <span class="muted">'+esc(String(r.verify.count||1))+'封</span>'):'—')+'</td>'
       +'<td style="'+TD+'">'+(nt?(mtMailState(nt.state)+(nt.sent_at?(' '+mtTime(nt.sent_at)):'')):'—')+'</td>'
       +'<td style="'+TD+'">'+(r.suspect_at?esc(String(r.suspect_at).slice(5,16)):'—')+'</td>'
       +'<td style="'+TD+'">'+esc(r.exp||'—')+'</td>'
@@ -2622,7 +2665,7 @@ function mtRenderList(d){
   h+='</tbody></table><p style="font-size:11px;color:#999;margin:8px 0 0">'
     +(selK?('筛选后 '+rs.length+' / 共 '+totalAll+' 个失效相关号（类型筛选只在本机过滤已拉回的数据，切换不耗配额）。'):('共 '+rs.length+' 个失效相关号（时间窗口内已删号 + 在池待复核）。'))
     +(d.trunc?'<b style="color:#a32d2d">已删号超过 500 条，只显示最近的 500 条 —— 想看更早的请缩小时间范围。</b>':'')
-    +'每日提醒=最新一封 relogin2 邮件；删号通知一列显示 — 的号走的是系统判死直邮链路（无 dead_notice 回执），发送结果看该号「邮件」明细。</p>';
+    +'每日提醒=最新一封 relogin2 邮件；250提醒=笔记验证提醒直邮指纹（直连 SMTP 不进邮件队列，明细在该号「邮件」里）；删号通知一列显示 — 的号走的是系统判死直邮链路（无 dead_notice 回执），发送结果看该号「邮件」明细。</p>';
   return h;
 }
 var MT_LAST=null;   // 最近一次查询结果（含 mode），筛选切换/补发后在本机重渲染，不重复读库
@@ -2775,6 +2818,63 @@ function blRender(){
 function blMsg(t,ok){var m=$('blm');m.textContent=t;m.className='msg'+(ok?' good':' err');}
 $('btnBlk').onclick=function(){$('blm').textContent='';$('blBody').innerHTML='';$('blModal').hidden=false;blLoad();};
 $('blClose').onclick=function(){$('blModal').hidden=true;};
+// ===== 2026-11-26：版本管理（EXE/APK 最低版本要求，满权限专属）=====
+// GET /api/console/ver_gate 拉现状 → 渲染两端的当前要求与剩余宽限；
+// POST /api/console/ver_gate 设置/解除。配置在 D1（hz/dz 共用），一次设置两站生效。
+function verStateOf(it,now){
+  if(!it||!it.min)return '<span style="color:#888">未设置（所有版本都能用）</span>';
+  var at=Number(it.at)||0;
+  if(at&&now<at){
+    var left=Math.ceil((at-now)/3600000);
+    return '<span style="color:#b07a00">最低 v'+esc(it.min)+' · 宽限中（剩约 '+left+' 小时，'
+      +new Date(at).toLocaleString('zh-CN',{hour12:false})+' 到期后老版停服）</span>';
+  }
+  return '<span style="color:#c62828">最低 v'+esc(it.min)+' · 已强制（低于要求的版本已被拒绝）</span>';
+}
+function verLoad(){
+  var t=JSON.parse(TOKEN||'{}');
+  fetch('/api/console/ver_gate?user='+encodeURIComponent(t.user||'xx1031')+'&pass='+encodeURIComponent(t.pass||''))
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d&&d.ok){
+        var now=Number(d.now)||Date.now();
+        $('verBody').innerHTML=
+          '<div style="padding:8px 0;border-bottom:1px dashed #e5e5e5"><b>EXE（电脑 · CK助手）</b>：'+verStateOf(d.exe,now)+'</div>'
+          +'<div style="padding:8px 0"><b>APK（手机 · 号池管理）</b>：'+verStateOf(d.apk,now)+'</div>';
+      }else{
+        $('verBody').innerHTML='<span style="color:#c62828">'+esc((d&&d.message)||'读取失败')+'</span>';
+      }
+    })
+    .catch(function(){$('verBody').innerHTML='<span style="color:#c62828">网络错误，读取失败</span>';});
+}
+function verMsg(t,ok){var m=$('verMsg');m.textContent=t;m.className='msg'+(ok?' good':' err');}
+function verPost(payload){
+  var t=JSON.parse(TOKEN||'{}');
+  verMsg('提交中…',true);
+  payload.user=t.user||'xx1031';payload.pass=t.pass||'';
+  api('/api/console/ver_gate',payload).then(function(o){
+    if(o.ok&&o.d&&o.d.ok){verMsg(o.d.message||'已设置',true);verLoad();}
+    else verMsg((o.d&&o.d.message)||'设置失败（口令或参数问题）');
+  }).catch(function(){verMsg('网络错误，设置失败');});
+}
+$('btnVer').onclick=function(){verMsg('');$('verModal').hidden=false;verLoad();};
+$('verClose').onclick=function(){$('verModal').hidden=true;};
+function verGoFor(cl){
+  var min=($('verMin'+cl).value||'').trim().replace(/[^0-9.]/g,'');
+  var hours=parseInt($('verHours'+cl).value,10);
+  if(!min){verMsg('请填最低版本号，例如 '+(cl==='Exe'?'3.10':'2.30'));return;}
+  if(min.split('.').filter(function(x){return x!=='';}).length<2){verMsg('版本号要带小数点，例如 '+(cl==='Exe'?'3.10':'2.30'));return;}
+  verPost({client:cl.toLowerCase(),min:min,hours:isFinite(hours)?hours:24});
+}
+function verClrFor(cl){
+  var nm=(cl==='Exe')?'EXE（电脑）':'APK（手机）';
+  if(!confirm('确定解除 '+nm+' 的版本限制吗？解除后所有版本都能用。'))return;
+  verPost({client:cl.toLowerCase(),clear:1});
+}
+$('verGoExe').onclick=function(){verGoFor('Exe');};
+$('verGoApk').onclick=function(){verGoFor('Apk');};
+$('verClrExe').onclick=function(){verClrFor('Exe');};
+$('verClrApk').onclick=function(){verClrFor('Apk');};
 $('blRefresh').onclick=blLoad;
 $('blThrSave').onclick=function(){
   var t=JSON.parse(TOKEN||'{}'),v=parseInt($('blThr').value,10);
@@ -3285,7 +3385,7 @@ function mDeployMobile(){
   if(MOV.length)return;
   var fids=['fagent','fplan','dr'],fs=$('fpSlot');   // 2026-11-18：'sort' 已删
   if(fs){fids.forEach(function(id){var el=mGrab(id);if(el)fs.appendChild(el);});}
-  var tids=['btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnMailTrace','btnBlk','btnOut'],ts=$('tdSlot');
+  var tids=['btnLedger','btnCfg','btnDev','btnReg','btnRescue','btnMailTrace','btnBlk','btnVer','btnOut'],ts=$('tdSlot');
   if(ts){tids.forEach(function(id){var el=mGrab(id);if(el)ts.appendChild(el);});}
   var kp=$('kjP');
   if(kp&&!$('kjWrap')){
