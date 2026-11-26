@@ -15802,12 +15802,23 @@ body:has(.modal:not([hidden])){overflow:hidden}
   <div id="verBody" style="font-size:13px;color:#333"></div>
   <div style="border:1px solid #e3e9f5;background:#f6f9ff;border-radius:9px;padding:10px 12px;margin:10px 0 4px">
     <div style="font-weight:600;font-size:12.5px;color:#2c5aa8;margin-bottom:8px">设置 / 更新要求</div>
-    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-      <div><label style="margin-top:0">客户端</label><select id="verClient" style="width:110px"><option value="exe">EXE（电脑）</option><option value="apk">APK（手机）</option></select></div>
-      <div><label style="margin-top:0">最低版本</label><input id="verMin" placeholder="如 3.10" style="width:110px"></div>
-      <div><label style="margin-top:0">宽限</label><select id="verHours" style="width:150px"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select></div>
-      <button class="mini" id="verGo" style="margin-top:0;padding:9px 14px">设置</button>
-      <button class="mini gray" id="verClr" style="margin-top:0;padding:9px 14px" title="解除所选客户端的版本限制（所有版本恢复可用）">解除</button>
+    <div style="border:1px solid #dfe8f7;background:#fff;border-radius:8px;padding:8px 10px;margin-bottom:8px">
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div style="font-weight:600;font-size:12.5px;color:#333;padding:7px 0;min-width:118px">EXE（电脑）</div>
+        <div><label style="margin-top:0">最低版本</label><input id="verMinExe" placeholder="如 3.10" style="width:110px"></div>
+        <div><label style="margin-top:0">宽限</label><select id="verHoursExe" style="width:150px"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select></div>
+        <button class="mini" id="verGoExe" style="margin-top:0;padding:9px 14px">设置</button>
+        <button class="mini gray" id="verClrExe" style="margin-top:0;padding:9px 14px" title="解除 EXE 的版本限制（所有版本恢复可用）">解除</button>
+      </div>
+    </div>
+    <div style="border:1px solid #dfe8f7;background:#fff;border-radius:8px;padding:8px 10px">
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div style="font-weight:600;font-size:12.5px;color:#333;padding:7px 0;min-width:118px">APK（手机）</div>
+        <div><label style="margin-top:0">最低版本</label><input id="verMinApk" placeholder="如 2.30" style="width:110px"></div>
+        <div><label style="margin-top:0">宽限</label><select id="verHoursApk" style="width:150px"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select></div>
+        <button class="mini" id="verGoApk" style="margin-top:0;padding:9px 14px">设置</button>
+        <button class="mini gray" id="verClrApk" style="margin-top:0;padding:9px 14px" title="解除 APK 的版本限制（所有版本恢复可用）">解除</button>
+      </div>
     </div>
     <p style="font-size:11.5px;color:#5a7bb5;margin:8px 0 0;line-height:1.7">填当前最新版号（如 EXE 发了 3.10 就填 3.10）。版本比较按数值逐段算，3.10 &gt; 3.9。给已设过要求的客户端重新设置会<b>重新起算</b>宽限时间。</p>
   </div>
@@ -18170,19 +18181,22 @@ function verPost(payload){
 }
 $('btnVer').onclick=function(){verMsg('');$('verModal').hidden=false;verLoad();};
 $('verClose').onclick=function(){$('verModal').hidden=true;};
-$('verGo').onclick=function(){
-  var cl=$('verClient').value,min=($('verMin').value||'').trim().replace(/[^0-9.]/g,'');
-  var hours=parseInt($('verHours').value,10);
-  if(!min){verMsg('请填最低版本号，例如 3.10');return;}
-  if(min.split('.').filter(function(x){return x!=='';}).length<2){verMsg('版本号要带小数点，例如 3.10 / 2.30');return;}
-  verPost({client:cl,min:min,hours:isFinite(hours)?hours:24});
-};
-$('verClr').onclick=function(){
-  var cl=$('verClient').value;
-  var nm=(cl==='exe')?'EXE（电脑）':'APK（手机）';
+function verGoFor(cl){
+  var min=($('verMin'+cl).value||'').trim().replace(/[^0-9.]/g,'');
+  var hours=parseInt($('verHours'+cl).value,10);
+  if(!min){verMsg('请填最低版本号，例如 '+(cl==='Exe'?'3.10':'2.30'));return;}
+  if(min.split('.').filter(function(x){return x!=='';}).length<2){verMsg('版本号要带小数点，例如 '+(cl==='Exe'?'3.10':'2.30'));return;}
+  verPost({client:cl.toLowerCase(),min:min,hours:isFinite(hours)?hours:24});
+}
+function verClrFor(cl){
+  var nm=(cl==='Exe')?'EXE（电脑）':'APK（手机）';
   if(!confirm('确定解除 '+nm+' 的版本限制吗？解除后所有版本都能用。'))return;
-  verPost({client:cl,clear:1});
-};
+  verPost({client:cl.toLowerCase(),clear:1});
+}
+$('verGoExe').onclick=function(){verGoFor('Exe');};
+$('verGoApk').onclick=function(){verGoFor('Apk');};
+$('verClrExe').onclick=function(){verClrFor('Exe');};
+$('verClrApk').onclick=function(){verClrFor('Apk');};
 $('blRefresh').onclick=blLoad;
 $('blThrSave').onclick=function(){
   var t=JSON.parse(TOKEN||'{}'),v=parseInt($('blThr').value,10);
