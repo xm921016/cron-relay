@@ -15333,6 +15333,7 @@ body:has(.modal:not([hidden])){overflow:hidden}
       <div><label style="margin-top:0">最低版本</label><input id="verMin" placeholder="如 3.10" style="width:110px"></div>
       <div><label style="margin-top:0">宽限</label><select id="verHours" style="width:150px"><option value="24">24 小时（推荐）</option><option value="0">0 小时（立即生效）</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="48">48 小时</option></select></div>
       <button class="mini" id="verGo" style="margin-top:0;padding:9px 14px">设置</button>
+      <button class="mini gray" id="verClr" style="margin-top:0;padding:9px 14px" title="解除所选客户端的版本限制（所有版本恢复可用）">解除</button>
     </div>
     <p style="font-size:11.5px;color:#5a7bb5;margin:8px 0 0;line-height:1.7">填当前最新版号（如 EXE 发了 3.10 就填 3.10）。版本比较按数值逐段算，3.10 &gt; 3.9。给已设过要求的客户端重新设置会<b>重新起算</b>宽限时间。</p>
   </div>
@@ -17701,6 +17702,12 @@ $('verGo').onclick=function(){
   if(!min){verMsg('请填最低版本号，例如 3.10');return;}
   if(min.split('.').filter(function(x){return x!=='';}).length<2){verMsg('版本号要带小数点，例如 3.10 / 2.30');return;}
   verPost({client:cl,min:min,hours:isFinite(hours)?hours:24});
+};
+$('verClr').onclick=function(){
+  var cl=$('verClient').value;
+  var nm=(cl==='exe')?'EXE（电脑）':'APK（手机）';
+  if(!confirm('确定解除 '+nm+' 的版本限制吗？解除后所有版本都能用。'))return;
+  verPost({client:cl,clear:1});
 };
 $('blRefresh').onclick=blLoad;
 $('blThrSave').onclick=function(){
