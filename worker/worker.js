@@ -2032,6 +2032,84 @@ async function regsmStat(key) {
   } catch (e) { /* 计量失败不拦业务 */ }
 }
 
+/* ===== 住宅出口中继（2026-11-26）=====
+   背景：CF 机房 IP 走短信登录约 19% 撞 8810；同一套端点从号主本机住宅宽带走几乎从不 8810
+   （EXE phone_login.py 实证 + 号池管理 APK 注释「官方环境不走 CF 出口」）。
+   做法：本机/笔记本各跑一个 sms_egress.py（端口 18731），**各自连自己的隧道**：
+     sms.xx1031.xyz     → sms-egress 隧道     → 笔记本（主）
+     sms-bak.xx1031.xyz → sms-egress-bak 隧道 → 本机（备）
+   2026-11-26 修正：早先两台连同一个隧道，CF 是把请求「随机」分给活着的连接器（双活），
+   不是主备——CF 不支持按机器选路。故拆成两个 hostname，由 Worker 侧按主→备顺序调，
+   这样笔记本永远优先，本机只在「主不通 / 主撞 8810」时才接手。
+   配置存 D1 kv_misc k='sms_relay'，形如
+     {"url":"https://sms.xx1031.xyz","bak":"https://sms-bak.xx1031.xyz","key":"...","on":true}
+   bak 可缺省（老配置照旧工作）；读不到 / 中继挂了 / 超时 → 一律静静回落本地 weapi。 */
+let SMS_RELAY_MEM = { t: 0, v: null };
+async function smsRelayCfg() {
+  const now = Date.now();
+  if (SMS_RELAY_MEM.t && now - SMS_RELAY_MEM.t < 60e3) return SMS_RELAY_MEM.v;
+  let v = null;
+  try {
+    if (typeof DB !== 'undefined' && DB) {
+      const rows = await d1All('SELECT v FROM kv_misc WHERE k=?', ['sms_relay']);
+      if (rows && rows.length) {
+        const j = JSON.parse(rows[0].v || '{}');
+        if (j && (j.url || j.bak)) v = {
+          url: String(j.url || '').replace(/\/+$/, ''),
+          bak: String(j.bak || '').replace(/\/+$/, ''),
+          key: String(j.key || ''), on: !!j.on,
+        };
+      }
+    }
+  } catch (e) { /* 配置读不到 = 中继关闭，绝不影响本地链路 */ }
+  SMS_RELAY_MEM = { t: now, v: v };
+  return v;
+}
+async function smsRelayOne(url, key, phone, code, ms) {
+  const ac = new AbortController();
+  const tm = setTimeout(() => { try { ac.abort(); } catch (e) {} }, ms);
+  try {
+    const r = await fetch(url + '/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Relay-Key': key },
+      body: JSON.stringify({ phone: phone, code: code }),
+      signal: ac.signal,
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return (j && typeof j === 'object') ? j : null;
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(tm);
+  }
+}
+/* 主→备顺序调用：网络失败 / 非 JSON 直接换下一台；8810、8821 是「这台出口被风控」，
+   换一台出口有实际意义（两台住宅宽带 IP 不同），也换下一台再试一次；
+   业务码（501/502/503 = 号或验证码问题）立即返回，不浪费第二台。
+   返回结果带 _via 标记走了哪台，供计量统计。 */
+async function smsRelayLogin(cfgR, phone, code) {
+  const targets = [];
+  if (cfgR.url) targets.push(cfgR.url);
+  if (cfgR.bak && cfgR.bak !== cfgR.url) targets.push(cfgR.bak);
+  let last = null;
+  for (let i = 0; i < targets.length; i++) {
+    const j = await smsRelayOne(targets[i], cfgR.key, phone, code, 8000);
+    const tag = i === 0 ? 'main' : 'bak';
+    if (!j) continue;
+    const c = Number(j.code);
+    if ((c === 8810 || c === 8821) && i < targets.length - 1) {
+      await regsmStat('relay_8810_' + tag);
+      last = j;
+      continue;
+    }
+    j._via = tag;
+    return j;
+  }
+  if (last) last._via = 'main';
+  return last;
+}
+
 const TEST_SMS_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -7084,10 +7162,12 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
       });
     });
   }
+  /* 2026-11-26：URL 带 ?ch=eapi 时本页登录强制走 eapi 画像通道（测试用，默认不生效） */
+  var REGCH = (function(){ try { return new URLSearchParams(location.search).get('ch') || ''; } catch (e) { return ''; } })();
   function smsApi(p, body){
     return fetch('/api/reg_sms/' + p, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({ t: T, sid: SMSID }, body || {}))
+      body: JSON.stringify(Object.assign({ t: T, sid: SMSID, ch: REGCH }, body || {}))
     }).then(function(r){
       return r.text().then(function(t2){
         var j = null; try { j = JSON.parse(t2); } catch (e) {}
@@ -7861,18 +7941,58 @@ async function handle(request) {
       const sid = String(b.sid || 'default').slice(0, 64);
       try {
         await regsmStat('login');
-        /* 登录成功回包（weapi / eapi 两条通道共用，页面拿到的结构必须完全一致） */
-        const okLogin = async (jx, jarx) => {
-          const mu = smsCookiePick(jarx.cookie, 'MUSIC_U');
+        /* 登录成功回包（三条通道共用：住宅中继 / weapi / eapi，页面拿到的结构必须完全一致） */
+        const okLoginAs = async (mu, uid, nick) => {
           if (!mu) return json({ code: 500, message: '登录成功但没拿到凭证，请重试一次' });
-          const uid = String((jx.account && jx.account.id) || (jx.profile && jx.profile.userId) || '');
           const art = await ncArtistName(uid); // 与 qrcheck 803 回包同构：绿条显示音乐人名 + 非音乐人提醒
           return json({ code: 200, message: '登录成功', musicU: mu, musicULen: mu.length,
-            uid: uid, nickname: (jx.profile && jx.profile.nickname) || '',
+            uid: String(uid || ''), nickname: nick || '',
             artist: art.aname || '', noart: (art.ok && !art.aid) ? 1 : 0 });
         };
+        const okLogin = async (jx, jarx) => {
+          const uid = String((jx.account && jx.account.id) || (jx.profile && jx.profile.userId) || '');
+          return await okLoginAs(smsCookiePick(jarx.cookie, 'MUSIC_U'), uid, (jx.profile && jx.profile.nickname) || '');
+        };
+        /* 第一优先：住宅出口中继（8810 的根治位）。?ch=eapi 是显式测试开关，测试时不走中继，
+           保证测到的是 eapi 本身；中继没配 / 挂了 / 超时 一律静静回落下面两条本地链路。 */
+        if (String(b.ch || '') !== 'eapi') {
+          const cfgR = await smsRelayCfg();
+          if (cfgR && cfgR.on) {
+            const rr = await smsRelayLogin(cfgR, phone, code);
+            if (rr) {
+              const rc = Number(rr.code);
+              if (rc === 200 && rr.musicU) {
+                await regsmStat('relay_ok');
+                if (rr._via === 'bak') await regsmStat('relay_ok_bak'); // 主链不通、备线接手成功
+                return await okLoginAs(rr.musicU, rr.uid, rr.nick);
+              }
+              if (rc === 8810 || rc === 8821) { await regsmStat('relay_8810'); }
+              else if (rc === 503 || rc === 502) { await regsmStat('relay_biz'); return json({ code: 205, message: '验证码不对或已过期' }); }
+              else if (rc === 501) { await regsmStat('relay_biz'); return json({ code: 503, message: '号码或账号状态异常，请点上方「扫码登记」' }); }
+              else { await regsmStat('relay_other'); }
+            } else {
+              await regsmStat('relay_err');
+            }
+          }
+        }
+        /* 2026-11-26：测试开关 ?ch=eapi（登记链接带 ch=eapi 时生效）—— 强制 eapi 画像通道优先，
+           用来在真实登记页直接验证 eapi 能否消掉 8810，不必只靠 /t/sms 实测页。
+           不带参数时默认仍 weapi 优先（客户侧零变化）；eapi 不通会自动落到下面的 weapi 正常路径。 */
+        if (String(b.ch || '') === 'eapi') {
+          try {
+            const jarT = await smsGetJar(sid + '::eapi');
+            const rT = await smsEapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true', secrete: 'music_middleuser_pclogin' }, jarT);
+            await smsSaveJar(sid + '::eapi', jarT);
+            const jT = smsParseJson(rT.text);
+            if (jT && Number(jT.code) === 200) { await regsmStat('eapi_first_ok'); return await okLogin(jT, jarT); }
+            if (jT && Number(jT.code) === 8810) await regsmStat('eapi_first_8810');
+            else if (jT && Number(jT.code) === 8821) await regsmStat('eapi_first_8821');
+            else await regsmStat('eapi_first_other');
+          } catch (eT) { await regsmStat('eapi_first_err'); }
+        }
         const jar = await smsGetJar(sid);
-        const r = await smsWeapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true' }, jar);        await smsSaveJar(sid, jar);
+        const r = await smsWeapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true' }, jar);
+        await smsSaveJar(sid, jar);
         const j = smsParseJson(r.text);
         if (j && Number(j.code) === -462 && j.data && j.data.verifyToken) {
           await regsmStat('e462l');
