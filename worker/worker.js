@@ -1787,6 +1787,233 @@ async function smsWeapiCall(apiPath, data, jar) {
   return smsUpstream('https://music.163.com' + apiPath.replace(/^\/api/, '/weapi'), body, jar);
 }
 function smsParseJson(text) { try { return JSON.parse(text); } catch (e) { return null; } }
+/* ===== 2026-11-26：eapi 客户端画像实验（对照 weapi 出 8810 环境硬拒） =====
+   假设根因：CF 机房出口 IP + 浏览器 weapi 画像 → 登录口被网易判环境风险（8810 不带挑战对象，
+   所以不弹滑块；竞品 PR#294 UA与OS.md：机房 IP 会稳定叠加 8810，与 UA 无关）。
+   实验组三件套（策略参考 api-enhanced PR#294 yidun-api.js + util/request.js，代码自主实现）：
+   ① eapi 协议 + PC 客户端 UA（UA / cookie os·appver·osver / eapi header 三处身份自洽）；
+   ② 每请求现取易盾反作弊 token（v3 直取 ac.dun.163yun.com/v3/b，不缓存，token 一次性）；
+   ③ 同 sid 会话 jar 复用（NMTID/__csrf/MUSIC_U 整个流程不换设备身份）。
+   仅 /t/sms 实测页灰度（b.eapi=1），登记页 /api/reg_sms 暂不动；实测若 8810 不退即关闭此路径。
+   AES-ECB/MD5 为纯 JS 实现（CF Workers WebCrypto 无 ECB/MD5），已与 Node 原生对拍全过
+   （对拍脚本 tmp/pr294/eapi_crypto_test.js）。 */
+const SMS_EAPI_KEY = 'e82ckenh8dichen8';
+const SMS_EAPI_UA = 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.1.29.205117';
+const SMS_EAPI_ID = { os: 'pc', appver: '3.1.17.204416', osver: 'Microsoft-Windows-10-Professional-build-19045-64bit', channel: 'netease' };
+function smsMd5(str) { /* 纯 JS MD5 → 小写 hex（UTF-8 安全） */
+  function rl(v, s) { return (v << s) | (v >>> (32 - s)); }
+  function au(x, y) { var l = (x & 0xffff) + (y & 0xffff), m = (x >> 16) + (y >> 16) + (l >> 16); return (m << 16) | (l & 0xffff); }
+  function cmn(q, a, b, x, s, t) { return au(rl(au(au(a, q), au(x, t)), s), b); }
+  function ff(a, b, c, d, x, s, t) { return cmn((b & c) | (~b & d), a, b, x, s, t); }
+  function gg(a, b, c, d, x, s, t) { return cmn((b & d) | (c & ~d), a, b, x, s, t); }
+  function hh(a, b, c, d, x, s, t) { return cmn(b ^ c ^ d, a, b, x, s, t); }
+  function ii(a, b, c, d, x, s, t) { return cmn(c ^ (b | ~d), a, b, x, s, t); }
+  var msg = [];
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i);
+    if (c < 0x80) msg.push(c);
+    else if (c < 0x800) msg.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    else if (c >= 0xd800 && c < 0xdc00 && i + 1 < str.length) { var c2 = str.charCodeAt(++i); c = 0x10000 + ((c & 0x3ff) << 10) + (c2 & 0x3ff); msg.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63)); }
+    else msg.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+  }
+  var bitLen = msg.length * 8;
+  msg.push(0x80);
+  while (msg.length % 64 !== 56) msg.push(0);
+  for (var j = 0; j < 4; j++) msg.push((bitLen >>> (j * 8)) & 255);
+  for (var k2 = 4; k2 < 8; k2++) msg.push(0);
+  var a = 1732584193, b = -271733879, c = -1732584194, d = 271733878;
+  for (var o = 0; o < msg.length; o += 64) {
+    var x = [];
+    for (var p = 0; p < 16; p++) x[p] = msg[o + p * 4] | (msg[o + p * 4 + 1] << 8) | (msg[o + p * 4 + 2] << 16) | (msg[o + p * 4 + 3] << 24);
+    var oa = a, ob = b, oc = c, od = d;
+    a=ff(a,b,c,d,x[0],7,-680876936);   d=ff(d,a,b,c,x[1],12,-389564586);  c=ff(c,d,a,b,x[2],17,606105819);   b=ff(b,c,d,a,x[3],22,-1044525330);
+    a=ff(a,b,c,d,x[4],7,-176418897);   d=ff(d,a,b,c,x[5],12,1200080426);  c=ff(c,d,a,b,x[6],17,-1473231341); b=ff(b,c,d,a,x[7],22,-45705983);
+    a=ff(a,b,c,d,x[8],7,1770035416);   d=ff(d,a,b,c,x[9],12,-1958414417); c=ff(c,d,a,b,x[10],17,-42063);     b=ff(b,c,d,a,x[11],22,-1990404162);
+    a=ff(a,b,c,d,x[12],7,1804603682);  d=ff(d,a,b,c,x[13],12,-40341101);  c=ff(c,d,a,b,x[14],17,-1502002290);b=ff(b,c,d,a,x[15],22,1236535329);
+    a=gg(a,b,c,d,x[1],5,-165796510);   d=gg(d,a,b,c,x[6],9,-1069501632);  c=gg(c,d,a,b,x[11],14,643717713);  b=gg(b,c,d,a,x[0],20,-373897302);
+    a=gg(a,b,c,d,x[5],5,-701558691);   d=gg(d,a,b,c,x[10],9,38016083);    c=gg(c,d,a,b,x[15],14,-660478335); b=gg(b,c,d,a,x[4],20,-405537848);
+    a=gg(a,b,c,d,x[9],5,568446438);    d=gg(d,a,b,c,x[14],9,-1019803690); c=gg(c,d,a,b,x[3],14,-187363961);  b=gg(b,c,d,a,x[8],20,1163531501);
+    a=gg(a,b,c,d,x[13],5,-1444681467); d=gg(d,a,b,c,x[2],9,-51403784);    c=gg(c,d,a,b,x[7],14,1735328473);  b=gg(b,c,d,a,x[12],20,-1926607734);
+    a=hh(a,b,c,d,x[5],4,-378558);      d=hh(d,a,b,c,x[8],11,-2022574463); c=hh(c,d,a,b,x[11],16,1839030562); b=hh(b,c,d,a,x[14],23,-35309556);
+    a=hh(a,b,c,d,x[1],4,-1530992060);  d=hh(d,a,b,c,x[4],11,1272893353);  c=hh(c,d,a,b,x[7],16,-155497632);  b=hh(b,c,d,a,x[10],23,-1094730640);
+    a=hh(a,b,c,d,x[13],4,681279174);   d=hh(d,a,b,c,x[0],11,-358537222);  c=hh(c,d,a,b,x[3],16,-722521979);  b=hh(b,c,d,a,x[6],23,76029189);
+    a=hh(a,b,c,d,x[9],4,-640364487);   d=hh(d,a,b,c,x[12],11,-421815835); c=hh(c,d,a,b,x[15],16,530742520);  b=hh(b,c,d,a,x[2],23,-995338651);
+    a=ii(a,b,c,d,x[0],6,-198630844);   d=ii(d,a,b,c,x[7],10,1126891415);  c=ii(c,d,a,b,x[14],15,-1416354905);b=ii(b,c,d,a,x[5],21,-57434055);
+    a=ii(a,b,c,d,x[12],6,1700485571);  d=ii(d,a,b,c,x[3],10,-1894986606); c=ii(c,d,a,b,x[10],15,-1051523);   b=ii(b,c,d,a,x[1],21,-2054922799);
+    a=ii(a,b,c,d,x[8],6,1873313359);   d=ii(d,a,b,c,x[15],10,-30611744);  c=ii(c,d,a,b,x[6],15,-1560198380); b=ii(b,c,d,a,x[13],21,1309151649);
+    a=ii(a,b,c,d,x[4],6,-145523070);   d=ii(d,a,b,c,x[11],10,-1120210379);c=ii(c,d,a,b,x[2],15,718787259);   b=ii(b,c,d,a,x[9],21,-343485551);
+    a = au(a, oa); b = au(b, ob); c = au(c, oc); d = au(d, od);
+  }
+  function hx(n) { var s = ''; for (var q = 0; q < 4; q++) { var by = (n >>> (q * 8)) & 255; s += (by < 16 ? '0' : '') + by.toString(16); } return s; }
+  return hx(a) + hx(b) + hx(c) + hx(d);
+}
+var _AES = null;
+function _aesTab() { /* AES 表运行时生成（无手抄常量，防抄错） */
+  if (_AES) return _AES;
+  function xt(a) { return ((a << 1) ^ ((a & 0x80) ? 0x11b : 0)) & 255; }
+  function mul(a, b) { var r = 0; while (b) { if (b & 1) r ^= a; a = xt(a); b >>= 1; } return r & 255; }
+  var sbox = new Uint8Array(256), inv = new Uint8Array(256);
+  for (var i = 0; i < 256; i++) {
+    var v = 0;
+    if (i) { for (var q = 1; q < 256; q++) { if (mul(i, q) === 1) { v = q; break; } } }
+    var x = v, s = v;
+    for (var r = 0; r < 4; r++) { s = ((s << 1) | (s >> 7)) & 255; x ^= s; }
+    sbox[i] = (x ^ 0x63) & 255;
+  }
+  for (var z = 0; z < 256; z++) inv[sbox[z]] = z; /* 逆 S 盒 = S 盒反映射 */
+  if (sbox[0] !== 0x63 || sbox[0x53] !== 0xed || inv[0x00] !== 0x52) throw new Error('AES 表自检失败');
+  _AES = { sbox: sbox, inv: inv, rcon: [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36], mul: mul };
+  return _AES;
+}
+function _aesRK(key) { /* AES-128 轮密钥展开 → 176 字节 */
+  var T = _aesTab(), sbox = T.sbox, rcon = T.rcon, w = key.slice();
+  for (var i = 16; i < 176; i += 4) {
+    var t = [w[i - 4], w[i - 3], w[i - 2], w[i - 1]];
+    if (i % 16 === 0) t = [sbox[t[1]] ^ rcon[i / 16 - 1], sbox[t[2]], sbox[t[3]], sbox[t[0]]];
+    for (var q = 0; q < 4; q++) w[i + q] = w[i - 16 + q] ^ t[q];
+  }
+  return w;
+}
+function _aesEncBlk(bl, rk) {
+  var T = _aesTab(), sbox = T.sbox, mul = T.mul, s = bl.slice();
+  for (var r = 0; r < 16; r++) s[r] ^= rk[r];
+  for (var round = 1; round <= 10; round++) {
+    for (var i = 0; i < 16; i++) s[i] = sbox[s[i]];
+    var t = s[1]; s[1] = s[5]; s[5] = s[9]; s[9] = s[13]; s[13] = t;
+    t = s[10]; s[10] = s[2]; s[2] = t; t = s[14]; s[14] = s[6]; s[6] = t;
+    t = s[3]; s[3] = s[15]; s[15] = s[11]; s[11] = s[7]; s[7] = t;
+    if (round < 10) {
+      for (var c = 0; c < 4; c++) {
+        var a0 = s[c * 4], a1 = s[c * 4 + 1], a2 = s[c * 4 + 2], a3 = s[c * 4 + 3];
+        s[c * 4] = mul(a0, 2) ^ mul(a1, 3) ^ a2 ^ a3;
+        s[c * 4 + 1] = a0 ^ mul(a1, 2) ^ mul(a2, 3) ^ a3;
+        s[c * 4 + 2] = a0 ^ a1 ^ mul(a2, 2) ^ mul(a3, 3);
+        s[c * 4 + 3] = mul(a0, 3) ^ a1 ^ a2 ^ mul(a3, 2);
+      }
+    }
+    for (var k = 0; k < 16; k++) s[k] ^= rk[round * 16 + k];
+  }
+  return s;
+}
+function _aesDecBlk(bl, rk) {
+  var T = _aesTab(), inv = T.inv, mul = T.mul, s = bl.slice();
+  for (var r = 0; r < 16; r++) s[r] ^= rk[160 + r];
+  for (var round = 9; round >= 0; round--) {
+    var t = s[13]; s[13] = s[9]; s[9] = s[5]; s[5] = s[1]; s[1] = t;
+    t = s[10]; s[10] = s[2]; s[2] = t; t = s[6]; s[6] = s[14]; s[14] = t;
+    t = s[3]; s[3] = s[7]; s[7] = s[11]; s[11] = s[15]; s[15] = t;
+    for (var i = 0; i < 16; i++) s[i] = inv[s[i]];
+    for (var k = 0; k < 16; k++) s[k] ^= rk[round * 16 + k];
+    if (round > 0) {
+      for (var c = 0; c < 4; c++) {
+        var a0 = s[c * 4], a1 = s[c * 4 + 1], a2 = s[c * 4 + 2], a3 = s[c * 4 + 3];
+        s[c * 4] = mul(a0, 14) ^ mul(a1, 11) ^ mul(a2, 13) ^ mul(a3, 9);
+        s[c * 4 + 1] = mul(a0, 9) ^ mul(a1, 14) ^ mul(a2, 11) ^ mul(a3, 13);
+        s[c * 4 + 2] = mul(a0, 13) ^ mul(a1, 9) ^ mul(a2, 14) ^ mul(a3, 11);
+        s[c * 4 + 3] = mul(a0, 11) ^ mul(a1, 13) ^ mul(a2, 9) ^ mul(a3, 14);
+      }
+    }
+  }
+  return s;
+}
+function smsAesEcbEncHex(text, keyStr) { /* PKCS7 → 大写 hex（eapi params 用） */
+  var key = []; for (var i = 0; i < keyStr.length; i++) key.push(keyStr.charCodeAt(i) & 255);
+  var rk = _aesRK(key), data = [], out = '';
+  for (var j = 0; j < text.length; j++) {
+    var cd = text.charCodeAt(j);
+    if (cd < 0x80) data.push(cd);
+    else if (cd < 0x800) data.push(0xc0 | (cd >> 6), 0x80 | (cd & 63));
+    else data.push(0xe0 | (cd >> 12), 0x80 | ((cd >> 6) & 63), 0x80 | (cd & 63));
+  }
+  var pad = 16 - (data.length % 16);
+  for (var p = 0; p < pad; p++) data.push(pad);
+  for (var o = 0; o < data.length; o += 16) {
+    var eb = _aesEncBlk(data.slice(o, o + 16), rk);
+    for (var q = 0; q < 16; q++) out += (eb[q] < 16 ? '0' : '') + eb[q].toString(16);
+  }
+  return out.toUpperCase();
+}
+function smsAesEcbDecStr(hexStr, keyStr) { /* AES-ECB hex → UTF-8 字符串（eapi 响应解密用，去 PKCS7） */
+  var key = []; for (var i = 0; i < keyStr.length; i++) key.push(keyStr.charCodeAt(i) & 255);
+  var rk = _aesRK(key), h = hexStr.toLowerCase(), bytes = [];
+  for (var o = 0; o + 32 <= h.length; o += 32) {
+    var bl = [];
+    for (var q = 0; q < 16; q++) bl.push(parseInt(h.slice(o + q * 2, o + q * 2 + 2), 16));
+    var db = _aesDecBlk(bl, rk);
+    for (var w = 0; w < 16; w++) bytes.push(db[w]);
+  }
+  var pad = bytes.length ? bytes[bytes.length - 1] : 0;
+  if (pad >= 1 && pad <= 16) bytes = bytes.slice(0, bytes.length - pad);
+  var out = '', k = 0;
+  while (k < bytes.length) {
+    var cd = bytes[k];
+    if (cd < 0x80) { out += String.fromCharCode(cd); k++; }
+    else if (cd >= 0xc0 && cd < 0xe0) { out += String.fromCharCode(((cd & 31) << 6) | (bytes[k + 1] & 63)); k += 2; }
+    else if (cd >= 0xe0 && cd < 0xf0) { out += String.fromCharCode(((cd & 15) << 12) | ((bytes[k + 1] & 63) << 6) | (bytes[k + 2] & 63)); k += 3; }
+    else { out += '?'; k++; }
+  }
+  return out;
+}
+function smsEapiParams(uri, obj) { /* eapi 打包：nobody{url}use{text}md5forencrypt 摘要 + AES-ECB */
+  var text = JSON.stringify(obj);
+  var digest = smsMd5('nobody' + uri + 'use' + text + 'md5forencrypt');
+  return smsAesEcbEncHex(uri + '-36cd479b6b5-' + text + '-36cd479b6b5-' + digest, SMS_EAPI_KEY);
+}
+async function smsAntiCheatToken() { /* 易盾 v3 反作弊 token，每次现取不缓存 */
+  try {
+    const r = await fetch('https://ac.dun.163yun.com/v3/b?pn=YD00000558929251', { headers: { 'User-Agent': SMS_EAPI_UA } });
+    const m = (await r.text()).match(/null\(\[(\d+),\d+,"([^"]+)"\]\)/);
+    return m && m[1] === '200' ? m[2] : '';
+  } catch (e) { return ''; }
+}
+async function smsEapiCall(apiPath, body, jar) { /* eapi 调用，返回 {status,text} 与 smsWeapiCall 同构（text 已解密为 JSON 字符串） */
+  const pickC = (k) => smsCookiePick(jar.cookie, k);
+  const header = {
+    osver: SMS_EAPI_ID.osver,
+    deviceId: pickC('deviceId') || smsRand(16),
+    os: SMS_EAPI_ID.os,
+    appver: SMS_EAPI_ID.appver,
+    versioncode: '140',
+    mobilename: '',
+    buildver: String(Math.floor(Date.now() / 1000)),
+    resolution: '1920x1080',
+    __csrf: pickC('__csrf') || '',
+    channel: SMS_EAPI_ID.channel,
+    requestId: Date.now() + '_' + String(Math.floor(Math.random() * 10000)).padStart(4, '0'),
+  };
+  const nmtid = pickC('NMTID');
+  if (nmtid) header.NMTID = nmtid;
+  const act = await smsAntiCheatToken();
+  if (act) header['X-antiCheatToken'] = act;
+  const data = Object.assign({ header, e_r: true }, body);
+  const r = await fetch('https://interface.music.163.com/eapi' + apiPath.replace(/^\/api/, ''), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': SMS_EAPI_UA,
+      'Cookie': Object.keys(header).map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(header[k])).join('; '),
+    },
+    body: 'params=' + encodeURIComponent(smsEapiParams(apiPath, data)),
+  });
+  const sc = r.headers.getSetCookie ? r.headers.getSetCookie() : [];
+  if (sc.length) jar.cookie = smsCookieMerge(jar.cookie, sc);
+  /* 2026-11-26 实测修正：e_r=true 时网易回的是「二进制 AES-ECB 密文」不是 hex 文本
+     （api-enhanced 同款：arraybuffer → hex 串 → 解密）。先试 UTF-8 明文 JSON，失败再走解密。 */
+  const buf = new Uint8Array(await r.arrayBuffer());
+  let j = null, t2 = '';
+  try { t2 = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch (e) { t2 = ''; }
+  try { j = JSON.parse(t2); } catch (e) {}
+  if (!j) {
+    let hex = '';
+    for (let i = 0; i < buf.length; i++) hex += (buf[i] < 16 ? '0' : '') + buf[i].toString(16);
+    if (hex.length >= 32 && hex.length % 32 === 0) {
+      try { j = JSON.parse(smsAesEcbDecStr(hex, SMS_EAPI_KEY)); } catch (e) {}
+    }
+    if (!j) t2 = hex.slice(0, 160);
+  }
+  return { status: r.status, text: j ? JSON.stringify(j) : String(t2).slice(0, 400) };
+}
+/* ===== eapi 实验区结束 ===== */
 async function smsTestAuth(pass) { const c = await cfg(); return adminPassOk(c, pass); }
 const smsSendLimit = new Map(); // phone -> ts：单 isolate 内存闸（60 秒防连点），外加 ADMIN_PASS 口令兜底
 /* 2026-11-25：登记短信通道计量（KV REGSM_STATS，按北京日分桶，只留 14 天）。
@@ -1854,6 +2081,7 @@ const TEST_SMS_HTML = `<!DOCTYPE html>
       <button id="b-send">获取验证码</button>
     </div>
     <p class="tip" style="margin-top:6px"><label style="display:inline;font-size:12px;margin:0;opacity:.8"><input type="checkbox" id="risky" style="width:auto;vertical-align:-2px;margin-right:5px">滑块演示模式（全裸会话零 cookie 发码，最大化触发 -462 弹滑块；勾上后先点「换新会话」再发码效果最稳；若返回 -460/8810 属网易硬拒，也是有效演示）</label></p>
+    <p class="tip" style="margin-top:6px"><label style="display:inline;font-size:12px;margin:0;opacity:.8">通道：<select id="chan" style="font-size:12px;padding:2px 4px;border:1px solid #ccc;border-radius:6px;background:inherit"><option value="weapi">weapi（现网同款，8810 对照组）</option><option value="eapi">eapi 画像实验（PC客户端UA+反作弊token，2026-11-26）</option></select>　eapi 口风控=8821（要滑块）/8810（环境硬拒），会话与 weapi 互相独立</label></p>
     <p class="tip" id="tip"></p>
     <div id="yidun-cap"></div>
     <label>短信验证码（收到后填这里）</label>
@@ -1887,9 +2115,17 @@ function log(tag, obj){
   p.textContent = line + p.textContent.slice(0, 8000);
 }
 async function api(path, payload){
+  var p2 = Object.assign({ pass: E('pass').value.trim(), sid: SID, eapi: E('chan').value === 'eapi' ? 1 : 0 }, payload || {});
   var r = await fetch('/api/sms_test/' + path, { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(Object.assign({ pass: E('pass').value.trim(), sid: SID }, payload || {})) });
+    body: JSON.stringify(p2) });
   try { return await r.json(); } catch(e) { return { code: -1, message: 'HTTP ' + r.status + ' 非JSON' }; }
+}
+/* 8821/8810（eapi 口）：无挑战对象，直挂滑块（verifyType 40）→ validate 作 sca 带回重试 */
+async function eapiSliderRetry(path, payload, tipFn){
+  tipFn('eapi 口要求行为验证，请拖动滑块');
+  var v = await mountSlide({});
+  tipFn('滑块已通过，带 secureCaptcha 重试…');
+  return api(path, Object.assign({ sca: v }, payload));
 }
 /* ===== 易盾滑块（官方 SDK，组件级挂载） ===== */
 var sdkLoaded = null;
@@ -1958,6 +2194,11 @@ async function doSend(){
       log('check', c);
       if (c.success) { tip('安全验证通过，重新发送…'); busy = false; E('b-send').disabled = false; return doSend(); }
       tip('安全验证未通过：' + (c.message || '未知') + '，请再拖一次', true);
+    } else if (E('chan').value === 'eapi' && (Number(r.code) === 8821 || Number(r.code) === 8810)) {
+      var r2 = await eapiSliderRetry('send', { phone: p, ctcode: '86' }, tip);
+      log('send#2', r2);
+      if (Number(r2.code) === 200) tip('验证码已发送，请查收短信（60 秒内别重发）', false, true);
+      else tip('发送失败 code=' + r2.code + ' ' + (r2.message || ''), true);
     } else if (Number(r.code) === 200) {
       tip('验证码已发送，请查收短信（60 秒内别重发）', false, true);
     } else {
@@ -1988,6 +2229,10 @@ async function doLogin(){
       tip('验证通过，重新提交登录…');
       r = await api('login', { phone: p, captcha: code, ctcode: '86' });
       log('login#2', r);
+    } else if (E('chan').value === 'eapi' && (Number(r.code) === 8821 || Number(r.code) === 8810)) {
+      var r2 = await eapiSliderRetry('login', { phone: p, captcha: code, ctcode: '86' }, tip);
+      log('login#2', r2);
+      r = r2;
     }
     if (Number(r.code) === 200 && r.musicU) {
       tip('登录成功！MUSIC_U 已到手，链路全通', false, true);
@@ -6936,7 +7181,12 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
       if (Number(r.code) === 200 && r.musicU) { smsRelease(); smsGot(r, p); return; }
       smsRelease();
       if (Number(r.code) === 205) smsTip((r.message || '验证码不对或已过期') + '：检查一下，或重新获取', true);
-      else smsTip('登录没成功：' + (r.message || '请稍后再试；一直不行就点上方「扫码登记」'), true);
+      /* 2026-11-26：8810「网络环境存在安全风险」等网易风控原话不再裸露给客户（违反上方
+         「客户视角没有安全验证概念」自家口径——8810 是环境硬拒不带挑战对象，永远不会弹滑块，
+         客户看到原话只会反复重试把风控等级压得更深）。自家业务码（429 太快/410 链接失效/
+         503 忙）的话术是我们自己写的，保留；其余一律统一引导切扫码。 */
+      else if (Number(r.code) === 429 || Number(r.code) === 410 || Number(r.code) === 503) smsTip(r.message || '请稍后再试', true);
+      else smsTip('登录没成功：请点上方「扫码登记」，一样有效', true);
     }).catch(function(){ smsRelease(); smsTip('网络异常，请再点一次', true); });
   }
   E('b-sms-send').onclick = smsSend;
@@ -7452,17 +7702,24 @@ async function handle(request) {
       if (_now - _last < 60e3) return json({ code: 429, message: '发送太频繁，' + Math.ceil((60e3 - (_now - _last)) / 1e3) + ' 秒后再试' });
       smsSendLimit.set(phone, _now);
       const sid = String(b.sid || 'default').slice(0, 64);
+      const isE = Number(b.eapi) === 1; /* 2026-11-26：eapi 画像实验通道，会话与 weapi 隔离（sid 后缀） */
       try {
         /* 2026-11-25：b.risky=滑块演示（跳过真 NMTID 的裸会话，大概率触发 -462 挑战）；
            同一 sid 后续 check/login 复用该会话，闭环口径与正常模式完全一致。 */
-        const jar = await smsGetJar(sid, !!b.risky);
-        const r = await smsWeapiCall('/api/sms/captcha/sent', { ctcode: '86', secrete: 'music_middleuser_pclogin', cellphone: phone }, jar);
-        await smsSaveJar(sid, jar);
+        const jar = await smsGetJar(isE ? sid + '::eapi' : sid, !!b.risky && !isE);
+        const r = isE
+          ? await smsEapiCall('/api/middle/captcha/sent/v1', { ctcode: '86', secrete: 'music_middleuser_pclogin', cellphone: phone, scene: '0' }, jar)
+          : await smsWeapiCall('/api/sms/captcha/sent', { ctcode: '86', secrete: 'music_middleuser_pclogin', cellphone: phone }, jar);
+        await smsSaveJar(isE ? sid + '::eapi' : sid, jar);
         const j = smsParseJson(r.text);
+        if (isE && j && (Number(j.code) === 8821 || Number(j.code) === 8810)) {
+          /* eapi 口的风控：8821=要行为验证（8821 无 verifyToken，前端直挂滑块）；8810=环境硬拒 */
+          return json({ code: Number(j.code), sid, eapi: 1, message: j.message || j.msg || '', body: j });
+        }
         if (j && Number(j.code) === -462 && j.data && j.data.verifyToken) {
           return json({ code: -462, sid, challenge: j.data, message: j.message || '需要安全验证' });
         }
-        return json({ code: j ? j.code : r.status, sid, message: j ? (j.message || j.msg || (Number(j.code) === 200 ? '验证码已发送' : '')) : '响应非JSON', raw: j ? undefined : r.text.slice(0, 200) });
+        return json({ code: j ? j.code : r.status, sid, eapi: isE ? 1 : 0, message: j ? (j.message || j.msg || (Number(j.code) === 200 ? '验证码已发送' : '')) : '响应非JSON', raw: j ? undefined : r.text.slice(0, 200) });
       } catch (e) { return json({ code: 500, message: '发送链路异常: ' + (e && e.message || e) }, 500); }
     }
     if (url.pathname === '/api/sms_test/check' && request.method === 'POST') {
@@ -7499,20 +7756,31 @@ async function handle(request) {
       if (!/^1[3-9]\d{9}$/.test(phone)) return json({ code: 400, message: '手机号格式不对' }, 400);
       if (!/^\d{4,8}$/.test(code)) return json({ code: 400, message: '验证码格式不对' }, 400);
       const sid = String(b.sid || 'default').slice(0, 64);
+      const isEL = Number(b.eapi) === 1;
       try {
-        const jar = await smsGetJar(sid);
-        const r = await smsWeapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true' }, jar);
-        await smsSaveJar(sid, jar);
+        const jar = await smsGetJar(isEL ? sid + '::eapi' : sid);
+        const r = isEL
+          ? await smsEapiCall('/api/w/login/cellphone', (() => {
+              /* eapi 口：参考 PR#294——8821 后滑块 validate 以 secureCaptcha 带回重试（validate 一次性） */
+              const d = { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true', secrete: 'music_middleuser_pclogin' };
+              if (b.sca) d.secureCaptcha = String(b.sca);
+              return d;
+            })(), jar)
+          : await smsWeapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone, countrycode: '86', captcha: code, remember: 'true' }, jar);
+        await smsSaveJar(isEL ? sid + '::eapi' : sid, jar);
         const j = smsParseJson(r.text);
+        if (isEL && j && (Number(j.code) === 8821 || Number(j.code) === 8810)) {
+          return json({ code: Number(j.code), sid, eapi: 1, message: j.message || j.msg || '', body: j });
+        }
         if (j && Number(j.code) === -462 && j.data && j.data.verifyToken) {
           return json({ code: -462, sid, challenge: j.data, message: j.message || '需要安全验证' });
         }
         if (j && Number(j.code) === 200) {
           const mu = smsCookiePick(jar.cookie, 'MUSIC_U');
-          return json({ code: 200, sid, message: '登录成功', musicU: mu, musicULen: mu.length,
+          return json({ code: 200, sid, eapi: isEL ? 1 : 0, message: '登录成功', musicU: mu, musicULen: mu.length,
             nickname: (j.profile && j.profile.nickname) || '', userId: (j.account && j.account.id) || (j.profile && j.profile.userId) || '' });
         }
-        return json({ code: j ? j.code : r.status, sid, message: j ? (j.message || j.msg || '') : '响应非JSON', raw: j ? undefined : r.text.slice(0, 200) });
+        return json({ code: j ? j.code : r.status, sid, eapi: isEL ? 1 : 0, message: j ? (j.message || j.msg || '') : '响应非JSON', raw: j ? undefined : r.text.slice(0, 200) });
       } catch (e) { return json({ code: 500, message: '登录链路异常: ' + (e && e.message || e) }, 500); }
     }
     /* ===== 登记页短信验证码通道（2026-11-25）：/api/reg_sms/{send,check,login} =====
@@ -18341,6 +18609,10 @@ export default {
     if (env.DB) globalThis.DB = env.DB;
     if (env.CFQ_TOKEN) globalThis.CFQ_TOKEN = env.CFQ_TOKEN;
     if (env.CFQ_ACCOUNT) globalThis.CFQ_ACCOUNT = env.CFQ_ACCOUNT;
+    // 2026-11-26 TDZ 修复：_cron 声明必须前移到所有分流之前 —— 11-25 23:20 起的
+    // REFRESH 分流在 const _cron 之前引用 _cron，每次 scheduled 触发都 ReferenceError，
+    // 全部定时腿（快照/邮件/签到/备份/续期）静默全灭（当天 09:30 主采缺席实锤）。
+    const _cron = String((event && event.cron) || '');
     // 2026-11-25：CK 续期试点腿（北京 03:30），只碰 REFRESH_CFG.filter 指定来源的小批量，跑完即 return。
     if (REFRESH_CRONS.indexOf(_cron) >= 0) {
       ctx.waitUntil(refreshPilot().catch(() => {}));
@@ -18349,7 +18621,6 @@ export default {
     // 2026-11-05：按 event.cron 分流。新加的 3 个时刻只负责「备份发令」，
     // 不能顺带把 snap650 / 到期清理 / 元数据补全都再跑一遍（那会变成一天 4 次快照采集）。
     // 老时刻（10 2 * * *）以及取不到 cron 的情况一律走原来的全量路径，行为不变。
-    const _cron = String((event && event.cron) || '');
     if (BACKUP_CRONS.indexOf(_cron) >= 0) {
       ctx.waitUntil(dispatchDailyBackup(_cron).catch(() => {}));
       return;
