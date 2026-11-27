@@ -93,16 +93,19 @@ def verify_gate_lookup(pool, uid):
     uid = str(uid or "").strip()
     if not uid:
         return None
-    pw = ""
-    try:
-        tmp_dir = os.path.join(PROJ, "tmp")
-        if tmp_dir not in sys.path:
-            sys.path.insert(0, tmp_dir)
-        from pass_lookup import lookup
-        vals = lookup("ASSIGN_PASS")
-        pw = vals[0] if vals else ""
-    except Exception:
-        pw = ""
+    # 取口令（2026-11-27 改）：先吃环境变量 ASSIGN_PASS，再查口令总表。
+    # 以前只依赖本机 tmp/pass_lookup.py + 不入库的口令表，换台机器必然「查询失败」。
+    pw = (os.environ.get("ASSIGN_PASS") or "").strip()
+    if not pw:
+        try:
+            tmp_dir = os.path.join(PROJ, "tmp")
+            if tmp_dir not in sys.path:
+                sys.path.insert(0, tmp_dir)
+            from pass_lookup import lookup
+            vals = lookup("ASSIGN_PASS")
+            pw = vals[0] if vals else ""
+        except Exception:
+            pw = ""
     if not pw:
         return None
     import urllib.request
