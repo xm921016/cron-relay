@@ -13792,7 +13792,14 @@ async function fetchActionsStatus() {
       if (!rr.ok) throw new Error('runs http ' + rr.status);
       const rd = await rr.json();
       const _runs = rd.workflow_runs || [];
-      const run = _runs.filter(x => x.status !== 'completed')[0] || _runs[0];
+      // 2026-11-27：全部结束后不再盲取编号最新一轮 —— 补漏轮并发 dispatch 被 GitHub 自动
+      // cancel 的那次编号最大，会把真正跑完的 success 轮挡住，控制台显示「✗ cancelled」
+      // 像报错（实际补漏已成功，用户拍板：假报错不显示，只有真报错才显示）。
+      // 改为：优先没跑完的轮；否则取编号最新的非 cancelled 完成轮；确实只有 cancelled
+      // （例如真被手动停掉）才回落显示 cancelled，真报错不吞。
+      const run = _runs.filter(x => x.status !== 'completed')[0]
+        || _runs.find(x => x.status === 'completed' && x.conclusion !== 'cancelled')
+        || _runs[0];
       if (!run) return { pool: r.pool, ok: false, note: '无运行记录' };
       let jobsOk = 0, jobsTotal = 0, jobsDone = 0, jobsSkip = 0;
       try {
