@@ -75,6 +75,51 @@ def tf(v):
     return {True: "是(True)", False: "否(False)"}.get(v, str(v))
 
 
+# 250 提醒（安全验证分享异常）的 worker 地址：发信端 notes.py 按 pool 请求对应 worker
+VERIFY_GATE_URLS = {"hz": "https://xx1031.xyz", "dz": "https://dingzhi.xx1031.xyz"}
+UA_BROWSER = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+
+def verify_gate_lookup(pool, uid):
+    """查 250 提醒最近发送时间（2026-11-26 新增）。
+
+    背景：notes.py 发布动态遇 code=250（安全验证分享异常）时，notify.py **直连 SMTP** 发提醒，
+    不写 mail_queue —— 邮件查询页/体检页【7】的队列表里搜不到它属正常，不是丢了。
+    发送指纹存在 worker KV `vmail:<pool>:<uid>`（worker.js /api/verify_gate）：
+    mark=0 是只读查询，返回 {ok, send, last(ISO), count(累计封数), remainDays(冷却剩余天)}。
+    读失败返回 None（调用方显示「查询失败」即可，不阻塞体检主流程）。
+    """
+    uid = str(uid or "").strip()
+    if not uid:
+        return None
+    pw = ""
+    try:
+        tmp_dir = os.path.join(PROJ, "tmp")
+        if tmp_dir not in sys.path:
+            sys.path.insert(0, tmp_dir)
+        from pass_lookup import lookup
+        vals = lookup("ASSIGN_PASS")
+        pw = vals[0] if vals else ""
+    except Exception:
+        pw = ""
+    if not pw:
+        return None
+    import urllib.request
+    base = VERIFY_GATE_URLS.get(pool or "hz", VERIFY_GATE_URLS["hz"])
+    payload = json.dumps({"pass": pw, "uid": uid, "days": 3, "mark": "0"}).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            base + "/api/verify_gate", data=payload, method="POST",
+            headers={"Content-Type": "application/json",
+                     "User-Agent": UA_BROWSER})   # 不带浏览器 UA 会被 CF 1010 挡
+        with urllib.request.urlopen(req, timeout=20) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return d if isinstance(d, dict) and d.get("ok") else None
+    except Exception:
+        return None
+
+
 KIND_CN = {  # mail_queue 邮件类型 → 中英双语说明
     "reg": "reg(登记成功通知)",
     "songchange": "songchange(自动换歌)",
@@ -371,6 +416,32 @@ def act_desc(act):
     return {"songfix": f"{t} 共创冻结邮件已发(songfix)",
             "songfix2": f"{t} 独唱冻结邮件已发(songfix2)",
             "songfix3": f"{t} 绑错歌/查无此歌处置(songfix3)"}.get(kind, f"{t} {kind}")
+
+
+def vip_gift_check(ck):
+    """VIP 赠送资格只读查询（2026-11-24 新增）：官方邀请活动页 page/info。
+    月度口径：额度每月重置；「从未赠送」=本月剩余=本月总额。仅 V2+ 有资格。"""
+    try:
+        import vip_gift_pool
+        r = vip_gift_pool.probe_one(ck)
+    except Exception as ex:
+        return {"error": str(ex)[:80]}
+    if r.get("page_code") != 200:
+        return {"error": "page/info code=%s" % r.get("page_code")}
+    return r
+
+
+def _vip_gift_line(vg):
+    """把赠送资格转成一行文字。"""
+    if vg.get("error"):
+        return f"    VIP赠送资格：查询失败（{vg['error']}）"
+    v = vg.get("vip_level") or 0
+    if v < 2:
+        return f"    VIP赠送资格：黑胶V{v}，无赠送资格（须 V2+）"
+    l, t = vg.get("send_left") or 0, vg.get("send_total") or 0
+    used = t - l
+    tag = "✅ 本月从未赠送（额度完整）" if vg.get("never_gifted") == 1 else f"本月已送出 {used} 天"
+    return f"    VIP赠送资格：黑胶V{v}  可赠送（canSendVip=1）  本月剩余 {l}/{t} 天  {tag}"
 
 
 def cooling_actions(actions, days=3):
@@ -747,6 +818,9 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
                     say(f"    笔记发布进度={np if np is not None else '未返回'}"
                         f"{'/4（30 天内发笔记天数，封顶 4；走势详见【8】）' if np is not None else ''}")
                     say("    （furtherTaskStartTime/furtherVipGetTime 字段网易数据不可信，仅留档不参与判定）")
+                    # VIP 赠送资格（2026-11-24 新增，只读 page/info 1 次）
+                    vg = vip_gift_check(e["ck"])
+                    say(_vip_gift_line(vg))
                 else:
                     say(f"    ⚠️ CK 状态：{live['text']}——如果判失效，先让买家换 CK 再谈其他")
             except Exception as ex:
@@ -789,9 +863,11 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
                               if has_ledger else "（镜像里没导 ledger，跑一次不带 --table 的 d1_mirror.py 或删掉旧镜像后重试）"))
 
         # 7 邮件提醒记录（2026-11-20 更新口径：11-18 已废除「已通知重登」，relogin_at 不再写入）
-        say(f"\n【7】邮件提醒记录（邮件队列 mail_queue / 删号通知 dead_notice / 删号流水 dead_log）：")
+        say(f"\n【7】邮件提醒记录（邮件队列 mail_queue / 删号通知 dead_notice / 删号流水 dead_log / 250 提醒指纹 verify_gate）：")
         say("    当前邮件口径：判死/过期号 → 立即删号 + 直邮（notify-dead），没有「先通知重登、留缓冲期」这回事；"
             "管理员手动删号不发邮件（11-19 起）。")
+        say("    注意：250 安全验证提醒（notes.py 发布动态被拦时）走直连 SMTP，不进 mail_queue，"
+            "邮件查询页搜不到属正常——最近发送时间在下方单独列出（KV 指纹）。")
         if e['relogin_at']:
             say(f"    relogin_at={e['relogin_at']}：11-18 废除重登机制前的历史遗留记录，该字段现已不再写入，仅留档。")
         tabs_now = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -827,6 +903,19 @@ def health(key, refresh=False, no_live=False, only_pool=None, quiet=False):
             say("    号还没被采集判死（比如只显示「采集缺失」）时，不会有任何邮件。")
             if "mail_queue" not in tabs_now:
                 say("    （镜像缺 mail_queue/dead_notice 表，本次显示不完整——删旧镜像后重跑会自动重导）")
+
+        # 250 提醒最近发送时间（2026-11-26 新增：直连 SMTP 不进队列，指纹在 KV vmail:<pool>:<uid>）
+        vg = verify_gate_lookup(pool, uid)
+        if vg is None:
+            say("    ✉ 250 提醒（安全验证分享异常·verify）：指纹查询失败（口令缺失或 worker 不通），本次不显示。")
+        elif vg.get("last"):
+            _remain = vg.get("remainDays") or 0
+            _extra = f"，冷却还剩约 {_remain} 天" if _remain > 0 else "（不在冷却期）"
+            say(f"    ✉ 250 提醒（安全验证分享异常·verify）：最近发送 {bj_str(vg.get('last'))}（北京），"
+                f"累计 {vg.get('count') or 0} 封{_extra}。3 天最多一封（VERIFY_COOL_DAYS）；"
+                f"号主自己发满 4 条图文后自动停发停提醒。")
+        else:
+            say("    ✉ 250 提醒（安全验证分享异常·verify）：从未发出（该号没触发过 code=250，或触发时无登记邮箱）。")
 
         # 8 笔记发布（2026-11-20 新增：网易同组小任务「30 天内发布图文笔记天数 ≥4」，与播放无关）
         NOTE_KEY = "mission_code_musician_notebook_publish"
