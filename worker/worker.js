@@ -4027,7 +4027,7 @@ async function eapiVipTake(n) {
       const sd = (sr && typeof sr.data === 'object' && sr.data) || {};
       short = String(sd.shortUrl || '');
     } catch (e) {}
-    const rec = { token: tok, link: link, short_url: short, donor_uid: cand.uid, donor_name: cand.name,
+    const rec = { token: tok, link: link, short_url: short, short_url_bare: short.replace(/^https?:\/\//, ''), donor_uid: cand.uid, donor_name: cand.name,
       vip_level: cand.vipLevel, month: eapiMonthBJ(), expire_ms: eapiMonthEndMsBJ(),
       left: cand.left, total: cand.total,
       created_at: new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19), status: 'created' };
@@ -9352,7 +9352,8 @@ async function handle(request) {
         doneG.rows = Math.min(stmtsG.length, doneG.batches * 1000);
       }
       console.log('签到产品卡密生成: 请求=' + cntG + ' 批次=' + doneG.batches);
-      return json({ ok: true, made: cntG, codes: codesG }, 200, CORS_G);
+      /* bare_links：不带 https:// 前缀的激活链接（闲鱼聊天发带协议链接会被风控标记，2026-11-27 闲鱼自动发货用） */
+      return json({ ok: true, made: cntG, codes: codesG, bare_links: codesG.map(function (c) { return 'xx1031.xyz/sign/c/' + c; }) }, 200, CORS_G);
     }
     /* 卡密库存/明细查询：管理接口（口令=ADMIN_PASS，CORS 同 gencards，给本地管理 HTML 用）。 */
     if (url.pathname === '/api/sign/cardstat' && request.method === 'OPTIONS') {
