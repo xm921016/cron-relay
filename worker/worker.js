@@ -14125,8 +14125,14 @@ const BACKUP_CRONS = ['30 8 * * *', '30 10 * * *', '30 12 * * *'];   // 北京 1
    对照 SNAP_MAIN_CRON '30 1' = 北京 09:30）。login/refresh 防「7~30 天自然过期」型掉线，
    对风控清算型死亡无效。口径：默认只碰 registration_method=sms 的号（新通道），批量和过滤
    由 KV REFRESH_CFG 控制 {filter:'sms', batch:30, on:1}；没碰过的老池号一律不动。
-   ⛔ 与 016.py CRONS / deploy-worker.yml 三处同步（铁律）。 */
-const REFRESH_CRONS = ['30 19 * * *'];
+   ⛔ 与 016.py CRONS / deploy-worker.yml 三处同步（铁律）。
+   ⛔ 2026-11-27 用户确认取消：11-26 试点 17/17 全失败且失败码统一 400（真 CK 亦然，
+      假 CK 回 301 → 请求构造合法，是网易拒这条 refresh）；更关键的是 dead_log 全量
+      统计 cookie_invalid 490 / manual 42 / expired_pub 1、**自然过期 0 条** —— 该接口
+      只能续「本来没到期」的 token，对风控死亡无效，实际收益为零。
+      故置空数组（函数 refreshPilot 保留，便于回滚）：把 '30 19 * * *' 加回本数组
+      + 016.py CRONS + deploy-worker.yml 三处，再 PUT REFRESH_CFG {on:1} 即可恢复。 */
+const REFRESH_CRONS = [];
 async function refreshPilot() {
   let cfgR = { filter: 'sms', batch: 30, on: 1 };
   try { const raw = await POOL.get('REFRESH_CFG'); if (raw) cfgR = Object.assign(cfgR, JSON.parse(raw)); } catch (e) {}
