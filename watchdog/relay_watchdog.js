@@ -3,8 +3,9 @@
  *
  * 2026-11-17 升级：GitHub schedule 已从 run.yml 移除，本 worker 升级为「触发总管」：
  *   （用户拍板：CF 主跑、GitHub 只兜底；开跑时间不必精准，0:10~0:30 间随机即可）
- *   · 主触发：cron '10 16 * * *'（北京 0:10）—— 随机延迟 0~13 分钟后无条件 dispatch run.yml
- *     （无 inputs，闸门不适用；day 锚点=当天北京日期，实际 0:10~0:23 间随机开跑，正落 0 点后播放窗口）。
+ *   · 主触发：cron '10 16 * * *'（北京 0:10）—— 每群独立掷随机延迟 0~13 分钟后无条件 dispatch run.yml
+ *     （无 inputs，闸门不适用；day 锚点=当天北京日期，各群实际 0:10~0:23 间随机开跑，正落 0 点后播放窗口。
+ *      2026-11-26 用户要求：延迟每群独立一掷并发等待，两仓开跑时刻错开，不留「每晚同秒建 run」批量特征）。
  *     dispatch 失败才发告警邮件，成功不发（每晚正常路径静默）。
  *   · 兜底：cron '35 16 * * *' / '10 18 * * *'（北京 0:35 / 2:10）—— 漏班检查：
  *     判据 = run.yml 是否存在「创建于北京昨天 14:00 之后」的 run（任何状态任何事件）；
@@ -18,8 +19,16 @@
  *   绝不影响 hz 主链路——与主 worker PEER_KEY 未配置即跳过同精神）。
  *   dingzhi 仓 run.yml 的 on.schedule 已同步删除（0 点闸门代码防御性保留，已无触发路径）；
  *   dz 仓 guard.yml（北京 07:30 查漏+补片）保留为第三层，与本 worker 的 0:35/2:10 判据幂等。
- *   补漏状态机（leakTick）/白天补漏轮（secondRound）/快照哨兵（snapGuard）仍是 hz 专属：
- *   dz 快照由主 worker cron 统一发令，cktest 只认 hz 池，故逐号查验不对 dz 开。
+ *   快照哨兵（snapGuard）仍是 hz 专属（dz 快照由主 worker cron 统一发令）。
+ *
+ * 2026-11-27 dz 接自动补漏（用户拍板）：补漏状态机 leakTick 双池化（hz + dz 同 tick 并发）：
+ *   dz 与 hz 同判据（chainStatus→dzChainStatus 单仓、coverage pool=dz、两轮制 dispatch
+ *   dingzhi run.yml，run_done 记账防双播）；差异=不开逐号查验/判死删号（cktest 只认 hz 池），
+ *   两轮补不回只告警交今晚主轮。状态键 leak:dz:<北京日期>；token 走 GH_TOKEN_DZ，
+ *   未绑定整腿静默跳过绝不影响 hz。手动端点 mode=leakdz / leakreset&pool=dz。
+ *   ⚠ 与 dz backfill.yml 的 self-loop 语义相容：backfill 把 workflow_dispatch 触发源当
+ *   「自己派的补跑轮」跳过——leakTick 补漏轮正是 workflow_dispatch，backfill 会照旧跳过，
+ *   不产生双保险打架；leakTick 自身按 coverage 每轮收工后复核，闭环在其状态机内完成。
  *
  * 2026-11-18 大改（用户拍板：补漏不定固定时间，改事件驱动两轮制）：
  *   旧「北京 9:30 / 12:00 固定两班补漏轮」废弃，换成每 10 分钟一次的 tick 状态机
@@ -98,8 +107,12 @@ function wdBase(env) {
 }
 
 function nodeRepos(env) {
-  // 2026-11-19 多节点分摊：013/014/011/010 各 ≤10 片/天、016 收剩余（正常以 NODE_REPOS 绑定为准）
-  return (env.NODE_REPOS || 'xm921013/relay-node,xm921014/relay-node,xm921011/relay-node,xm921010/relay-node,xm921016/relay-node')
+  // 2026-11-27（用户拍板）：016 薄壳仓已删除，主群回主仓自跑，节点仓机制整体停用。
+  //   ① 默认值改空数组（原来硬编码 013/014/011/010/016 五个历史仓，全是已封禁的死仓）。
+  //   ② ⛔ 绝不能让清单里出现「已不存在的仓」：repoRunYml 对非 403 的失败一律按「忙」处理
+  //      （宁当忙不双播），404 也照此办理 → schedTick 会永久 skip、整轮不再发令。
+  //      所以空字符串必须解析成 []，不能靠 `env.NODE_REPOS || 默认值` 回落到硬编码列表。
+  return (env.NODE_REPOS || '')
     .split(',').map(function (s) { return s.trim(); }).filter(Boolean);
 }
 
@@ -183,7 +196,11 @@ const SCHED_TABLE = [
   { name: 'hz-coverage',      cron: '0 12 * * *',   pool: 'hz', wf: 'coverage.yml' },
   { name: 'hz-resync-pool',   cron: '30 11 * * *',  pool: 'hz', wf: 'resync-pool.yml' },
   { name: 'hz-notify-dead',   cron: '0 3 * * *',    pool: 'hz', wf: 'notify-dead.yml' },
-  { name: 'hz-c-chain',       cron: '30 2 * * *',   pool: 'hz', wf: 'c-chain.yml' },
+  // 2026-11-27 用户拍板：C 组 40 秒下探实验链路（c-chain）已终结，不再每日发令。
+  //   判定 11-23 已出结果（成立，见远端 c_chain/state.json），之后每天空转只打印「done，跳过」；
+  //   且该脚本在判定成立时会主动把 POOL_PLAY_SECONDS 写回 40,42，与 11-26 混合口径（40,50）冲突，
+  //   属于随时可能覆写现网参数的地雷。保留 c-chain.yml 供手动排查，但不再自动触发。
+  // { name: 'hz-c-chain',       cron: '30 2 * * *',   pool: 'hz', wf: 'c-chain.yml' },
   { name: 'hz-cpu-watch',     cron: '10 2 * * *',   pool: 'hz', wf: 'cpu-watch.yml' },
   { name: 'hz-egress-watch',  cron: '30 1 * * *',   pool: 'hz', wf: 'egress-watch.yml' },
   { name: 'hz-d1-daily',      cron: '40 11 * * *',  pool: 'hz', wf: 'd1-daily.yml' },
@@ -293,20 +310,19 @@ async function putState(env, key, val) {
 
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
-// 主触发：随机延迟 0~13 分钟后无条件 dispatch（每晚 cron 一班，实际 0:10~0:23 间随机开跑）。
-// 墙钟限制：Cron Trigger 单次 invocation 上限 15 分钟，13 分钟延迟 + fetch 留了余量。
+// 主触发：每群独立掷随机延迟 0~13 分钟后无条件 dispatch（各群实际 0:10~0:23 间随机开跑）。
+// 2026-11-26（用户要求）：延迟不再全班共用一掷——旧写法 sleep 一次后串行 dispatch 两仓，
+// GitHub 侧会看到两个仓库每晚同秒创建 run 的批量特征；改为每群独立 sleep + 并发等待：
+//   墙钟 = max(d_hz, d_dz) ≤ 13 分钟，仍在 Cron invocation 15 分钟上限内，两群窗口不变。
 // 手动调用（immediate=true，?mode=primary 一键补开）跳过随机延迟立即 dispatch。
-// 失败才告警，成功静默。2026-11-24 起双群同班（hz + dz 各自 dispatch，互不影响）。
+// 失败才告警，成功静默。双群同班（hz + dz 各自 dispatch，互不影响）。
 async function primary(env, immediate) {
   const now = new Date();
-  if (!immediate) {
-    const delayMs = Math.floor(Math.random() * PRIMARY_DELAY_MAX_MS);
-    await new Promise(r => setTimeout(r, delayMs));
-  }
   const out = { at: now.toISOString(), results: [] };
   const ps = pools(env);
-  for (let i = 0; i < ps.length; i++) {
-    const p = ps[i];
+  await Promise.all(ps.map(async function (p) {
+    const delayMs = (!immediate) ? Math.floor(Math.random() * PRIMARY_DELAY_MAX_MS) : 0;
+    if (delayMs) await new Promise(r => setTimeout(r, delayMs));
     const base = '/repos/' + p.owner + '/' + p.repo;
     let d;
     try {
@@ -317,16 +333,16 @@ async function primary(env, immediate) {
       const alert = await alertMail(env, '[' + p.key + '] relay CF 主触发失败，请人工介入',
         '时间：' + now.toISOString() + '\n主触发 dispatch run.yml 异常：' + msg + '\n兜底层将在 0:35 / 2:10 再次尝试补开。');
       out.results.push({ pool: p.key, action: 'error', stage: 'dispatch', message: msg, alert: alert });
-      continue;
+      return;
     }
     if (d.status !== 204) {
       const alert = await alertMail(env, '[' + p.key + '] relay CF 主触发失败，请人工介入',
         '时间：' + now.toISOString() + '\n主触发 dispatch run.yml 返回 HTTP ' + d.status + '：' + d.text + '\n兜底层将在 0:35 / 2:10 再次尝试补开。');
       out.results.push({ pool: p.key, action: 'error', stage: 'dispatch', status: d.status, message: d.text, alert: alert });
-      continue;
+      return;
     }
-    out.results.push({ pool: p.key, action: 'dispatch' });
-  }
+    out.results.push({ pool: p.key, action: 'dispatch', delayMin: Math.round(delayMs / 60000) });
+  }));
   const errs = out.results.filter(x => x.action === 'error').length;
   out.action = errs && errs === out.results.length ? 'error' : (errs ? 'partial_error' : 'dispatch');
   return out;
@@ -392,8 +408,8 @@ async function fallback(env) {
 // （实例：xm921015 被 GitHub 封禁后 dispatch 仍返回 204，run 永远停在 queued，
 //  旧逻辑把它当 ongoing，tick 从此永远 skip，补漏/告警全部静默失效）。
 const STUCK_QUEUED_MS = 90 * 60 * 1000;
-async function repoRunYml(env, repo, sinceIso) {
-  const d = await gh(env, '/repos/' + repo + '/actions/workflows/run.yml/runs?per_page=30');
+async function repoRunYml(env, repo, sinceIso, token) {
+  const d = await gh(env, '/repos/' + repo + '/actions/workflows/run.yml/runs?per_page=30', undefined, token);
   if (d.status !== 200) return { err: d.status + ' ' + d.text };
   const all = ((d.body && d.body.workflow_runs) || []).filter(x => !!x);
   const runs = sinceIso ? all.filter(x => x.created_at >= sinceIso) : all;
@@ -457,17 +473,38 @@ async function chainStatus(env, now) {
   return out;
 }
 
+// dz 播放链路状态（2026-11-27 dz 接自动补漏新增）：单仓 xm921017/dingzhi，无节点仓概念。
+// 口径与 chainStatus 对齐：cutoff=北京昨天14:00；queued/waiting 超 90 分钟视为卡死不当忙；
+// 查询失败返回 err（上层当「忙」跳过——宁当忙不双播）。
+async function dzChainStatus(env, now) {
+  const p = pools(env).find(function (x) { return x.key === 'dz'; });
+  if (!p) return { err: 'no_dz_token' };
+  const repo = p.owner + '/' + p.repo;
+  const r = await repoRunYml(env, repo, cutoffIso(now), p.token);
+  if (r.err) return { err: r.err, repo: repo };
+  return {
+    cut: cutoffIso(now),
+    repo: repo,
+    ongoing: r.hasOngoing,
+    ongoingDetail: r.ongoing.slice(0, 3).map(x => '#' + x.run_number + ' ' + x.status + ' ' + x.created_at),
+    masterRunsAt: r.runs.map(x => x.created_at).sort(),
+  };
+}
+
 // coverage（/api/coverage）：漏跑名单与控制台同一口径（expected 取 plan 快照、
-// 已通知重登的号不算漏）。
-async function coverage(env, now) {
+// 已通知重登的号不算漏）。2026-11-27 加 pool 参数（hz/dz，leakTick 双池化）。
+async function coverage(env, now, pool) {
   const day = bjDateStr(now);
-  const d = await wdApi(env, '/api/coverage?pass=' + encodeURIComponent(env.ASSIGN_PASS || '') + '&pool=hz&day=' + day);
+  const d = await wdApi(env, '/api/coverage?pass=' + encodeURIComponent(env.ASSIGN_PASS || '') + '&pool=' + (pool || 'hz') + '&day=' + day);
   if (d.status !== 200 || !d.body || !d.body.ok) return { ok: false, detail: d.status + ' ' + d.text };
   return d.body;
 }
 
-async function dispatchRelay(env) {
-  return gh(env, '/repos/' + env.GH_OWNER + '/' + env.GH_REPO + '/actions/workflows/run.yml/dispatches', { ref: 'main' });
+// 2026-11-27 加 pool 参数：hz 走既有绑定，dz 走 GH_TOKEN_DZ（pools() 未命中时回退 hz 绑定）。
+async function dispatchRelay(env, pool) {
+  const p = pools(env).find(function (x) { return x.key === (pool || 'hz'); }) ||
+    { owner: env.GH_OWNER, repo: env.GH_REPO, token: env.GH_TOKEN };
+  return gh(env, '/repos/' + p.owner + '/' + p.repo + '/actions/workflows/run.yml/dispatches', { ref: 'main' }, p.token);
 }
 
 // 与控制台「验证CK」同口径的实时验证（/api/console/cktest，只读）。
@@ -508,7 +545,18 @@ async function inspectUids(env, uids) {
 }
 
 // 补漏状态机 tick（2026-11-24 起随 schedTick 每 5 分钟一班，活动窗口北京 00:20~20:00）。
-async function leakTick(env) {
+// 2026-11-27 双池化（用户拍板：dz 接自动补漏）：pool='hz' 走既有 chainStatus；pool='dz'
+// 走 dzChainStatus（单仓 xm921017/dingzhi）。dz 差异点：
+//   · 逐号查验/判死删号不开（cktest 只认 hz 池）——两轮补不回只告警，今晚主轮会再跑；
+//   · 状态键独立 leak:dz:<日期>（不与 hz 状态互踩）；token 走 GH_TOKEN_DZ，未绑定整腿静默跳过。
+async function leakTick(env, pool) {
+  pool = pool || 'hz';
+  const p = (pool === 'hz')
+    ? { key: 'hz', owner: env.GH_OWNER, repo: env.GH_REPO, token: env.GH_TOKEN }
+    : pools(env).find(function (x) { return x.key === pool; });
+  if (!p || !p.owner || !p.repo || !p.token) {
+    return { action: 'skip', reason: 'no_pool_token', pool: pool };
+  }
   const now = new Date();
   const bjMin = bjMinuteOfDay(now);
   // 活动窗口北京 00:20~20:00：起点避开主触发的随机延迟（00:10~0:23 开跑），
@@ -516,10 +564,14 @@ async function leakTick(env) {
   if (bjMin < 20 || bjMin > 20 * 60) {
     return { action: 'skip', reason: 'outside_window', bjMinute: bjMin };
   }
-  const key = 'leak:' + bjDateStr(now);
+  const key = 'leak:' + (pool === 'hz' ? bjDateStr(now) : pool + ':' + bjDateStr(now));
   const st = await getState(env, key);
 
-  const chain = await chainStatus(env, now);
+  const chain = pool === 'hz' ? await chainStatus(env, now) : await dzChainStatus(env, now);
+  if (chain.err) {
+    // 查询失败当「忙」跳过（宁当忙不双播）；403 封号同 chainStatus 口径：不当忙也没法跑
+    return { action: 'skip', reason: 'chain_status_error', pool: pool, detail: chain.err };
+  }
   if (chain.ongoing) {
     return { action: 'skip', reason: 'round_in_progress', chain: chain };
   }
@@ -535,7 +587,7 @@ async function leakTick(env) {
     const seen = chain.masterRunsAt.some(t => t >= st.dispatchedAt);
     if (!seen) {
       if ((now - new Date(st.dispatchedAt)) > ROUND_STALL_MS && !st.stallAlerted) {
-        const alert = await alertMail(env, '[hz] 补漏第 ' + st.stage + ' 轮疑似停摆，请人工介入',
+        const alert = await alertMail(env, '[' + pool + '] 补漏第 ' + st.stage + ' 轮疑似停摆，请人工介入',
           '时间：' + now.toISOString() + '\n补漏第 ' + st.stage + ' 轮于 ' + st.dispatchedAt + ' dispatch，超过 5 小时 GitHub 上仍未见对应 run。\n请到 Actions 页核对主仓 run.yml 是否有异常。');
         st.stallAlerted = true;
         await putState(env, key, st);
@@ -545,7 +597,7 @@ async function leakTick(env) {
     }
   }
 
-  const cov = await coverage(env, now);
+  const cov = await coverage(env, now, pool);
   if (!cov.ok) {
     return { action: 'skip', reason: 'coverage_failed', detail: cov.detail };
   }
@@ -556,9 +608,9 @@ async function leakTick(env) {
       await putState(env, key, { stage: 'done', at: now.toISOString(), note: 'night_no_leak' });
       return { action: 'done', note: '夜轮收工且无漏，不需要补漏轮', missing: 0 };
     }
-    const d = await dispatchRelay(env);
+    const d = await dispatchRelay(env, pool);
     if (d.status !== 204) {
-      const alert = await alertMail(env, '[hz] 补漏第1轮 dispatch 失败，请人工介入',
+      const alert = await alertMail(env, '[' + pool + '] 补漏第1轮 dispatch 失败，请人工介入',
         '时间：' + now.toISOString() + '\n夜轮收工后仍漏 ' + cov.missing_n + ' 个号，dispatch run.yml 返回 HTTP ' + d.status + '：' + d.text);
       return { action: 'error', stage: 'dispatch', round: 1, status: d.status, alert: alert };
     }
@@ -572,9 +624,9 @@ async function leakTick(env) {
       await putState(env, key, { stage: 'done', at: now.toISOString(), note: 'round1_filled', round1At: st.dispatchedAt });
       return { action: 'done', note: '第1轮已补齐，不跑第2轮' };
     }
-    const d = await dispatchRelay(env);
+    const d = await dispatchRelay(env, pool);
     if (d.status !== 204) {
-      const alert = await alertMail(env, '[hz] 补漏第2轮 dispatch 失败，请人工介入',
+      const alert = await alertMail(env, '[' + pool + '] 补漏第2轮 dispatch 失败，请人工介入',
         '时间：' + now.toISOString() + '\n第1轮后仍漏 ' + cov.missing_n + ' 个号，dispatch run.yml 返回 HTTP ' + d.status + '：' + d.text);
       return { action: 'error', stage: 'dispatch', round: 2, status: d.status, alert: alert };
     }
@@ -587,6 +639,20 @@ async function leakTick(env) {
     if (cov.missing_n === 0) {
       await putState(env, key, { stage: 'done', at: now.toISOString(), note: 'round2_filled', round2At: st.dispatchedAt });
       return { action: 'done', note: '第2轮已补齐' };
+    }
+    if (pool !== 'hz') {
+      // 2026-11-27 dz 接自动补漏：两轮补不回 → 直接收工+告警（不开逐号查验——
+      // cktest 只认 hz 池；dz 漏号判死由今晚夜轮/既有链路兜底，不丢）。
+      await putState(env, key, {
+        stage: 'done', at: now.toISOString(), note: 'dz_round2_left',
+        missingFinal: cov.missing_n, round1At: st.round1At, round2At: st.dispatchedAt,
+      });
+      const alert = await alertMail(env, '[dz] 补漏2轮后仍漏 ' + cov.missing_n + ' 个号',
+        '时间：' + now.toISOString() + '\n两轮补漏后仍有 ' + cov.missing_n + ' 个号漏跑（夜轮收工时漏 '
+        + (st.missingAtDispatch == null ? '?' : st.missingAtDispatch) + ' 个、第1轮后漏 '
+        + (st.missingAtRound1 == null ? '?' : st.missingAtRound1) + ' 个）。\n'
+        + 'dz 未接逐号查验（cktest 只认 hz 池），漏号交给今晚主轮自动再跑；若连续多日出现请人工核对号池。');
+      return { action: 'done_dz_left', missing: cov.missing_n, alert: alert };
     }
     const ins = await inspectUids(env, cov.missing || []);
     // cktest 的确认死 verdict 是 'dead'（两次复验一致才会保留），不是 'dead_confirmed'
@@ -763,6 +829,8 @@ export default {
       try { ctx.waitUntil(env.WD.put('sched:branch:last', 'tick entered @ ' + new Date().toISOString()).catch(function () {})); } catch (e) {}
       job = Promise.all([
         leakTick(env).catch(function (e) { return { action: 'leak_error', message: String(e) }; }),
+        // 2026-11-27 dz 接自动补漏：与 hz leakTick 同 tick 双池并发（dz 缺 GH_TOKEN_DZ 时内部静默 skip）
+        leakTick(env, 'dz').catch(function (e) { return { action: 'dz_leak_error', message: String(e) }; }),
         snapGuard(env).catch(function (e) { return { action: 'snap_error', message: String(e) }; }),
         schedTick(env, event.scheduledTime).catch(function (e) { return { action: 'sched_error', message: String(e) }; }),
       ]);
@@ -789,11 +857,13 @@ export default {
       if (mode === 'primary') res = await primary(env, true);
       else if (mode === 'second') res = await secondRound(env);
       else if (mode === 'leak') res = await leakTick(env);
+      else if (mode === 'leakdz') res = await leakTick(env, 'dz');
       else if (mode === 'snapguard') res = await snapGuard(env);
       else if (mode === 'sched') res = await schedTick(env);
       else if (mode === 'schedforce') res = await schedForce(env, u.searchParams.get('name') || '');
       else if (mode === 'leakreset') {
-        const key = 'leak:' + bjDateStr(new Date());
+        const pk = u.searchParams.get('pool') || 'hz';
+        const key = pk === 'hz' ? 'leak:' + bjDateStr(new Date()) : 'leak:' + pk + ':' + bjDateStr(new Date());
         try { await env.WD.delete(key); res = { action: 'reset', key: key }; }
         catch (e) { res = { action: 'error', message: String(e && e.message || e) }; }
       }

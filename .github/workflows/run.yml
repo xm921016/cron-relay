@@ -293,7 +293,13 @@ jobs:
           #   2026-11-26 清理：015/014/013/011/010 节点账号已全部被 GitHub 封禁（长期封死，无解封计划），
           #     清单只留 016。行为不变：此前死仓每晚健康检查 403 后自动跳过、份额本就全落 016。
           #     若将来新开节点账号，把 ("XXX", "xmXXXXXX", cap) 加回列表即可（按顺序连续块分配，016 恒收剩余）。
-          _FOLLOWS = [("016", "xm921016", None)]
+          # 2026-11-27（用户拍板）：016 薄壳仓已删除，主群回到「主仓自己跑全部片」。
+          #   理由：016 与主仓同属 xm921016 账号，GitHub 并发按账号算 → 拆仓换不到任何并发额度，
+          #   唯一收益是主仓 runs 列表干净；代价却是多一份 Secret 要同步（11-27 体检就抓到
+          #   016 的 POOL_PLAY_SECONDS 停在 11-23 的 40,42，主群实测 60.0s/首 vs 定制群 62.0s/首）。
+          #   配合 D1 kv_misc play_cfg 中央口径，此类漂移从此不可能再发生。
+          # 将来若新开节点账号（另一账号才有并发收益），把 ("XXX", "xmXXXXXX", cap) 加回列表即可。
+          _FOLLOWS = []
           def _node_alive(_owner):
               try:
                   _req = urllib.request.Request(
@@ -307,7 +313,9 @@ jobs:
                   return _e.code
               except Exception:
                   return 0   # 网络异常：按存活处理（宁多试一次 dispatch，不静默丢片）
-          _fanout = (not _nsov) and (not _only) and ns >= 6
+          # 2026-11-27：fanout 条件加 bool(_FOLLOWS) —— _FOLLOWS 为空时必须回落到「master 全跑」，
+          #   否则 _slices=[] 且下面 assert 覆盖 0..ns-1 失败 → plan 直接崩 → 整轮不发令。
+          _fanout = bool(_FOLLOWS) and (not _nsov) and (not _only) and ns >= 6
           _alloc = []       # [(name, owner, [slices])]，仅 alive 且分到片的
           _dead = []        # [name] 显式告警用
           if _fanout:

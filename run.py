@@ -79,13 +79,28 @@ C_EXP_SONGS = {s.strip() for s in os.environ.get("C_EXP_SONGS", "").replace("，
 C_EXP_SECONDS = (40, 42)    # C 组口径：随机 40~42 秒（2026-11-19 用户拍板 38→40 起步更稳，38 留作后续下探档）
 
 # ---- 2026-11-18：全池上报口径总开关（C 组判定成立后的终态切换用，默认关）----
-# 机制：环境变量/Secret POOL_PLAY_SECONDS = "下限,上限"（现配 "40,50"）。非空时：所有非实验/非下探
-#   名单歌的时长按 2026-11-26 混合口径（hz/dz 逐字一致）——50% 概率歌长 55%~70% 比例（原自然口径）、
-#   50% 概率该区间随机；背景：11-24 起官方对恒定 40~42s 单一时长指纹逐歌标记「异常播放」并截留计数。
-# 安全性：为空 → 纯 55%~70% 口径（11-21 前现网）；回退=清空。AB/C 名单分支仍优先。
+# 机制：环境变量/Secret POOL_PLAY_SECONDS = "下限,上限"。2026-11-27 起这套口径**只存一处**：
+#   D1 kv_misc k='play_cfg'（worker /api/playcfg 下发，hz/dz 共用同一个 D1 → 改一处两群同时生效），
+#   env/Secret 降级为「拉不到时的兜底」。非空时所有非实验/非下探名单歌按混合口径计时长：
+#   50% 概率取歌长 55%~70% 比例（原自然口径）、50% 概率取固定区间随机。
+# 背景：11-24 起官方对恒定 40~42s 这一种时长指纹逐歌标记「异常播放」并截留计数，所以要有比例档掺进去。
+# 安全性：为空 → 纯 55%~70% 口径；回退=清空。AB/C 名单分支仍优先。
 POOL_PLAY_SECONDS = tuple(
     int(x) for x in os.environ.get("POOL_PLAY_SECONDS", "").replace("，", ",").replace(" ", "").split(",") if x.strip()
 ) or None
+
+# ---- 2026-11-27：播放口径中央配置（唯一真源 = D1 kv_misc k='play_cfg'）----
+# 背景：这套口径原先散在 4 处 GitHub Secret + 16 个本地 env 文件，改一次要同步 5 个地方，
+#   11-27 全面体检实锤了漂移（hz 主仓与 dz 已 40,50，016 薄壳停在 11-23 的 40,42 →
+#   主群实测 60.0s/首 vs 定制群 62.0s/首）。现在改成开跑前向 worker 取一次：
+#   改一处 → 所有执行器下一片开工即生效，不用再碰任何 Secret。
+# 兜底红线：取不到（未配置 / 网络失败 / D1 故障 / 格式非法）一律沿用下面的 env(Secret) 值，
+#   绝不阻断播放；也绝不把「取不到」当成「没配置 = 纯比例口径」。
+# 开关：PLAYCFG_ON=0 整条关闭（应急用，回到纯 env 口径）。
+PLAYCFG_ON = os.environ.get("PLAYCFG_ON", "1").strip() != "0"
+PLAY_CFG_DESC = ""          # 配置下发的口径说明（日志用，禁止在代码里硬编码口径文案）
+PLAY_CFG_SRC = "env"        # env = 用本机 Secret；d1:play_cfg = 用了中央配置
+
 
 # 跨群（2026-10-20）：只向对端群拉「歌曲 id 列表」，双方的 KV 账号池、人数、上限完全独立。
 # 鉴权复用本群已有的群口令 NB_PASS：对端 worker 的 PEER_PASS 键里存的就是本群口令（管理员写成对穿的），
@@ -529,9 +544,9 @@ def _mail_dead(name, email, sent, group=""):
             return
         if notify.notify_relogin(email, "", name, group):
             sent.append(str(name))
-            print(f"  [{name}] 已直邮号主：账号信息过期")
+            print(f"  [{mask_name(name)}] 已直邮号主：账号信息过期")
     except Exception as ex:
-        print(f"  [{name}] 直邮号主失败（不影响主流程）: {ex}")
+        print(f"  [{mask_name(name)}] 直邮号主失败（不影响主流程）: {ex}")
 
 
 def _mark_dead_mailed(names):
@@ -636,6 +651,68 @@ def mark_run_done(day, uid, slice_idx):
             print("::warning::已跑标记写入异常 %s（不影响播放；片尾 fail-closed）" % e)
 
 
+def mask_name(s):
+    """日志脱敏（2026-11-27）：accounts.name 存的是号主手机号，
+    而这些仓是公开仓、Actions 日志任何人不登录就能看（实测一份主轮日志 157 行手机号）。
+    只保留前 3 + 后 4，够人工核对，不构成可用的联系信息。"""
+    s = str(s or "")
+    if len(s) == 11 and s.isdigit():
+        return s[:3] + "****" + s[-4:]
+    return s
+
+
+def play_cfg_label():
+    """日志里的口径标签。优先用中央配置下发的说明，避免同一句口径文案再抄在各仓 run.py 里。"""
+    if PLAY_CFG_DESC:
+        return PLAY_CFG_DESC
+    if POOL_PLAY_SECONDS:
+        return "混合口径（固定档 %d~%ds）" % (POOL_PLAY_SECONDS[0], POOL_PLAY_SECONDS[1])
+    return "纯比例口径（歌长 55%~70%）"
+
+
+def load_play_cfg():
+    """开跑前拉一次中央播放口径（2026-11-27）。
+
+    只在 main() 开头调一次。任何失败都静默回退 env —— 口径取不到时旧值就是正确答案，
+    绝不能因为「配置服务抖动」让整片零播放。
+    返回 dict=已采用中央配置 / None=使用本机 Secret。
+    """
+    global POOL_PLAY_SECONDS, PLAY_RATIO_MIN, PLAY_RATIO_MAX, PLAY_CFG_DESC, PLAY_CFG_SRC
+    if not PLAYCFG_ON or not ASSIGN_PASS:
+        return None
+    url = os.environ.get("PLAYCFG_URL", "").strip() or (SNAP_URL.rstrip("/") + "/api/playcfg")
+    try:
+        r = requests.get(url, params={"pass": ASSIGN_PASS, "pool": POOL_TAG},
+                         timeout=12, headers={"User-Agent": BROWSER_UA})
+        if r.status_code != 200:
+            print("[playcfg] 未命中中央配置（HTTP %s）→ 沿用本机：%s"
+                  % (r.status_code, play_cfg_label()))
+            return None
+        d = r.json() or {}
+        if not d.get("ok"):
+            return None
+        sec = d.get("sec") or []
+        if not (isinstance(sec, list) and len(sec) == 2):
+            return None
+        sec = (int(sec[0]), int(sec[1]))
+        if sec[0] <= 0 or sec[1] < sec[0]:
+            return None
+        ratio = d.get("ratio") or []
+        if isinstance(ratio, list) and len(ratio) == 2:
+            lo, hi = float(ratio[0]), float(ratio[1])
+            if 0 < lo <= hi <= 1:
+                PLAY_RATIO_MIN, PLAY_RATIO_MAX = lo, hi
+        POOL_PLAY_SECONDS = sec
+        PLAY_CFG_DESC = str(d.get("desc") or "")
+        PLAY_CFG_SRC = str(d.get("source") or "d1:play_cfg")
+        print("[playcfg] 已采用中央配置：固定档 %d~%ds、比例 %.2f~%.2f（%s，%s，ts=%s）"
+              % (sec[0], sec[1], PLAY_RATIO_MIN, PLAY_RATIO_MAX,
+                 PLAY_CFG_DESC or "未附说明", PLAY_CFG_SRC, d.get("ts", "")))
+        return d
+    except Exception as e:
+        print("[playcfg] 拉取异常（%s）→ 沿用本机：%s" % (type(e).__name__, play_cfg_label()))
+        return None
+
 def _load_cfg():
     """读 cfg.json；文件缺失/损坏/不是对象时用默认参数继续跑，不让整轮任务崩掉。
     2026-10-26：原来是 json.load(open(...))，既没 with 也不吞异常 —— 配置文件写坏
@@ -650,6 +727,7 @@ def _load_cfg():
 
 
 def main():
+    load_play_cfg()          # 2026-11-27 中央口径（失败自动回退 env）
     cfg = _load_cfg()
     plays = int(cfg.get("plays_per_account", 28))
     skip_prob = float(cfg.get("skip_prob", 0.08))
@@ -708,10 +786,10 @@ def main():
                 dead_emails[nm] = e.get("email", "")
             else:
                 unknown += 1
-                print(f"  [{e.get('name','?')}] 复核未确认失效，本次跳过（不报失效）")
+                print(f"  [{mask_name(e.get('name','?'))}] 复核未确认失效，本次跳过（不报失效）")
         else:
             unknown += 1
-            print(f"  [{e.get('name','?')}] 网络异常无法判定，本次跳过（不报失效）")
+            print(f"  [{mask_name(e.get('name','?'))}] 网络异常无法判定，本次跳过（不报失效）")
         time.sleep(random.uniform(1, 3))
 
     # 2) 过滤当天新加入（第 2 天入池）
@@ -874,14 +952,14 @@ def main():
         client = Client(acc["ck"])
         chk = client.login_by_cookie(acc["ck"], name)
         if chk is None:
-            print(f"  [{name}] 播放前复验网络异常，跳过（不报失效）")
+            print(f"  [{mask_name(name)}] 播放前复验网络异常，跳过（不报失效）")
             return name, 0, [], False
         if chk is False:
             # 2026-10-23：播放前复验失败同样先复核，确认后才按失效处理。
             if confirm_dead(acc["ck"], name):
-                print(f"  [{name}] 复核确认失效，跳过")
+                print(f"  [{mask_name(name)}] 复核确认失效，跳过")
                 return name, 0, [], True
-            print(f"  [{name}] 复核未确认失效，跳过（不报失效）")
+            print(f"  [{mask_name(name)}] 复核未确认失效，跳过（不报失效）")
             return name, 0, [], False
 
         # 4) 组建播放任务：跨群（pid=歌曲id）与混听（pid=热歌榜）合并后随机穿插执行，
@@ -948,7 +1026,7 @@ def main():
             time.sleep(random.uniform(1, 3))
         _ab_tag = f"（[AB] 实验口径 {exp_cnt} 次）" if exp_cnt else ""
         _c_tag = f"（[C] 下探口径 {c_cnt} 次）" if c_cnt else ""
-        print(f"  [{name}] 完成 {cnt} 次播放{_ab_tag}{_c_tag}" + (f"，平均 {sum(secs)//len(secs)}s/首" if secs else ""))
+        print(f"  [{mask_name(name)}] 完成 {cnt} 次播放{_ab_tag}{_c_tag}" + (f"，平均 {sum(secs)//len(secs)}s/首" if secs else ""))
         if cnt:
             _uid_done = str(acc.get("uid") or name)
             ran_uids.append(_uid_done)
@@ -995,7 +1073,7 @@ def main():
                     # 且 email_of.get 取不到时返回 '' 会把好值清掉 → 那封过期邮件发不出去）。
                     dead_emails[name] = dead_emails.get(name) or email_of.get(name, "")
 
-    avg = f"，平均上报 {sum(reported_secs)//len(reported_secs)} 秒/首（过半口径）" if reported_secs else ""
+    avg = f"，平均上报 {sum(reported_secs)//len(reported_secs)} 秒/首（{play_cfg_label()}）" if reported_secs else ""
     print(f"[slice {slice_idx}] 完成，本次有效上报约 {done} 次{avg}")
 
     # 4.6) 本片「只收不听」的号：验活 + 查一次工作台（它们的歌进别人的歌池，指标同样要进控制台）。
@@ -1013,11 +1091,11 @@ def main():
             if v is False:
                 # 2026-10-23：只收不听号同样先复核再判死。
                 if confirm_dead(acc["ck"], acc.get("name", "?")):
-                    print(f"  [{acc.get('name','?')}] 只收不听号复核确认失效")
+                    print(f"  [{mask_name(acc.get('name','?'))}] 只收不听号复核确认失效")
                     dead_names.append(acc.get("name", ""))
                     dead_emails[acc.get("name", "")] = acc.get("email", "")
                 else:
-                    print(f"  [{acc.get('name','?')}] 只收不听号复核未确认失效，跳过")
+                    print(f"  [{mask_name(acc.get('name','?'))}] 只收不听号复核未确认失效，跳过")
                 time.sleep(random.uniform(1, 2))
                 continue
             if v is None:

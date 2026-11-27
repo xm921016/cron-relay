@@ -11445,6 +11445,66 @@ async function handle(request) {
     // 原来 runs 表只在「整片跑完」时随 /api/snap 一次性上报，片被中断就一条记录都没有，
     // 无从判断哪些号已经播过。改法：
     //   POST /api/run_mark —— run.py 每个号播完立刻增量落一条 runs 记录；
+    // ===== 2026-11-27：播放口径中央配置（D1 kv_misc k='play_cfg'）=====
+    // 动机：POOL_PLAY_SECONDS 与比例区间原先分散在 4 处 GitHub Secret + 16 个本地 env 文件，
+    //   改一次要同步 5 个地方。11-27 全面体检实锤了漂移：hz 主仓与 dz 已是 40,50，
+    //   而 016 薄壳停在 11-23 的 40,42 → 主群实测 60.0s/首、定制群 62.0s/首。
+    // 现在改成「一份配置存 D1，执行器开跑前取一次」：
+    //   改一处（GET /api/playcfg_set）→ 所有执行器下一片开工即生效，不用碰任何 Secret。
+    // 安全性：读不到 / 未配置 / D1 故障 一律 ok:false → run.py 回退自己的 env(Secret)，
+    //   绝不阻断播放（取不到 ≠ 取到空，绝不当成「没配置=纯比例口径」）。
+    // 鉴权与 /api/assign 同源（ASSIGN_PASS 或 ADMIN_PASS）。
+    if (url.pathname === '/api/playcfg' && request.method === 'GET') {
+      const CORS = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
+      const c = await cfg();
+      const pass = url.searchParams.get('pass') || '';
+      if (!c.assignPass) return json({ ok: false, message: '未配置 ASSIGN_PASS' }, 503, CORS);
+      if (pass !== c.assignPass && !(c.adminPass && pass === c.adminPass)) return json({ ok: false, message: '口令错误' }, 403, CORS);
+      if (!d1ok()) return json({ ok: false, message: 'D1 未绑定' }, 503, CORS);
+      const rows = await d1All("SELECT v FROM kv_misc WHERE k='play_cfg'", []);
+      if (!rows) return json({ ok: false, message: 'D1 查询失败（不当成未配置）' }, 503, CORS);
+      if (!rows.length) return json({ ok: false, message: '未配置 play_cfg（执行器回退 env）' }, 404, CORS);
+      let o = null;
+      try { o = JSON.parse(rows[0].v); } catch (e) { o = null; }
+      if (!o || !Array.isArray(o.sec) || o.sec.length !== 2) return json({ ok: false, message: 'play_cfg 格式非法（执行器回退 env）' }, 503, CORS);
+      const ratioOk = Array.isArray(o.ratio) && o.ratio.length === 2;
+      return json({ ok: true, sec: o.sec, ratio: ratioOk ? o.ratio : [0.55, 0.7],
+                    desc: String(o.desc || ''), ts: String(o.ts || ''), source: 'd1:play_cfg' }, 200, CORS);
+    }
+    // 写入播放口径（唯一真源）：GET /api/playcfg_set?pass=ADMIN_PASS&sec=40,50[&ratio=0.55,0.70][&desc=...]
+    // 只认 ADMIN_PASS —— 这是能给全池定口径的开关，群口令一律不放行。
+    // hz / dz 共用同一个 D1 库 → 设一次两群同时生效（这也是「改一处全变」的关键）。
+    if (url.pathname === '/api/playcfg_set' && request.method === 'GET') {
+      const CORS = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
+      const c = await cfg();
+      const pass = url.searchParams.get('pass') || '';
+      if (!c.adminPass) return json({ ok: false, message: '未配置 ADMIN_PASS' }, 503, CORS);
+      if (pass !== c.adminPass) return json({ ok: false, message: '口令错误' }, 403, CORS);
+      if (!d1ok()) return json({ ok: false, message: 'D1 未绑定' }, 503, CORS);
+      const pair = function (s) {
+        const a = String(s || '').replace(/，/g, ',').split(',').map(function (x) { return parseFloat(String(x).trim()); });
+        if (a.length !== 2) return null;
+        if (!isFinite(a[0]) || !isFinite(a[1])) return null;
+        if (a[0] <= 0 || a[1] < a[0]) return null;
+        return a;
+      };
+      const sec = pair(url.searchParams.get('sec'));
+      if (!sec) return json({ ok: false, message: 'sec 需形如 40,50（下限>0 且 上限>=下限）' }, 400, CORS);
+      const ratioRaw = url.searchParams.get('ratio');
+      let ratio = [0.55, 0.7];
+      if (ratioRaw) {
+        const r = pair(ratioRaw);
+        if (!r || r[1] > 1) return json({ ok: false, message: 'ratio 需形如 0.55,0.70（0~1 之间）' }, 400, CORS);
+        ratio = r;
+      }
+      const o = { sec: sec, ratio: ratio, desc: String(url.searchParams.get('desc') || '').slice(0, 200),
+                  ts: new Date().toISOString() };
+      const wrote = await d1Run('INSERT INTO kv_misc (k,v,updated_at) VALUES (?,?,?) ' +
+        'ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at',
+        ['play_cfg', JSON.stringify(o), new Date().toISOString()]);
+      if (!wrote) return json({ ok: false, message: 'D1 写入失败' }, 503, CORS);
+      return json({ ok: true, cfg: o, message: '已生效：所有执行器下一片开工自动拉取' }, 200, CORS);
+    }
     //   GET  /api/run_done —— 任何一片开跑前拉当天已跑名单，跳过已在名单里的号。
     // 幂等：正常跑（当天第一次）名单为空，行为与以前完全一致；重跑时才可能命中。
     if (url.pathname === '/api/run_done' && request.method === 'GET') {
@@ -13781,14 +13841,11 @@ async function fetchActionsStatus() {
   // 2026-11-17：新增 016=N2b（xm921016/relay-node，公开仓）——主仓 cron-relay 转私密后浏览器
   // 点日志必 404，且 Phase 2 后主仓不跑片、前一半片（0..fs_lo-1）归 N2b，其日志链接替代原
   // 「016日志」（前端已移除主仓链接，见 console.html 同日注释）。
-  const NODE_REPOS = [
-    // 2026-11-19 多节点分摊：013/014/011/010 各 ≤10 片/天、016 收剩余；015 已被 GitHub 封禁移除
-    { name: '016', owner: 'xm921016', repo: 'relay-node' },
-    { name: '014', owner: 'xm921014', repo: 'relay-node' },
-    { name: '013', owner: 'xm921013', repo: 'relay-node' },
-    { name: '011', owner: 'xm921011', repo: 'relay-node' },
-    { name: '010', owner: 'xm921010', repo: 'relay-node' },
-  ];
+  // 2026-11-27（用户拍板）：016 薄壳仓已删除，主群回主仓自跑 → 节点仓清单清空，
+  // 控制台「运行状态」横条上的日志入口改为直接指向主仓 cron-relay 的 run（见 console.html）。
+  // 历史：013/014/011/010 账号长期封禁、016 是最后一个薄壳；四个仓全部下线，节点机制停用。
+  // 将来若新开节点账号，在这里加 { name:'XXX', owner:'xmXXXXXX', repo:'relay-node' } 即可。
+  const NODE_REPOS = [];
   const hzOut = out.find(x => x && x.pool === 'hz');
   if (hzOut && hzOut.ok) {
     const NH = { Authorization: 'Bearer ' + c.ghToken, Accept: 'application/vnd.github+json',
@@ -17279,13 +17336,13 @@ function renderRunbar(){
         head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(repoTxt||jobTxt)+'</span>'+nodeTxt;
       }
       if(a.pool==='hz'&&grayTxt)head+=grayTxt;
-      // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，
-      // 这里再按 ROLE 兜一层（缓存里的旧数据 / 将来字段改名时不至于漏出链接）。
-      // 2026-11-17：hz 主仓 cron-relay 已转私密（「主仓转私密+播放外移」Phase 3），浏览器
-      // 未登录 xm921016 点链接必 404，且 Phase 2 后 master 不再跑片（只剩 plan job）——
-      // hz 的主仓日志链接移除，hz 分片日志统一走下方节点仓链接（016=公开薄壳 N2b 接前一半片）。
-      // dz 仓（017）仍公开，链接保留。
-      var logLink=((ROLE==='full')&&a.url&&a.pool==='dz')?' · <a href="'+esc(a.url)+'" target="_blank">017日志</a>':'';
+      // 2026-11-27（用户口径）：016 薄壳仓已删除、主群回主仓自跑 —— 运行状态横条里的日志入口
+      // 重新指回主仓（2026-11-17 移除它的两个前提现在都不成立了：cron-relay 一直是公开仓，
+      // 且从今晚起它自己跑全部片，日志就在主仓 actions 里）。
+      // dz 标签原先写死「017日志」——017 是 hz 账号下的 relay-node，早已删除，标签名本身就是错的。
+      var logLink=((ROLE==='full')&&a.url)
+        ? ' · <a href="'+esc(a.url)+'" target="_blank">'+(a.pool==='dz'?'定制群日志':'主仓日志')+'</a>'
+        : '';
       // 2026-11-14：follower 节点仓日志入口（015/014/013，服务端已附 nodes[]，只读无 url 不渲染）。
       // 主群分片现在由主仓+节点仓一起跑，只看主仓日志会漏掉节点那几片的成败。
       var nodeLinks='';
@@ -17333,7 +17390,9 @@ function renderRunbar(){
     {
       if(dmiss){
         if(poolLive(p))parts.push('<span class="bad">漏跑'+dmiss+' · 补跑中</span>');
-        else if(bjHnow()<20)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 自动补漏盯补中（播完即查·每10分钟·两轮制）</span>');
+        // 2026-11-27：频率文案对齐实际 —— watchdog 的 cron 是 */5（11-24 从 10 分格改 5 分格），
+        // 这里一直写「每10分钟」，只是说得比实际慢，补漏本身正常（改文案不改行为）。
+        else if(bjHnow()<20)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 自动补漏盯补中（播完即查·每5分钟·两轮制）</span>');
         else parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 今晚 0:10 主轮补跑</span>');
       }
       if(ddead)parts.push('<span class="bad">失效'+ddead+'</span><span class="muted"> · 已判死删号+直邮号主，补登后自动回池</span>');

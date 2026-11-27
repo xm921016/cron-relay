@@ -1617,7 +1617,8 @@ function renderRunbar(){
       var repoTxt='',nodeTxt='';
       // 2026-11-20（用户口径）：hz 只剩 016 一个活仓，「仓库 1/1」没信息量——改按「片数」：
       // 服务端 day_slices={done,ns}（今天 runs 落账 distinct slice / plan 公式 ns），全绿「片数 59/59」。
-      if(a.pool==='hz'&&a.day_slices&&a.day_slices.ns>0)repoTxt=' · 片数 '+a.day_slices.done+'/'+a.day_slices.ns;
+      // 2026-11-26：day_slices 泛化到两池，dz 也显示片数（无则回退 jobTxt）。
+      if(a.day_slices&&a.day_slices.ns>0)repoTxt=' · 片数 '+a.day_slices.done+'/'+a.day_slices.ns;
       if(a.pool==='hz'&&Array.isArray(a.nodes)){
         var act=a.nodes.filter(function(n){return n&&n.created&&(Date.now()-new Date(n.created).getTime())<86400000;});
         var lvMain=[],lvBack=[],flNames=[];
@@ -1632,7 +1633,7 @@ function renderRunbar(){
         if(lvBack.length)nodeTxt+='<span style="color:#185FA5"> · 补跑中 '+lvBack.join(',')+'</span>';
         if(flNames.length)nodeTxt+='<span class="bad"> · '+flNames.join(',')+'仓失败</span>';
       }
-      // 2026-11-20：灰度机进度（本机 slice0-4 + 笔记本 slice5-7，每日 00:10 预播 D+1 名单）。
+      // 2026-11-20：灰度机进度（2026-11-26 扩量后=本机 slice0-7 + 笔记本 slice8-15，每日 00:10 预播 D+1 名单）。
       // 服务端 hz 条目已附 gray={day,slices:[{s,n,at}]}（runs 表 day=明天的落账只可能来自灰度机），
       // 前端纯本地计算。片齐=绿色，部分=蓝色（在跑/未齐），0 片=灰色。
       var grayTxt='';
@@ -1640,12 +1641,12 @@ function renderRunbar(){
         var gs=a.gray.slices;
         var doneOf=function(ids){var d=0;for(var i=0;i<ids.length;i++)for(var j=0;j<gs.length;j++)if(gs[j].s===ids[i]){d++;break;}return d;};
         var lastOf=function(ids){var t='';for(var i=0;i<ids.length;i++)for(var j=0;j<gs.length;j++)if(gs[j].s===ids[i]&&gs[j].at&&gs[j].at>t)t=gs[j].at;return t;};
-        var dL=doneOf([0,1,2,3,4]),dN=doneOf([5,6,7]);
-        var tMax=lastOf([0,1,2,3,4,5,6,7]);
+        var dL=doneOf([0,1,2,3,4,5,6,7]),dN=doneOf([8,9,10,11,12,13,14,15]);
+        var tMax=lastOf([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]);
         var mSpan=function(d,tot,nm){var c=d>=tot?'good':(d>0?'':'muted');return '<span class="'+c+'"'+(d>0&&d<tot?' style="color:#185FA5"':'')+'>'+nm+' '+d+'/'+tot+'</span>';};
         var gDay=esc(String(a.gray.day||'').slice(5));
-        grayTxt=' · <span class="muted" title="灰度机（本机 slice0-4 + 笔记本 slice5-7）预播 '+gDay+' 名单的落账进度，来自 runs 表">灰度('+gDay+')</span> '
-          +mSpan(dL,5,'本机')+' '+mSpan(dN,3,'笔记本');
+        grayTxt=' · <span class="muted" title="灰度机（本机 slice0-7 + 笔记本 slice8-15）预播 '+gDay+' 名单的落账进度，来自 runs 表">灰度('+gDay+')</span> '
+          +mSpan(dL,8,'本机')+' '+mSpan(dN,8,'笔记本');
         if(tMax)grayTxt+=' · 末次 '+esc(bjTime(tMax));
       }
       var head;
@@ -1659,18 +1660,18 @@ function renderRunbar(){
           if(a.jobs_ok&&dn>a.jobs_ok)head+='<span class="muted"> · 成功 '+a.jobs_ok+'</span>';
         }
       }else if(a.conclusion==='success'){
-        head='<span class="good">✓ 成功'+esc(a.pool==='hz'?repoTxt:jobTxt)+'</span>'+nodeTxt;
+        head='<span class="good">✓ 成功'+esc(repoTxt||jobTxt)+'</span>'+nodeTxt;
       }else{
-        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(a.pool==='hz'?repoTxt:jobTxt)+'</span>'+nodeTxt;
+        head='<span class="bad">✗ '+esc(a.conclusion||'失败')+esc(repoTxt||jobTxt)+'</span>'+nodeTxt;
       }
       if(a.pool==='hz'&&grayTxt)head+=grayTxt;
-      // 2026-11-05：只读口令不显示「日志」入口。服务端已把 actions[].url 抹成空串，
-      // 这里再按 ROLE 兜一层（缓存里的旧数据 / 将来字段改名时不至于漏出链接）。
-      // 2026-11-17：hz 主仓 cron-relay 已转私密（「主仓转私密+播放外移」Phase 3），浏览器
-      // 未登录 xm921016 点链接必 404，且 Phase 2 后 master 不再跑片（只剩 plan job）——
-      // hz 的主仓日志链接移除，hz 分片日志统一走下方节点仓链接（016=公开薄壳 N2b 接前一半片）。
-      // dz 仓（017）仍公开，链接保留。
-      var logLink=((ROLE==='full')&&a.url&&a.pool==='dz')?' · <a href="'+esc(a.url)+'" target="_blank">017日志</a>':'';
+      // 2026-11-27（用户口径）：016 薄壳仓已删除、主群回主仓自跑 —— 运行状态横条里的日志入口
+      // 重新指回主仓（2026-11-17 移除它的两个前提现在都不成立了：cron-relay 一直是公开仓，
+      // 且从今晚起它自己跑全部片，日志就在主仓 actions 里）。
+      // dz 标签原先写死「017日志」——017 是 hz 账号下的 relay-node，早已删除，标签名本身就是错的。
+      var logLink=((ROLE==='full')&&a.url)
+        ? ' · <a href="'+esc(a.url)+'" target="_blank">'+(a.pool==='dz'?'定制群日志':'主仓日志')+'</a>'
+        : '';
       // 2026-11-14：follower 节点仓日志入口（015/014/013，服务端已附 nodes[]，只读无 url 不渲染）。
       // 主群分片现在由主仓+节点仓一起跑，只看主仓日志会漏掉节点那几片的成败。
       var nodeLinks='';
@@ -1718,7 +1719,9 @@ function renderRunbar(){
     {
       if(dmiss){
         if(poolLive(p))parts.push('<span class="bad">漏跑'+dmiss+' · 补跑中</span>');
-        else if(bjHnow()<20)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 自动补漏盯补中（播完即查·每10分钟·两轮制）</span>');
+        // 2026-11-27：频率文案对齐实际 —— watchdog 的 cron 是 */5（11-24 从 10 分格改 5 分格），
+        // 这里一直写「每10分钟」，只是说得比实际慢，补漏本身正常（改文案不改行为）。
+        else if(bjHnow()<20)parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 自动补漏盯补中（播完即查·每5分钟·两轮制）</span>');
         else parts.push('<span class="bad">漏跑'+dmiss+'</span><span class="muted"> · 今晚 0:10 主轮补跑</span>');
       }
       if(ddead)parts.push('<span class="bad">失效'+ddead+'</span><span class="muted"> · 已判死删号+直邮号主，补登后自动回池</span>');
