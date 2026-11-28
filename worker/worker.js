@@ -6931,51 +6931,47 @@ const REG_HTML = `<!DOCTYPE html>
 <meta name="robots" content="noindex,nofollow">
 <title>账号登记</title>
 <style>
-:root{--bg:#f2f3f5;--card:#fff;--txt:#1a1a1a;--mut:#8b8b90;--line:#e8e8ec;--bd:#2f2f34;--pri:#ff2c55;--ok:#178a55}
-@media (prefers-color-scheme:dark){:root{--bg:#101013;--card:#1c1c20;--txt:#f2f2f5;--mut:#8b8b93;--line:#2c2c32;--bd:#dcdce4;--ok:#3ddc97}}
+/* 2026-11-28 版式改版（方案B 清新蓝玻璃，与签到页 /sign 同一视觉语言）：只动样式层，
+   HTML/JS/ID 零变化。原暗色模式媒体查询移除——玻璃拟态为浅色设计，深色设备统一浅色呈现；
+   --pri 由红改蓝后，红/绿只留给「填错/警告」与「成功」两种状态色。 */
+:root{--txt:#1e293b;--mut:#7c8ba1;--line:#e2e9f2;--bd:#dbe4ef;--pri:#2563eb;--ok:#059669}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-body{margin:0;background:var(--bg);color:var(--txt);font:16px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
-.wrap{max-width:480px;margin:0 auto;padding:18px 16px 44px}
-h1{font-size:19px;margin:0 0 6px;font-weight:600}
-.sub{color:var(--mut);font-size:13px;margin:0 0 16px;min-height:20px}
-.card{background:var(--card);border-radius:16px;padding:18px 16px;margin-bottom:12px}
-.qr{width:236px;max-width:66vw;margin:0 auto 10px;display:block;border-radius:10px;image-rendering:pixelated;background:#fff}
+body{margin:0;background:linear-gradient(165deg,#e8f0ff 0%,#e6f7f2 60%,#f0f7ff 100%) fixed;color:var(--txt);font:16px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:480px;margin:0 auto;padding:22px 16px 44px}
+h1{font-size:22px;margin:0 0 8px;font-weight:700;background:linear-gradient(120deg,#2563eb,#0891b2);-webkit-background-clip:text;background-clip:text;color:transparent;width:max-content}
+.sub{color:var(--mut);font-size:13px;margin:0 0 18px;min-height:20px;line-height:1.7}
+.card{background:rgba(255,255,255,.78);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.9);border-radius:20px;padding:20px 18px;margin-bottom:14px;box-shadow:0 10px 32px rgba(59,130,246,.13)}
+.qr{width:236px;max-width:66vw;margin:0 auto 10px;display:block;border-radius:16px;border:1.5px dashed #b9c8dd;background:#fff;image-rendering:pixelated}
 .qr.dim{opacity:.22;filter:blur(3px)}
 .tip{text-align:center;font-size:13px;color:var(--mut);margin:0 0 12px;min-height:20px}
 .row{display:flex;gap:8px}
-button{flex:1;border:0;border-radius:11px;padding:12px 10px;font-size:15px;font-family:inherit;background:var(--line);color:var(--txt);cursor:pointer}
-button.pri{background:var(--pri);color:#fff;font-weight:600}
+button{flex:1;border:0;border-radius:12px;padding:12px 10px;font-size:15px;font-weight:600;font-family:inherit;background:#e8eef7;color:#5b6b82;cursor:pointer}
+button.pri{background:linear-gradient(135deg,#3b82f6,#0ea5e9);color:#fff;box-shadow:0 6px 16px rgba(59,130,246,.32)}
 button:disabled{opacity:.5}
-/* 2026-11-08：标签原来是 13px 灰字，买家（尤其手机上）几乎看不见「要填什么」，
-   改成 14px 加粗 + 正文色，和输入框拉开层次。 */
-label{display:block;font-size:14px;font-weight:700;color:var(--txt);margin:16px 0 6px}
-/* 2026-11-08：输入框边线原来用 --line(#e8e8ec)，白底上几乎看不见边界，
-   买家不知道哪里能点。单独给一条更深的 --bd，按钮底色仍用 --line 不变。 */
-input{width:100%;border:1px solid var(--bd);background:transparent;color:var(--txt);border-radius:11px;padding:11px 12px;font-size:15px;font-family:inherit;outline:none}
-/* 2026-11-08：默认边线改成近黑（--bd），红色只留给「填错了」——聚焦不再是红色，
-   改用一圈淡淡的描边表示「光标在这里」。 */
-input:focus{border-color:var(--txt);box-shadow:0 0 0 3px rgba(128,128,128,.18)}
-input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
+/* 2026-11-08：标签 14px 加粗 + 正文色，和输入框拉开层次（保留） */
+label{display:block;font-size:14px;font-weight:700;color:#334155;margin:16px 0 6px}
+input{width:100%;border:1.5px solid var(--bd);background:#fff;color:var(--txt);border-radius:12px;padding:12px 14px;font-size:15px;font-family:inherit;outline:none;transition:border-color .15s,box-shadow .15s}
+input:focus{border-color:var(--pri);box-shadow:0 0 0 3px rgba(59,130,246,.12)}
+input.bad{border-color:#dc2626;box-shadow:0 0 0 3px rgba(220,38,38,.12)}
 .hide{display:none!important}
 .ok{color:var(--ok)}
-.who{font-size:14px;background:rgba(23,138,85,.1);color:var(--ok);border-radius:10px;padding:10px 12px;word-break:break-all}
-.steps{font-size:13px;color:var(--mut);line-height:1.85;margin:14px 0 0;padding:12px;background:var(--bg);border-radius:10px}
+.who{font-size:14px;background:rgba(5,150,105,.08);border:1px solid rgba(5,150,105,.2);color:var(--ok);border-radius:12px;padding:10px 12px;word-break:break-all}
+.steps{font-size:13px;color:var(--mut);line-height:1.85;margin:14px 0 0;padding:12px;background:rgba(232,238,247,.7);border-radius:12px}
 .steps b{color:var(--txt);font-weight:600}
-/* 2026-11-08：给一段真实的分享范例，买家照着认「长这样就是对的了」 */
-.ex{font-size:12.5px;color:var(--mut);background:var(--bg);border-left:3px solid var(--pri);border-radius:8px;padding:9px 11px;margin:8px 0 0;line-height:1.7;word-break:break-all;text-align:left}
-.err{color:#d93025;font-size:14px;line-height:1.8}
-.big{font-size:32px;text-align:center;margin:6px 0 2px}
-/* 2026-11-08：电脑上打开时左右两栏（左二维码 / 右填表），省得来回滚；
-   手机窄屏仍然上下排（.cols 退化成普通块）。 */
+.ex{font-size:12.5px;color:var(--mut);background:rgba(232,238,247,.7);border-left:3px solid var(--pri);border-radius:8px;padding:9px 11px;margin:8px 0 0;line-height:1.7;word-break:break-all;text-align:left}
+.err{color:#dc2626;font-size:14px;line-height:1.8}
+.big{font-size:34px;text-align:center;margin:6px 0 2px;color:var(--ok)}
 .cols>div{min-width:0}
 .ph{padding:26px 16px;text-align:center;color:var(--mut);font-size:14px;line-height:1.9}
-/* 2026-11-25：短信/扫码双通道切换条。短信=默认通道（推荐徽章），扫码=保底（不愿收
-   验证码 / 收不到短信的用户自选）。按钮复用全局 button 样式再覆盖。 */
-.switch{display:flex;gap:8px;margin:0 0 12px}
-.sw{flex:1;border:1.5px solid var(--line);border-radius:11px;padding:11px 8px;font-size:14px;font-weight:600;background:transparent;color:var(--mut);position:relative}
-.sw.on{border-color:var(--pri);color:var(--pri);background:rgba(255,44,85,.06)}
-.sw .rec{font-style:normal;font-size:10px;background:var(--pri);color:#fff;border-radius:8px;padding:1px 6px;margin-left:4px;vertical-align:2px}
+/* 2026-11-25：短信/扫码双通道切换条 → 2026-11-28 改一体式分段控件（方案B）。
+   短信=默认通道（推荐徽章），扫码=保底。 */
+.switch{display:flex;background:#e8eef7;border-radius:999px;padding:4px;margin:0 0 14px}
+.sw{flex:1;border:0;border-radius:999px;padding:11px 8px;font-size:14px;font-weight:600;background:transparent;color:#8895a7;position:relative;box-shadow:none}
+.sw.on{background:#fff;color:var(--pri);box-shadow:0 3px 10px rgba(37,99,235,.18)}
+.sw .rec{font-style:normal;font-size:10px;background:linear-gradient(135deg,#3b82f6,#0ea5e9);color:#fff;border-radius:8px;padding:1px 7px;margin-left:4px;vertical-align:2px}
 #yidun-cap{margin-top:10px;min-height:10px}
+/* 登记完成/链接已用：绿色玻璃卡 */
+#d-box{border:1.5px solid rgba(16,163,90,.45);background:linear-gradient(180deg,rgba(236,253,243,.9),rgba(255,255,255,.82))}
 @media (min-width:780px){
   .wrap{max-width:920px}
   .cols{display:flex;gap:14px;align-items:flex-start}
@@ -7265,8 +7261,8 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
     wt.textContent = '已识别账号：' + (j.artist || j.nick || '网易云账号') + (j.uid ? '（uid ' + j.uid + '）' : '');
     if (j.noart) {
       wt.textContent += '。注意：这个账号还没有入驻网易音乐人——普通号的播放不计入任务数据，点「完成登记」也会被拦下。请先用这个账号在网易云 APP 免费入驻音乐人（音乐人中心→入驻），入驻成功后重新扫码登记';
-      wt.style.background = 'rgba(255,44,85,.10)';
-      wt.style.color = 'var(--pri)';
+      wt.style.background = 'rgba(220,38,38,.10)';
+      wt.style.color = '#dc2626';
     }
     /* 2026-11-11：表单改成进页面就全展示（买家扫完就关浏览器，以为登记完了），
        扫码成功只要把「已识别账号」这条绿条补上即可，不用再切 f-box。 */
@@ -7376,7 +7372,7 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
   function smsTip(s, bad){
     var el = E('sms-tip');
     el.textContent = s;
-    el.style.color = bad ? '#d93025' : '';
+    el.style.color = bad ? '#dc2626' : '';
   }
   function smsCountdown(){
     clearInterval(smsCdT); smsCd = 60;
@@ -7431,8 +7427,8 @@ input.bad{border-color:#e0362b;box-shadow:0 0 0 3px rgba(224,54,43,.14)}
     wt.textContent = '已识别账号：' + (r.artist || r.nickname || '网易云账号') + (r.uid ? '（uid ' + r.uid + '）' : '');
     if (r.noart) {
       wt.textContent += '。注意：这个账号还没有入驻网易音乐人——普通号的播放不计入任务数据，点「完成登记」也会被拦下。请先用这个账号在网易云 APP 免费入驻音乐人（音乐人中心→入驻），入驻成功后再回来登记';
-      wt.style.background = 'rgba(255,44,85,.10)';
-      wt.style.color = 'var(--pri)';
+      wt.style.background = 'rgba(220,38,38,.10)';
+      wt.style.color = '#dc2626';
     }
     show('who', true);
     if (window.innerWidth < 780) { try { E('f-box').scrollIntoView({ behavior:'smooth', block:'start' }); } catch (e) {} }
