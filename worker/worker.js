@@ -8991,6 +8991,155 @@ async function handle(request) {
       console.log('签到产品卡密兑换成功: uid=' + uidC5 + ' code=' + codeC5);
       return json({ ok: true, code: codeC5 }, 200, { 'Cache-Control': 'no-store' });
     }
+    /* ===== 签到页短信验证码通道（2026-11-28）：/api/s/sms_send、/api/s/sms_login =====
+       与 650 号池 /api/reg_sms/* 同一套底层（住宅中继优先→机房 weapi 回落、易盾滑块闭环、
+       sid 会话延续、8810 概率风控 eapi 重试），鉴权换成签到产品自家凭证：
+       st=新登记/卡密会话 token（/api/s/new 发的 sign:tok），或 rc=重登登记码（邮件链接 /sign/r/<码>）。
+       登录成功只回 MUSIC_U + uid/nick（签到产品无音乐人校验），页面拿 mu 走既有
+       /api/s/submit、/api/s/csubmit、/api/s/rsubmit，业务校验零变化。
+       滑块核验不另开端点：/api/reg_sms/check 本就不校验登记链接，直接复用。
+       频控：IP 日限额 d1Hit('ssms') 20 次 + 单号 60s（smsSendLimit 前缀 SS/SL，与 650 页隔离）。 */
+    if (url.pathname === '/api/s/sms_send' && request.method === 'POST') {
+      let bX1;
+      try { bX1 = await request.json(); } catch (e) { return json({ code: 400, message: '参数错误' }, 400); }
+      const stX1 = String(bX1.st || '').trim();
+      const rcX1 = regNormCode(bX1.rc);
+      const ipX1 = request.headers.get('cf-connecting-ip') || '0';
+      const hitX1 = await d1Hit('ssms', ipX1 + ':' + beijingDate());
+      if (hitX1 !== null && hitX1 > 20) return json({ code: 429, message: '今天发送次数太多了，请明天再试或联系客服' });
+      if (stX1) {
+        const tokX1 = await signTokGet(stX1);
+        if (tokX1 === undefined) return json({ code: 503, message: '系统正在忙，请稍后再试' }, 503);
+        if (!tokX1 || tokX1.state !== 'new') return json({ code: 410, message: '会话已过期，请刷新页面重新开始' }, 410);
+      } else if (rcX1) {
+        const rrX1 = await d1All('SELECT uid FROM sign_users WHERE reg_code=? LIMIT 1', [rcX1]);
+        if (rrX1 === null) return json({ code: 503, message: '系统正在忙，请稍后再试' }, 503);
+        if (!rrX1.length) return json({ code: 410, message: '登记码无效，请核对邮件里的链接或联系客服' }, 410);
+      } else {
+        return json({ code: 400, message: '会话缺失，请刷新页面' }, 400);
+      }
+      const phX1 = String(bX1.phone || '').trim();
+      if (!/^1[3-9]\d{9}$/.test(phX1)) return json({ code: 400, message: '手机号格式不对' }, 400);
+      const _nowX1 = Date.now(); const _lastX1 = smsSendLimit.get('SS' + phX1) || 0;
+      if (_nowX1 - _lastX1 < 60e3) return json({ code: 429, message: '发送太频繁，' + Math.ceil((60e3 - (_nowX1 - _lastX1)) / 1e3) + ' 秒后再试' });
+      smsSendLimit.set('SS' + phX1, _nowX1);
+      /* r| 前缀 sid = 滑块重发场景，必须回到发码那一台住宅机那条会话 */
+      const _spX1 = smsSidParse(String(bX1.sid || 'default').slice(0, 70));
+      const sidX1 = _spX1.sid;
+      try {
+        await regsmStat('sign_send');
+        /* 第一优先：住宅出口发码（与 /api/reg_sms/send 同口径）；8810/8821/中继异常静默回落机房 */
+        const cfgX1 = await smsRelayCfg();
+        if (cfgX1 && cfgX1.on) {
+          const rsX1 = await smsRelaySend(cfgX1, phX1, sidX1, _spX1.pin);
+          if (rsX1) {
+            const cX1 = Number(rsX1.code);
+            if (cX1 === 200) {
+              await regsmStat('sign_send_ok');
+              return json({ code: 200, sid: smsSidBuild(rsX1._via, sidX1), message: '验证码已发送' });
+            }
+            if (cX1 === -462 && rsX1.challenge) {
+              await regsmStat('sign_slider');
+              return json({ code: -462, sid: smsSidBuild(rsX1._via, sidX1), challenge: rsX1.challenge, message: rsX1.message || '需要安全验证' });
+            }
+            if (cX1 > 0 && cX1 !== 8810 && cX1 !== 8821) return json({ code: cX1, sid: sidX1, message: rsX1.message || '发送失败' });
+          }
+        }
+        const jarX1 = await smsGetJar(sidX1);
+        const rX1 = await smsWeapiCall('/api/sms/captcha/sent', { ctcode: '86', secrete: 'music_middleuser_pclogin', cellphone: phX1 }, jarX1);
+        await smsSaveJar(sidX1, jarX1);
+        const jX1 = smsParseJson(rX1.text);
+        if (jX1 && Number(jX1.code) === -462 && jX1.data && jX1.data.verifyToken) {
+          await regsmStat('sign_slider');
+          return json({ code: -462, sid: sidX1, challenge: jX1.data, message: jX1.message || '需要安全验证' });
+        }
+        if (!jX1 || Number(jX1.code) !== 200) await regsmStat('sign_sendfail');
+        return json({ code: jX1 ? jX1.code : rX1.status, sid: sidX1, message: jX1 ? (jX1.message || jX1.msg || (Number(jX1.code) === 200 ? '验证码已发送' : '发送失败')) : '响应非JSON' });
+      } catch (e) { await regsmStat('sign_sendfail'); return json({ code: 500, message: '发送链路异常，请稍后再试' }, 500); }
+    }
+    if (url.pathname === '/api/s/sms_login' && request.method === 'POST') {
+      let bX2;
+      try { bX2 = await request.json(); } catch (e) { return json({ code: 400, message: '参数错误' }, 400); }
+      const stX2 = String(bX2.st || '').trim();
+      const rcX2 = regNormCode(bX2.rc);
+      if (stX2) {
+        const tokX2 = await signTokGet(stX2);
+        if (tokX2 === undefined) return json({ code: 503, message: '系统正在忙，请稍后再试' }, 503);
+        if (!tokX2 || tokX2.state !== 'new') return json({ code: 410, message: '会话已过期，请刷新页面重新开始' }, 410);
+      } else if (rcX2) {
+        const rrX2 = await d1All('SELECT uid, email FROM sign_users WHERE reg_code=? LIMIT 1', [rcX2]);
+        if (rrX2 === null) return json({ code: 503, message: '系统正在忙，请稍后再试' }, 503);
+        if (!rrX2.length) return json({ code: 410, message: '登记码无效，请核对邮件里的链接或联系客服' }, 410);
+      } else {
+        return json({ code: 400, message: '会话缺失，请刷新页面' }, 400);
+      }
+      const phX2 = String(bX2.phone || '').trim();
+      const cdX2 = String(bX2.captcha || '').trim();
+      if (!/^1[3-9]\d{9}$/.test(phX2)) return json({ code: 400, message: '手机号格式不对' }, 400);
+      if (!/^\d{4,8}$/.test(cdX2)) return json({ code: 400, message: '验证码格式不对' }, 400);
+      /* 同号登录 60s 冷却（与 /api/reg_sms/login 同口径，防连点把自己点进 8810） */
+      const _nowX2 = Date.now(); const _lastX2 = smsSendLimit.get('SL' + phX2) || 0;
+      if (_nowX2 - _lastX2 < 60e3) return json({ code: 429, message: '操作太快，' + Math.ceil((60e3 - (_nowX2 - _lastX2)) / 1e3) + ' 秒后再试' });
+      smsSendLimit.set('SL' + phX2, _nowX2);
+      const _spX2 = smsSidParse(String(bX2.sid || 'default').slice(0, 70));
+      const isRelayX2 = _spX2.relay;
+      const sidX2 = _spX2.sid;
+      try {
+        await regsmStat('sign_login');
+        const okSignLogin = (mu, uid, nick) => {
+          if (!mu) return json({ code: 500, message: '登录成功但没拿到凭证，请重试一次' });
+          return json({ code: 200, message: '登录成功', musicU: String(mu), uid: String(uid || ''), nickname: nick || '' });
+        };
+        /* 第一优先：住宅出口中继（发码在住宅机那条会话，登录必须回到同一台同一会话） */
+        if (String(bX2.ch || '') !== 'eapi') {
+          const cfgX2 = await smsRelayCfg();
+          if (cfgX2 && cfgX2.on) {
+            const rrX3 = await smsRelayLogin(cfgX2, phX2, cdX2, isRelayX2 ? sidX2 : '', _spX2.pin);
+            if (rrX3) {
+              const rcX3 = Number(rrX3.code);
+              if (rcX3 === 200 && rrX3.musicU) {
+                await regsmStat('sign_login_ok');
+                return okSignLogin(rrX3.musicU, rrX3.uid, rrX3.nick);
+              }
+              if (rcX3 === 503 || rcX3 === 502) { await regsmStat('sign_login_biz'); return json({ code: 205, message: '验证码不对或已过期' }); }
+              if (rcX3 === 501) { await regsmStat('sign_login_biz'); return json({ code: 503, message: '号码或账号状态异常，请点上方「扫码登记」' }); }
+            }
+          }
+        }
+        const jarX2 = await smsGetJar(sidX2);
+        const rX2 = await smsWeapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone: phX2, countrycode: '86', captcha: cdX2, remember: 'true' }, jarX2);
+        await smsSaveJar(sidX2, jarX2);
+        const jX2 = smsParseJson(rX2.text);
+        if (jX2 && Number(jX2.code) === -462 && jX2.data && jX2.data.verifyToken) {
+          await regsmStat('sign_e462l');
+          return json({ code: -462, sid: sidX2, challenge: jX2.data, message: jX2.message || '需要安全验证' });
+        }
+        if (jX2 && Number(jX2.code) === 200) {
+          await regsmStat('sign_login_ok');
+          return okSignLogin(smsCookiePick(jarX2.cookie, 'MUSIC_U'),
+            (jX2.account && jX2.account.id) || (jX2.profile && jX2.profile.userId) || '',
+            (jX2.profile && jX2.profile.nickname) || '');
+        }
+        /* 8810 环境硬拒（实测占登录约 19%，概率触发）：同码立刻改走 eapi 画像通道重试一次 */
+        if (jX2 && Number(jX2.code) === 8810) {
+          await regsmStat('sign_e8810');
+          try {
+            const jarE2 = await smsGetJar(sidX2 + '::eapi');
+            const rE2 = await smsEapiCall('/api/w/login/cellphone', { type: '1', https: 'true', phone: phX2, countrycode: '86', captcha: cdX2, remember: 'true', secrete: 'music_middleuser_pclogin' }, jarE2);
+            await smsSaveJar(sidX2 + '::eapi', jarE2);
+            const jE2 = smsParseJson(rE2.text);
+            if (jE2 && Number(jE2.code) === 200) {
+              await regsmStat('sign_eapi_loginok');
+              return okSignLogin(smsCookiePick(jarE2.cookie, 'MUSIC_U'),
+                (jE2.account && jE2.account.id) || (jE2.profile && jE2.profile.userId) || '',
+                (jE2.profile && jE2.profile.nickname) || '');
+            }
+          } catch (eE2) { /* eapi 重试失败照旧走统一话术 */ }
+        } else { await regsmStat('sign_loginfail'); }
+        return json({ code: jX2 ? jX2.code : rX2.status, message: jX2 ? (jX2.message || jX2.msg || '登录没成功') : '响应非JSON' });
+      } catch (e) { await regsmStat('sign_loginfail'); return json({ code: 500, message: '登录链路异常，请稍后再试' }, 500); }
+    }
+    /* ===== 签到页短信通道路由结束 ===== */
     /* 跑批领片：GitHub 小号 signin.py 按 rowid 取模分片领买家。
        口令只认独立键 ASSIGN_PASS（与 /api/assign 同源）。读失败≠读到空：null 一律 503。 */
     if (url.pathname === '/api/sign/assign' && request.method === 'GET') {
@@ -14851,34 +15000,69 @@ button:disabled { opacity: 0.5; }
 .terms { display: none; font-size: 12px; color: #666; line-height: 1.8; margin-top: 10px;
   border-top: 1px dashed #d8dbe0; padding-top: 10px; }
 .mini { font-size: 12px; color: #888; line-height: 1.6; margin-top: 10px; text-align: center; }
+/* 2026-11-28：短信/扫码双通道切换条。短信=默认通道（推荐徽章），扫码=保底（不愿收
+   验证码 / 收不到短信的用户自选）。按钮复用全局 button 样式再覆盖。 */
+.switch { display: flex; gap: 8px; margin: 14px 0 0; }
+.sw { flex: 1; border: 1.5px solid #d5d9e0; border-radius: 10px; padding: 10px 6px;
+  font-size: 14px; font-weight: 600; background: #fff; color: #888; cursor: pointer; font-family: inherit; }
+.sw.on { border-color: #4a7dd6; color: #4a7dd6; background: #f0f5fd; }
+.sw .rec { font-style: normal; font-size: 10px; background: #4a7dd6; color: #fff;
+  border-radius: 8px; padding: 1px 6px; margin-left: 4px; vertical-align: 2px; }
+.srow { display: flex; gap: 8px; margin-top: 6px; }
+.srow input { flex: 1; min-width: 0; padding: 11px 12px; font-size: 15px;
+  border: 1px solid #ccd0d6; border-radius: 8px; outline: none; }
+.srow input:focus { border-color: #4a7dd6; }
+.srow input.bad { border-color: #c0392b; }
+.srow button { width: auto; flex: none; margin-top: 0; padding: 11px 14px; font-size: 14px; }
+.tip2 { font-size: 13px; color: #666; text-align: left; margin: 8px 0 0; min-height: 18px; line-height: 1.5; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>网易云每日签到</h1>
   <p class="sub">每天自动完成打卡 / 云贝 / VIP 签到，掉线自动邮件提醒</p>
-  <div id="modeTag" class="tag" style="display:none">重新扫码 · 恢复你的签到</div>
+  <div id="modeTag" class="tag" style="display:none">重新登记 · 恢复你的签到</div>
 
   <div id="stepQr" class="card">
     <div id="rowEmail">
       <label>第一步：填邮箱</label>
       <input id="email" type="email" autocomplete="email" placeholder="用于接收登记回执和掉线提醒">
       <label class="agree"><input id="agree" type="checkbox">
-        <span>我已阅读并同意 <b onclick="toggleTerms()">服务说明</b>：本服务只用你的账号执行网易云官方的签到类操作，不需要你的密码，不会发布任何内容、不会消耗你的资产。</span></label>
+        <span>我已阅读并同意 <b onclick="toggleTerms()">服务说明</b>：本服务只执行网易云官方的签到类操作。</span></label>
       <div id="terms" class="terms">
         1. 服务范围：每日打卡、云贝签到、云贝任务领取、VIP 签到与等级奖励、音乐人云豆（如你是音乐人）。<br>
-        2. 账号安全：登记使用的是扫码产生的登录凭证（Cookie），不是密码；可随时在网易云 App「设置-账号与安全-登录设备管理」里下线我们，服务即停止。<br>
-        3. 失效处理：登录凭证偶尔会被网易云失效（正常现象），失效后系统发邮件提醒，点邮件里的链接重新扫码即可恢复。<br>
+        2. 账号安全：登记使用的是登录产生的凭证（Cookie），不是密码；可随时在网易云 App「设置-账号与安全-登录设备管理」里下线我们，服务即停止。<br>
+        3. 失效处理：登录凭证偶尔会被网易云失效（正常现象），失效后系统发邮件提醒，点邮件里的链接重新登记即可恢复。<br>
         4. 责任说明：本服务仅提供签到辅助，不对账号本身的安全性作担保；因网易平台策略调整导致的服务变化，以协商为准。
       </div>
       <div id="emailErr" class="err"></div>
     </div>
-    <label id="qrLabel">第二步：扫码</label>
-    <img id="qrImg" alt="二维码">
-    <div id="qrTip" class="tip">请用 <b>网易云音乐 App</b> 扫一扫下面的码</div>
-    <button onclick="newKey()">换一张</button>
-    <div id="qrErr" class="err"></div>
-    <p class="mini">邮箱填好、勾上同意、扫完码，会自动完成登记，不用再点按钮。</p>
+    <div id="chBar" class="switch">
+      <button type="button" class="sw on" id="sw-sms">短信验证码登记<i class="rec">推荐</i></button>
+      <button type="button" class="sw" id="sw-qr">扫码登记</button>
+    </div>
+    <div id="smsPanel">
+      <label id="smsLabel">第二步：用手机号登录网易云</label>
+      <div class="srow">
+        <input id="i-sms-phone" inputmode="numeric" maxlength="11" placeholder="登录网易云用的手机号" autocomplete="off">
+        <button type="button" id="b-sms-send">获取验证码</button>
+      </div>
+      <p class="tip2" id="sms-tip">验证码短信由网易云官方直接发送到你的手机。</p>
+      <div id="yidun-cap"></div>
+      <div class="srow">
+        <input id="i-sms-code" inputmode="numeric" maxlength="8" placeholder="短信验证码（4~8 位数字）" autocomplete="off">
+        <button type="button" id="b-sms-login">登录并登记</button>
+      </div>
+      <p class="tip2">收不到短信？点上方「扫码登记」换个方式，一样有效。</p>
+    </div>
+    <div id="qrPanel" style="display:none">
+      <label id="qrLabel">第二步：扫码</label>
+      <img id="qrImg" alt="二维码">
+      <div id="qrTip" class="tip">请用 <b>网易云音乐 App</b> 扫一扫下面的码</div>
+      <button onclick="newKey()">换一张</button>
+      <div id="qrErr" class="err"></div>
+    </div>
+    <p class="mini">邮箱填好、勾上同意，用短信验证码或扫码登录后会自动完成登记，不用再点按钮。</p>
   </div>
 
   <div id="stepDone" class="card done-card" style="display:none">
@@ -14891,8 +15075,7 @@ button:disabled { opacity: 0.5; }
   <div class="card faq">
     <h3>常见问题</h3>
     <p><b>签到包含什么？</b>每日打卡、云贝签到、云贝任务领取、VIP 签到与等级奖励，音乐人账号还会领云豆任务。</p>
-    <p><b>会动我账号里的东西吗？</b>不会。只做签到类操作，不发动态、不点赞关注、不消耗云贝。</p>
-    <p><b>掉了怎么办？</b>收到「重新扫码」邮件后，点邮件里的链接用同一个账号再扫一次，第二天自动恢复。</p>
+    <p><b>掉了怎么办？</b>收到「重新登记」邮件后，点邮件里的链接用同一个账号再登一次，第二天自动恢复。</p>
     <p><b>怎么取消？</b>在网易云 App 的登录设备管理里把我们下线即可，也可以邮件里回复说明。</p>
   </div>
 </div>
@@ -14918,6 +15101,11 @@ function setErr(id, msg) {
 function toggleTerms() {
   var t = $('terms');
   t.style.display = t.style.display === 'block' ? 'none' : 'block';
+}
+/* 2026-11-28：双通道后统一的状态条出口——短信面板可见时写 sms-tip，扫码面板可见时写 qrTip */
+function modeTip(msg) {
+  var el = $('smsPanel').style.display !== 'none' ? $('sms-tip') : $('qrTip');
+  if (el) el.textContent = msg;
 }
 function mkDev() {
   var a = new Uint8Array(18);
@@ -14952,11 +15140,11 @@ function tryFinish() {
   if (DONE || !MU || MODE === 're' || HOLD) return;
   if (!emailOk() || !$('agree').checked) {
     var miss = !emailOk() ? '还差一步：把邮箱填对' : '还差一步：勾选同意服务说明';
-    $('qrTip').textContent = '扫码成功！' + miss + '，补好后自动完成登记';
+    modeTip('登录成功！' + miss + '，补好后自动完成登记');
     return;
   }
   stopPoll();
-  $('qrTip').textContent = '验证中…';
+  modeTip('验证中…');
   var em = $('email').value.trim();
   if (MODE === 'card') {
     postJson('/api/s/csubmit', { code: CODE, st: T, mu: MU, email: em, agree: true }, subCb);
@@ -14968,7 +15156,11 @@ function subCb(d) {
   if (d.ok) { showDone(d); return; }
   var m = String(d.message || '');
   setErr('qrErr', m || '提交失败');
-  $('qrTip').textContent = '请用 网易云音乐 App 扫一扫下面的码';
+  if ($('smsPanel').style.display !== 'none') {
+    modeTip('登录已成功，登记没完成：' + (m || '请检查邮箱和勾选后再试一次'));
+  } else {
+    $('qrTip').textContent = '请用 网易云音乐 App 扫一扫下面的码';
+  }
   HOLD = !(m.indexOf('邮箱') >= 0 || m.indexOf('同意') >= 0);
 }
 function newKey() {
@@ -15030,31 +15222,224 @@ function showDone(d) {
     $('doneTitle').textContent = '激活成功';
     $('doneCode').textContent = d.code || CODE;
     $('doneCode').style.display = 'block';
-    $('doneBody').textContent = '你的签到服务已激活，明天开始每天自动签到。掉线时系统会发邮件提醒，点邮件里的链接重新扫码即可恢复；购买时收到的卡密链接也可以直接用来重新扫码，建议收藏。';
+    $('doneBody').textContent = '你的签到服务已激活，明天开始每天自动签到。掉线时系统会发邮件提醒，点邮件里的链接重新登记即可恢复；购买时收到的卡密链接也可以直接用来重新登记，建议收藏。';
   } else {
     $('doneTitle').textContent = '登记成功';
     $('doneCode').textContent = d.code || '';
     $('doneCode').style.display = 'block';
-    $('doneBody').textContent = '上面是你的登记码，已经发到你的邮箱。以后掉线时，点邮件里的链接重新扫码即可恢复，不用找客服。';
+    $('doneBody').textContent = '上面是你的登记码，已经发到你的邮箱。以后掉线时，点邮件里的链接重新登记即可恢复，不用找客服。';
   }
 }
 $('email').addEventListener('input', tryFinish);
 $('agree').addEventListener('change', tryFinish);
+
+/* ===== 短信验证码登记（2026-11-28 新增，默认通道；ES5 与全页脚本同风格） =====
+   链路：/api/s/sms_send →（-462 时易盾官方 SDK 滑块 → /api/reg_sms/check 闭环）→
+   收到短信 → /api/s/sms_login → MUSIC_U → 复用既有 submit/csubmit/rsubmit 全套业务校验。
+   客户视角没有「安全验证」概念：服务端任何风控拦截统一包装成「收不到短信 → 切扫码」。 */
+var SMSID = '';
+function smsInitId() {
+  var b = new Uint8Array(8);
+  if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(b);
+  else for (var i = 0; i < b.length; i++) b[i] = Math.floor(Math.random() * 256);
+  var s = '';
+  for (var j = 0; j < b.length; j++) s += ('0' + b[j].toString(16)).slice(-2);
+  SMSID = s;
+}
+var SMS_CID_40 = 'aefd3e6914a546a2a7263b20a5e8304f';
+var SMS_CID_41 = 'eb43b69cce7449c1b818b8a291b36f21';
+var smsSdkLoaded = null, smsCd = 0, smsCdT = 0, smsBusy = false;
+function loadYidun() {
+  if (window.initNECaptcha) return Promise.resolve();
+  if (smsSdkLoaded) return smsSdkLoaded;
+  smsSdkLoaded = new Promise(function (res, rej) {
+    var s = document.createElement('script');
+    s.src = 'https://cstaticdun.126.net/load.min.js';
+    s.async = true;
+    s.onload = function () { if (window.initNECaptcha) res(); else { smsSdkLoaded = null; rej(new Error('SDK 已加载但无 initNECaptcha')); } };
+    s.onerror = function () { smsSdkLoaded = null; rej(new Error('易盾 SDK 加载失败')); };
+    document.head.appendChild(s);
+  });
+  return smsSdkLoaded;
+}
+function mountSlide(challenge) {
+  return loadYidun().then(function () {
+    return new Promise(function (resolve, reject) {
+      var cap = $('yidun-cap');
+      cap.innerHTML = '';
+      var host = document.createElement('div');
+      host.id = 'yidun-host-' + Date.now();
+      cap.appendChild(host);
+      var vt = Number(challenge.verifyType) || 40;
+      var cid = vt === 41 ? SMS_CID_41 : SMS_CID_40;
+      var settled = false;
+      /* 三参数签名：onVerify 必须在第一个 options 里，否则渲染正常但永远不回调 */
+      window.initNECaptcha({
+        captchaId: cid,
+        element: '#' + host.id,
+        mode: 'embed',
+        width: '320px',
+        lang: 'zh-CN',
+        onVerify: function (err, data) {
+          if (settled) return; settled = true;
+          if (err) { cap.innerHTML = ''; return reject(err); }
+          var v = (data && (data.validate || (data.data && data.data.validate))) || '';
+          if (!v) { cap.innerHTML = ''; return reject(new Error('安全验证未返回 validate')); }
+          cap.innerHTML = '';
+          resolve(v);
+        },
+        onError: function () { if (settled) return; settled = true; reject(new Error('滑块组件出错')); }
+      }, function () { smsTip2('滑块已就绪，请拖动验证'); },
+        function () { if (settled) return; settled = true; reject(new Error('滑块初始化失败')); });
+    });
+  });
+}
+function smsTip2(s, bad) {
+  var el = $('sms-tip');
+  el.textContent = s;
+  el.style.color = bad ? '#c0392b' : '';
+}
+function smsReady() { return MODE === 're' || !!T; }
+function smsApi(p, body) {
+  var o = body || {};
+  o.st = MODE === 're' ? '' : T;
+  o.rc = MODE === 're' ? CODE : '';
+  o.sid = SMSID;
+  return fetch('/api/s/' + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) })
+    .then(function (r) {
+      return r.text().then(function (t2) {
+        var j = null; try { j = JSON.parse(t2); } catch (e) {}
+        if (!j) throw new Error('服务器返回异常');
+        return j;
+      });
+    });
+}
+function capCheck(body) {
+  body.sid = SMSID;
+  return fetch('/api/reg_sms/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function (r) { return r.json(); });
+}
+function smsCountdown() {
+  clearInterval(smsCdT); smsCd = 60;
+  $('b-sms-send').disabled = true;
+  $('b-sms-send').textContent = smsCd + 's 后重发';
+  smsCdT = setInterval(function () {
+    smsCd--;
+    if (smsCd <= 0) {
+      clearInterval(smsCdT);
+      $('b-sms-send').textContent = '重新发送';
+      smsTip2('一直没收到？点上方「扫码登记」，一样有效');
+      return;
+    }
+    $('b-sms-send').textContent = smsCd + 's 后重发';
+  }, 1000);
+}
+function smsRelease() { smsBusy = false; try { $('b-sms-send').disabled = false; $('b-sms-login').disabled = false; } catch (e) {} }
+function smsSend() {
+  if (smsBusy) return;
+  if (!smsReady()) { smsTip2('页面还没准备好，请等一两秒再点', true); return; }
+  var p = $('i-sms-phone').value.replace(/[^0-9]/g, '');
+  if (!/^1\\d{10}$/.test(p)) { $('i-sms-phone').classList.add('bad'); smsTip2('手机号要 11 位、以 1 开头', true); return; }
+  $('i-sms-phone').classList.remove('bad');
+  smsBusy = true; $('b-sms-send').disabled = true;
+  smsTip2('发送中…');
+  smsApi('sms_send', { phone: p }).then(function (r) {
+    /* 住宅侧发码成功会回一个带 r| 前缀的 sid，必须带回去给 check/login，
+       否则后续请求又回到机房会话，网易看到「发码住宅、登录机房」直接判错。 */
+    if (r && r.sid) SMSID = String(r.sid);
+    if (Number(r.code) === -462 && r.challenge) {
+      smsTip2('请在下方拖动滑块完成确认');
+      return mountSlide(r.challenge).then(function (v) {
+        smsTip2('滑块已通过，提交核验…');
+        return capCheck({ challenge: r.challenge, validate: v });
+      }).then(function (c) {
+        if (c && c.success) { smsRelease(); smsTip2('确认已通过，正在重新发送…'); return smsSend(); }
+        smsRelease(); smsTip2('确认没通过，请再拖一次滑块', true);
+      });
+    }
+    if (Number(r.code) === 200) { smsTip2('验证码已发送，请查收短信'); smsCountdown(); smsRelease(); $('b-sms-send').disabled = true; return; }
+    smsRelease();
+    /* 风控拦截统一话术：客户永远看不到「安全验证」四个字 */
+    smsTip2('验证码发送失败：请稍后再试；一直收不到就点上方「扫码登记」，一样有效', true);
+  }).catch(function () { smsRelease(); smsTip2('网络异常，请再点一次；一直不行就点上方「扫码登记」', true); });
+}
+function smsGot(r) {
+  clearInterval(smsCdT);
+  smsTip2('登录成功');
+  MU = String(r.musicU || '');
+  HOLD = false;
+  if (MODE === 're') {
+    /* 重登模式：拿 mu 直接走既有 rsubmit（服务端校验这次登录的 uid 与登记码对得上） */
+    postJson('/api/s/rsubmit', { code: CODE, mu: MU }, function (d2) {
+      if (d2.ok) { showDone(d2); }
+      else { setErr('qrErr', d2.message || '提交失败'); smsTip2('提交没成功：' + (d2.message || '请稍后再试'), true); }
+    });
+    return;
+  }
+  tryFinish();
+}
+function smsLogin() {
+  if (smsBusy || MU) return;
+  if (!smsReady()) { smsTip2('页面还没准备好，请等一两秒再点', true); return; }
+  var p = $('i-sms-phone').value.replace(/[^0-9]/g, '');
+  var code = $('i-sms-code').value.replace(/[^0-9]/g, '');
+  if (!/^1\\d{10}$/.test(p)) { $('i-sms-phone').classList.add('bad'); smsTip2('手机号要 11 位、以 1 开头', true); return; }
+  if (!/^\\d{4,8}$/.test(code)) { $('i-sms-code').classList.add('bad'); smsTip2('先填收到的短信验证码（4~8 位数字）', true); return; }
+  $('i-sms-code').classList.remove('bad');
+  smsBusy = true; $('b-sms-login').disabled = true;
+  smsTip2('正在登录…');
+  smsApi('sms_login', { phone: p, captcha: code }).then(function (r) {
+    if (Number(r.code) === -462 && r.challenge) {
+      smsTip2('请在下方拖动滑块完成确认');
+      return mountSlide(r.challenge).then(function (v) {
+        smsTip2('滑块已通过，提交核验…');
+        return capCheck({ challenge: r.challenge, validate: v });
+      }).then(function (c) {
+        smsRelease();
+        if (c && c.success) smsTip2('确认已通过，请再点一次「登录并登记」');
+        else smsTip2('确认没通过，请再试一次', true);
+      });
+    }
+    smsRelease();
+    if (Number(r.code) === 200 && r.musicU) { smsGot(r); return; }
+    if (Number(r.code) === 205) smsTip2((r.message || '验证码不对或已过期') + '：检查一下，或重新获取', true);
+    else if (Number(r.code) === 429 || Number(r.code) === 410 || Number(r.code) === 503) smsTip2(r.message || '请稍后再试', true);
+    else smsTip2('登录没成功：请点上方「扫码登记」，一样有效', true);
+  }).catch(function () { smsRelease(); smsTip2('网络异常，请再点一次', true); });
+}
+$('b-sms-send').onclick = smsSend;
+$('b-sms-login').onclick = smsLogin;
+function showMode(m) {
+  var sms = m !== 'qr';
+  $('smsPanel').style.display = sms ? '' : 'none';
+  $('qrPanel').style.display = sms ? 'none' : '';
+  $('sw-sms').className = 'sw' + (sms ? ' on' : '');
+  $('sw-qr').className = 'sw' + (sms ? '' : ' on');
+  /* 扫码模式才占 bridge 实例：切过去才出码；切回短信立即停轮询 */
+  if (!sms) {
+    if (!smsReady()) { setErr('qrErr', '页面还没准备好，请等一两秒再试'); return; }
+    if (!KEY && !DONE && !MU) newKey();
+  } else {
+    stopPoll();
+  }
+}
+$('sw-sms').onclick = function () { showMode('sms'); };
+$('sw-qr').onclick = function () { showMode('qr'); };
+
+smsInitId();
 if (MODE === 're') {
   $('rowEmail').style.display = 'none';
-  $('qrLabel').textContent = '扫码恢复';
-  $('modeTag').textContent = '重新扫码 · 恢复你的签到';
+  $('smsLabel').textContent = '用原账号的手机号登录网易云';
+  $('modeTag').textContent = '重新登记 · 恢复你的签到';
   $('modeTag').style.display = 'block';
-  newKey();
 } else {
   if (MODE === 'card') {
-    $('modeTag').textContent = '卡密兑换 · 扫码激活你的签到服务';
+    $('modeTag').textContent = '卡密兑换 · 激活你的签到服务';
     $('modeTag').style.display = 'block';
   }
   postJson('/api/s/new', { email: '', agree: true }, function (d) {
     if (!d.ok) { setErr('qrErr', d.message || '初始化失败，请刷新重试'); return; }
     T = d.t;
-    newKey();
   });
 }
 </script>
