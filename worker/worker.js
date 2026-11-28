@@ -14978,67 +14978,104 @@ const SIGN_HTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>网易云每日签到 · 登记</title>
 <style>
+/* 2026-11-28 版式改版（方案B 清新蓝玻璃）：只动样式层，功能/文案/ID 全部保留。
+   步骤徽章用 CSS counter + ::before —— JS 会重写 label 的 textContent，伪元素不会被冲掉；
+   display:none 的步骤不参与计数，重登模式(隐藏邮箱步)徽章自动从 1 开始。 */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-  background: #f5f6f8; color: #222; padding: 20px 14px 40px; }
-.wrap { max-width: 420px; margin: 0 auto; }
-h1 { font-size: 20px; text-align: center; margin-bottom: 4px; }
-.sub { font-size: 13px; color: #777; text-align: center; margin-bottom: 16px; }
-.tag { font-size: 13px; color: #0a7d43; text-align: center; margin-bottom: 12px; font-weight: 500; }
-.card { background: #fff; border: 1px solid #e3e5e8; border-radius: 12px; padding: 18px 16px; margin-bottom: 14px; }
-.card label { display: block; font-size: 14px; margin: 10px 0 6px; }
-.card input[type=email] { width: 100%; padding: 11px 12px; font-size: 15px;
-  border: 1px solid #ccd0d6; border-radius: 8px; outline: none; }
-.card input[type=email]:focus { border-color: #4a7dd6; }
-.agree { font-size: 12px; color: #666; line-height: 1.7; display: flex; gap: 6px; align-items: flex-start; }
-.agree input { margin-top: 3px; }
-.agree b { color: #4a7dd6; cursor: pointer; }
-button { width: 100%; padding: 12px; font-size: 16px; margin-top: 14px;
-  background: #4a7dd6; color: #fff; border: 0; border-radius: 8px; cursor: pointer; }
-button:disabled { opacity: 0.5; }
-#qrImg { display: block; width: 210px; height: 210px; margin: 12px auto; border: 1px solid #e3e5e8; border-radius: 8px; }
-.tip { font-size: 14px; text-align: center; color: #333; }
-.err { display: none; font-size: 13px; color: #c0392b; margin-top: 10px; line-height: 1.6; }
-/* 2026-11-23 用户实测反馈#1：登记成功提示要大要显眼 —— 且原代码 $('stepQr') 引用不存在的
-   id，showDone 在第一行就抛 TypeError，成功卡片从来没显示过（实测「没有任何成功提示」的根因）。
-   本版：补 id=stepQr、加 ✓ 大图标、标题 26px 加粗、成功卡片加绿色描边并置顶滚动。 */
-.done-title { font-size: 26px; color: #0a7d43; text-align: center; font-weight: 700; line-height: 1.4; }
-.done-mark { font-size: 44px; text-align: center; line-height: 1.2; }
-.done-card { border: 2px solid #0a7d43 !important; background: #f2fbf5 !important; }
-.done-body { font-size: 14px; line-height: 1.8; margin-top: 10px; }
-.code { font-size: 20px; text-align: center; letter-spacing: 3px; font-weight: 500;
-  background: #eef4fd; border: 1px dashed #4a7dd6; border-radius: 8px; padding: 12px; margin: 12px 0; }
-.faq h3 { font-size: 14px; margin: 12px 0 4px; font-weight: 500; }
-.faq p { font-size: 13px; color: #555; line-height: 1.7; }
-.terms { display: none; font-size: 12px; color: #666; line-height: 1.8; margin-top: 10px;
-  border-top: 1px dashed #d8dbe0; padding-top: 10px; }
-.mini { font-size: 12px; color: #888; line-height: 1.6; margin-top: 10px; text-align: center; }
-/* 2026-11-28：短信/扫码双通道切换条。短信=默认通道（推荐徽章），扫码=保底（不愿收
-   验证码 / 收不到短信的用户自选）。按钮复用全局 button 样式再覆盖。 */
-.switch { display: flex; gap: 8px; margin: 14px 0 0; }
-.sw { flex: 1; border: 1.5px solid #d5d9e0; border-radius: 10px; padding: 10px 6px;
-  font-size: 14px; font-weight: 600; background: #fff; color: #888; cursor: pointer; font-family: inherit; }
-.sw.on { border-color: #4a7dd6; color: #4a7dd6; background: #f0f5fd; }
-.sw .rec { font-style: normal; font-size: 10px; background: #4a7dd6; color: #fff;
-  border-radius: 8px; padding: 1px 6px; margin-left: 4px; vertical-align: 2px; }
+  background: linear-gradient(165deg, #e8f0ff 0%, #e6f7f2 60%, #f0f7ff 100%) fixed;
+  color: #1e293b; padding: 26px 14px 40px; }
+.wrap { max-width: 430px; margin: 0 auto; }
+.wm { text-align: center; margin-bottom: 18px; }
+.wm .logo { width: 58px; height: 58px; line-height: 58px; margin: 0 auto 10px;
+  background: linear-gradient(135deg, #3b82f6, #0ea5e9); color: #fff; border-radius: 18px;
+  font-size: 27px; font-weight: 700; box-shadow: 0 8px 20px rgba(59,130,246,.35); }
+h1 { font-size: 22px; font-weight: 700;
+  background: linear-gradient(120deg, #2563eb, #0891b2);
+  -webkit-background-clip: text; background-clip: text; color: transparent; }
+.sub { font-size: 13px; color: #64748b; margin-top: 6px; text-align: center; }
+.tag { display: none; font-size: 13px; font-weight: 600; color: #2563eb;
+  background: rgba(37,99,235,.09); border: 1px solid rgba(37,99,235,.22);
+  border-radius: 999px; padding: 7px 16px; width: max-content; margin: 0 auto 16px; }
+.card { background: rgba(255,255,255,.78); backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,.9); border-radius: 20px; padding: 20px 18px;
+  margin-bottom: 16px; box-shadow: 0 10px 32px rgba(59,130,246,.13);
+  counter-reset: step; }
+.card label { display: block; font-size: 14px; font-weight: 600; margin: 4px 0 8px; color: #334155; }
+label.step { display: flex; align-items: center; gap: 8px; }
+label.step::before { counter-increment: step; content: counter(step);
+  width: 22px; height: 22px; line-height: 22px; text-align: center; flex: none;
+  background: linear-gradient(135deg, #3b82f6, #0ea5e9); color: #fff; border-radius: 8px;
+  font-size: 12px; }
+.card input[type=email] { width: 100%; padding: 12px 14px; font-size: 15px;
+  border: 1.5px solid #dbe4ef; border-radius: 12px; outline: none; background: #fff;
+  transition: border-color .15s, box-shadow .15s; }
+.card input[type=email]:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,.12); }
+.agree { font-size: 12px; color: #64748b; line-height: 1.7; display: flex; gap: 6px;
+  align-items: flex-start; font-weight: 400; margin-top: 10px; }
+.agree input { margin-top: 3px; accent-color: #3b82f6; }
+.agree b { color: #2563eb; cursor: pointer; }
+button { width: 100%; padding: 13px; font-size: 16px; font-weight: 600; margin-top: 14px;
+  background: linear-gradient(135deg, #3b82f6, #0ea5e9); color: #fff; border: 0;
+  border-radius: 12px; cursor: pointer; box-shadow: 0 6px 16px rgba(59,130,246,.32);
+  font-family: inherit; }
+button:disabled { opacity: .5; }
+#qrImg { display: block; width: 210px; height: 210px; margin: 14px auto 4px;
+  border: 1.5px dashed #b9c8dd; border-radius: 16px; background: #fff; }
+.tip { font-size: 14px; text-align: center; color: #334155; margin-top: 10px; }
+.err { display: none; font-size: 13px; color: #dc2626; margin-top: 10px; line-height: 1.6; }
+/* 2026-11-23 用户实测反馈#1：登记成功提示要大要显眼（保留下方大图标+大标题的设计） */
+.done-mark { width: 58px; height: 58px; line-height: 58px; margin: 4px auto 8px; text-align: center;
+  background: linear-gradient(135deg, #10b981, #059669); color: #fff; border-radius: 20px;
+  font-size: 30px; box-shadow: 0 6px 16px rgba(16,185,129,.32); }
+.done-title { font-size: 24px; color: #059669; text-align: center; font-weight: 700; line-height: 1.4; }
+.done-card { border: 1.5px solid rgba(16,163,90,.45) !important;
+  background: linear-gradient(180deg, rgba(236,253,243,.9), rgba(255,255,255,.82)) !important; }
+.done-body { font-size: 14px; line-height: 1.8; margin-top: 10px; color: #475569; }
+.code { font-size: 20px; text-align: center; letter-spacing: 3px; font-weight: 600;
+  background: rgba(255,255,255,.85); border: 1.5px dashed #3b82f6; color: #2563eb;
+  border-radius: 12px; padding: 12px; margin: 14px 0 0; }
+.faq h3 { font-size: 15px; margin-bottom: 4px; color: #1e293b; }
+.faq p { font-size: 13px; color: #52607a; line-height: 1.8; padding: 9px 0;
+  border-bottom: 1px solid rgba(148,163,184,.18); }
+.faq p:last-child { border-bottom: 0; }
+.faq p b { color: #2563eb; font-weight: 600; }
+.terms { display: none; font-size: 12px; color: #64748b; line-height: 1.8; margin-top: 10px;
+  border-top: 1px dashed rgba(148,163,184,.4); padding-top: 10px; }
+.mini { font-size: 12px; color: #8a97a8; line-height: 1.6; margin-top: 12px; text-align: center; }
+/* 2026-11-28：短信/扫码双通道切换（一体式分段控件）。短信=默认通道（推荐徽章），
+   扫码=保底。showMode 会重置 sw 的 className（'sw'/'sw on'），「推荐」徽章在按钮
+   innerHTML 里不受影响。 */
+.switch { display: flex; background: #e8eef7; border-radius: 999px; padding: 4px; margin: 16px 0 0; }
+.sw { flex: 1; border: 0; border-radius: 999px; padding: 10px 6px; font-size: 14px;
+  font-weight: 600; background: transparent; color: #8895a7; cursor: pointer;
+  font-family: inherit; margin-top: 0; box-shadow: none; }
+.sw.on { background: #fff; color: #2563eb; box-shadow: 0 3px 10px rgba(37,99,235,.18); }
+.sw .rec { font-style: normal; font-size: 10px; background: linear-gradient(135deg, #3b82f6, #0ea5e9);
+  color: #fff; border-radius: 8px; padding: 1px 7px; margin-left: 4px; vertical-align: 2px; }
 .srow { display: flex; gap: 8px; margin-top: 6px; }
-.srow input { flex: 1; min-width: 0; padding: 11px 12px; font-size: 15px;
-  border: 1px solid #ccd0d6; border-radius: 8px; outline: none; }
-.srow input:focus { border-color: #4a7dd6; }
-.srow input.bad { border-color: #c0392b; }
-.srow button { width: auto; flex: none; margin-top: 0; padding: 11px 14px; font-size: 14px; }
-.tip2 { font-size: 13px; color: #666; text-align: left; margin: 8px 0 0; min-height: 18px; line-height: 1.5; }
+.srow input { flex: 1; min-width: 0; padding: 12px 14px; font-size: 15px;
+  border: 1.5px solid #dbe4ef; border-radius: 12px; outline: none; background: #fff; }
+.srow input:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,.12); }
+.srow input.bad { border-color: #dc2626; }
+.srow button { width: auto; flex: none; margin-top: 0; padding: 12px 16px; font-size: 14px; }
+.tip2 { font-size: 13px; color: #7c8ba1; text-align: left; margin: 10px 0 0; min-height: 18px; line-height: 1.5; }
+#yidun-cap { margin-top: 10px; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>网易云每日签到</h1>
-  <p class="sub">每天自动完成打卡 / 云贝 / VIP 签到，掉线自动邮件提醒</p>
+  <div class="wm">
+    <div class="logo">云</div>
+    <h1>网易云每日签到</h1>
+    <p class="sub">每天自动完成打卡 / 云贝 / VIP 签到，掉线自动邮件提醒</p>
+  </div>
   <div id="modeTag" class="tag" style="display:none">重新登记 · 恢复你的签到</div>
 
   <div id="stepQr" class="card">
     <div id="rowEmail">
-      <label>第一步：填邮箱</label>
+      <label class="step">填邮箱</label>
       <input id="email" type="email" autocomplete="email" placeholder="用于接收登记回执和掉线提醒">
       <label class="agree"><input id="agree" type="checkbox">
         <span>我已阅读并同意 <b onclick="toggleTerms()">服务说明</b>：本服务只执行网易云官方的签到类操作。</span></label>
@@ -15055,7 +15092,7 @@ button:disabled { opacity: 0.5; }
       <button type="button" class="sw" id="sw-qr">扫码登记</button>
     </div>
     <div id="smsPanel">
-      <label id="smsLabel">第二步：用手机号登录网易云</label>
+      <label id="smsLabel" class="step">用手机号登录网易云</label>
       <div class="srow">
         <input id="i-sms-phone" inputmode="numeric" maxlength="11" placeholder="登录网易云用的手机号" autocomplete="off">
         <button type="button" id="b-sms-send">获取验证码</button>
@@ -15069,7 +15106,7 @@ button:disabled { opacity: 0.5; }
       <p class="tip2">收不到短信？点上方「扫码登记」换个方式，一样有效。</p>
     </div>
     <div id="qrPanel" style="display:none">
-      <label id="qrLabel">第二步：扫码</label>
+      <label id="qrLabel" class="step">扫码</label>
       <img id="qrImg" alt="二维码">
       <div id="qrTip" class="tip">请用 <b>网易云音乐 App</b> 扫一扫下面的码</div>
       <button onclick="newKey()">换一张</button>
