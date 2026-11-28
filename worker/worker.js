@@ -8936,6 +8936,14 @@ async function handle(request) {
       const uR2 = await d1Run("UPDATE sign_users SET ck=?, status='active', dead_notified_day='' WHERE uid=?",
         ['MUSIC_U=' + muR, String(rowR[0].uid)]);
       if (!uR2) return json({ ok: false, message: '数据库暂时繁忙，重登没有完成，请稍后再试一次' }, 503);
+      /* 2026-11-28 重登静默流水标记（用户要求：签到管理明细要看「是否已重登」）：
+         不动 sign_users 表结构，复用 mail_queue 做流水（state='sent' 的静默行不进发送队列，
+         同「换歌静默流水」先例）。kind=signrelogin、exp=登记码；INSERT OR IGNORE 防重。 */
+      try {
+        await d1Run("INSERT OR IGNORE INTO mail_queue (pool,uid,kind,ref,email,name,agent,exp,state,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+          ['sign', String(rowR[0].uid || ''), 'signrelogin', beijingDate(), String(rowR[0].email || ''),
+           String(rowR[0].name || ''), '', codeR, 'sent', bjStamp()]);
+      } catch (eMk) { console.error('signrelogin 标记写入失败:', eMk && eMk.message); }
       console.log('签到产品重登成功: uid=' + String(rowR[0].uid));
       return json({ ok: true }, 200, { 'Cache-Control': 'no-store' });
     }
@@ -9538,7 +9546,7 @@ async function handle(request) {
       const qS9 = String(bS9.q || '').trim().slice(0, 40);
       let fS9 = String(bS9.status || '');
       if (fS9 !== '' && fS9 !== 'unused' && fS9 !== 'active' && fS9 !== 'dead') fS9 = '';
-      let wS9 = "SELECT reg_code, status, uid, name, email, added_at, last_ok_day FROM sign_users WHERE note='card'";
+      let wS9 = "SELECT reg_code, status, uid, name, email, added_at, last_ok_day, dead_notified_day FROM sign_users WHERE note='card'";
       const pS9 = [];
       if (fS9) { wS9 += ' AND status=?'; pS9.push(fS9); }
       if (qS9) {
@@ -9549,6 +9557,34 @@ async function handle(request) {
       wS9 += ' ORDER BY added_at DESC LIMIT 500';
       const listS9 = await d1All(wS9, pS9);
       if (listS9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
+      /* 2026-11-28（用户要求：明细要看「是否已重登 / 是否已发邮件提醒」）：
+         一次取近 90 天 sign 产品的邮件流水（signdead=掉线提醒 / signdead2=7天补提醒 /
+         signrelogin=重登成功静默标记），按 uid 聚合成每卡两列。无 schema 改动。 */
+      const mqS9 = await d1All("SELECT uid, kind, state, ref, created_at, sent_at, skip_reason FROM mail_queue " +
+        "WHERE pool='sign' AND kind IN ('signdead','signdead2','signrelogin') AND created_at>=? ORDER BY created_at DESC LIMIT 4000",
+        [beijingDatePlus(-90)]);
+      if (mqS9 === null) return json({ ok: false, message: '系统正在忙，请稍后再试' }, 503, CORS_S);
+      const mqMap = {};
+      for (const q9 of mqS9) {
+        const k9 = String(q9.uid || '');
+        if (!k9) continue;
+        if (!mqMap[k9]) mqMap[k9] = { latest: null, deadCnt: 0, relogin: '', deadRef: '' };
+        const m9 = mqMap[k9];
+        if (q9.kind === 'signrelogin' && !m9.relogin) m9.relogin = String(q9.created_at || '');
+        if (q9.kind === 'signdead' || q9.kind === 'signdead2') {
+          m9.deadCnt++;
+          if (!m9.latest) m9.latest = q9;
+        }
+      }
+      for (const c9 of listS9) {
+        const m9 = mqMap[String(c9.uid || '')] || null;
+        c9.relogin_at = m9 ? m9.relogin : '';
+        c9.mail = m9 && m9.latest ? {
+          kind: m9.latest.kind, state: m9.latest.state,
+          at: String(m9.latest.sent_at || m9.latest.created_at || ''),
+          skip: String(m9.latest.skip_reason || ''), rounds: m9.deadCnt,
+        } : null;
+      }
       let soldN = 0;
       for (let s9 = 0; s9 < soldS9.length; s9++) soldN += Number(soldS9[s9].n || 0);
       return json({ ok: true, stats: stS9, cards: listS9, sold: soldN,
@@ -15664,30 +15700,52 @@ th { color: #666; font-weight: 500; background: #fafbfc; }
     </div>
     <div id="flimit" class="hint" style="display:none;color:#b26a00">结果超过 500 条只显示最近 500 条，想看更多请缩小筛选范围</div>
     <table id="tbl">
-      <thead><tr><th>卡密码</th><th>状态</th><th>买家账号</th><th>昵称</th><th>邮箱</th><th>登记时间</th><th>最近签到</th><th>操作</th></tr></thead>
+      <thead><tr><th>卡密码</th><th>状态</th><th>买家账号</th><th>昵称</th><th>邮箱</th><th>登记时间</th><th>最近签到</th><th>最近重登</th><th>掉线提醒</th><th>操作</th></tr></thead>
       <tbody></tbody>
     </table>
     <div class="hint">操作列说明：未售卡 = 复制链接 / 作废；已激活或已判死买家 = 复制重登链接 / 删除。
-      「删除」会连这个买家的签到记录一起删，删前弹窗确认两次。</div>
+      「删除」会连这个买家的签到记录一起删，删前弹窗确认两次。<br>
+      2026-11-28 加两列：「最近重登」= 买家点邮件链接重新扫码成功的时间（掉了又重登、重登后又掉都能看出）；
+      「掉线提醒」= 判死提醒邮件状态——已发（含第几轮）/ 发送中 / 失败 / 未发。判死的卡重登成功会自动转回「已激活」。</div>
   </div>
 </div>
 <script>
 var W = '';
 var $ = function (id) { return document.getElementById(id); };
-var pass = localStorage.getItem('signadm_pass') || '';
+/* 2026-11-28 口令三存储加固（用户反馈清缓存/刷新后口令丢失）：
+   localStorage 单存储会被「清理浏览数据」整锅端走，部分浏览器（如 Safari ITP）还会 7 天自动清。
+   改为三处同写同读：localStorage + sessionStorage（同标签刷新不掉）+ 一年 Cookie（清了 LS 还能兜住）。
+   读的顺序 LS → SS → Cookie，任一有就算记住。 */
+function passStoreGet() {
+  try { var v = localStorage.getItem('signadm_pass'); if (v) return v; } catch (e) {}
+  try { var s = sessionStorage.getItem('signadm_pass'); if (s) return s; } catch (e) {}
+  try { var m = document.cookie.match(/(?:^|;\s*)signadm_pass=([^;]*)/); if (m) return decodeURIComponent(m[1]); } catch (e) {}
+  return '';
+}
+function passStoreSet(p) {
+  try { localStorage.setItem('signadm_pass', p); } catch (e) {}
+  try { sessionStorage.setItem('signadm_pass', p); } catch (e) {}
+  try { document.cookie = 'signadm_pass=' + encodeURIComponent(p) + ';max-age=31536000;path=/;SameSite=Lax'; } catch (e) {}
+}
+function passStoreClear() {
+  try { localStorage.removeItem('signadm_pass'); } catch (e) {}
+  try { sessionStorage.removeItem('signadm_pass'); } catch (e) {}
+  try { document.cookie = 'signadm_pass=;max-age=0;path=/'; } catch (e) {}
+}
+var pass = passStoreGet();
 $('pass').value = pass;
 function getPass() {
   var p = $('pass').value.trim();
   if (!p) { $('msg').textContent = '请先填管理口令（ADMIN_PASS）'; return ''; }
-  if ($('remember').checked) localStorage.setItem('signadm_pass', p);
-  else localStorage.removeItem('signadm_pass');
+  if ($('remember').checked) passStoreSet(p);
+  else passStoreClear();
   return p;
 }
 function passFail(d) {
   /* 2026-11-23 体检收紧：只匹配「口令错误」。「未配置管理口令」(503) 不清口令——
      那是服务端配置异常，不是口令错了，误清会逼用户重输。 */
   if (d && d.ok === false && String(d.message || '').indexOf('口令错误') >= 0) {
-    try { localStorage.removeItem('signadm_pass'); } catch (e) {}
+    try { passStoreClear(); } catch (e) {}
     $('pass').value = '';
     $('msg').style.color = '#c0392b';
     $('msg').textContent = '口令不对：已清掉记住的口令，请重新粘贴 ADMIN_PASS（= /admin 管理后台那把口令，不是 650 控制台口令），再点一次';
@@ -15818,10 +15876,33 @@ function renderList(d) {
       ops = '<a href="javascript:void(0)" onclick="copyOne(\\'' + c.reg_code + '\\')">复制重登链接</a> · ' +
             '<a href="javascript:void(0)" style="color:#c0392b" onclick="delUser(\\'' + c.reg_code + '\\',\\'' + (c.uid || '') + '\\')">删除</a>';
     }
+    /* 2026-11-28 两列新字段：最近重登（signrelogin 静默标记时间）/ 掉线提醒（signdead 邮件状态）。
+       未售卡两列恒显示 -；判死未重登时明确标「未重登」红字，重登过又掉线的标「第N轮掉线」。 */
+    var relog = '-';
+    if (c.status !== 'unused') {
+      if (c.status === 'dead') {
+        relog = (c.mail && c.mail.rounds > 1)
+          ? '<span style="color:#b26a00">未重登（第' + c.mail.rounds + '轮掉线）</span>'
+          : '<span style="color:#c0392b">未重登</span>';
+      } else if (c.relogin_at) {
+        relog = String(c.relogin_at).slice(5, 16);
+      }
+    }
+    var mail = '-';
+    if (c.status !== 'unused' && c.mail) {
+      var mlab = c.mail.kind === 'signdead2' ? '补提醒' : '掉线提醒';
+      if (c.mail.state === 'sent') mail = '已发 ' + String(c.mail.at).slice(5, 16) + (c.mail.rounds > 1 ? '（累计' + c.mail.rounds + '封）' : '');
+      else if (c.mail.state === 'pending' || c.mail.state === 'claimed') mail = '发送中…（' + mlab + '）';
+      else if (c.mail.state === 'dropped') mail = '<span style="color:#c0392b">发送失败放弃' + (c.mail.skip ? '：' + c.mail.skip : '') + '</span>';
+      else mail = '跳过' + (c.mail.skip ? '：' + c.mail.skip : '');
+    } else if (c.status === 'dead') {
+      mail = '<span style="color:#c0392b">未发（无邮件或入队失败）</span>';
+    }
     return '<tr><td>' + c.reg_code + '</td><td><span class="tag ' + c.status + '">' + (SCNT[c.status] || c.status) + '</span></td>' +
       '<td>' + (c.uid && c.uid.indexOf('card:') === 0 ? '-' : (c.uid || '-')) + '</td><td>' + (c.name || '-') + '</td><td>' + (c.email || '-') + '</td>' +
-      '<td>' + (c.added_at || '-') + '</td><td>' + (c.last_ok_day || '-') + '</td><td>' + ops + '</td></tr>';
-  }).join('') || '<tr><td colspan="8">没有符合条件的数据</td></tr>';
+      '<td>' + (c.added_at || '-') + '</td><td>' + (c.last_ok_day || '-') + '</td>' +
+      '<td>' + relog + '</td><td>' + mail + '</td><td>' + ops + '</td></tr>';
+  }).join('') || '<tr><td colspan="10">没有符合条件的数据</td></tr>';
 }
 function loadList() {
   var p = getPass(); if (!p) return;
@@ -15921,25 +16002,41 @@ loadGroup();
   try { history.replaceState(null, '', location.pathname); } catch (e1) {}
   $('msg').style.color = '#33506e';
   $('msg').textContent = '正在从控制台交接登录…';
-  fetch(W + '/api/sign/handoff_redeem', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tk: tkB }) })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      d = d || { ok: false, message: '响应异常' };
-      if (d.ok && d.pass) {
-        pass = d.pass;
-        $('pass').value = pass;
-        try { localStorage.setItem('signadm_pass', pass); } catch (e) {}
-        $('msg').textContent = '';
-        refresh();
-      } else {
+  /* 2026-11-28 票据兑换重试（用户反馈从控制台进来仍要口令）：票据是 KV 写后立刻读，
+     Cloudflare KV 跨节点同步有秒级延迟，第一读可能扑空报「交接已失效」。
+     兑换失败且票据还没过期（TTL 2 分钟）时，每 4 秒重试一次，最多 15 次。 */
+  function redeemTry(tkB, n) {
+    fetch(W + '/api/sign/handoff_redeem', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tk: tkB }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        d = d || { ok: false, message: '响应异常' };
+        if (d.ok && d.pass) {
+          pass = d.pass;
+          $('pass').value = pass;
+          try { passStoreSet(pass); } catch (e) {}
+          $('msg').textContent = '';
+          refresh();
+          return;
+        }
+        if (!d.ok && n < 15 && String(d.message || '').indexOf('交接已失效') >= 0) {
+          $('msg').textContent = '正在从控制台交接登录…（第 ' + (n + 1) + ' 次重试，票据同步中）';
+          setTimeout(function () { redeemTry(tkB, n + 1); }, 4000);
+          return;
+        }
         $('msg').style.color = '#c0392b';
         $('msg').textContent = d.message || '交接失败，请手动输入口令';
-      }
-    })
-    .catch(function () {
-      $('msg').style.color = '#c0392b';
-      $('msg').textContent = '交接失败（网络异常），请手动输入口令';
-    });
+      })
+      .catch(function () {
+        if (n < 15) {
+          $('msg').textContent = '正在从控制台交接登录…（第 ' + (n + 1) + ' 次重试，网络波动）';
+          setTimeout(function () { redeemTry(tkB, n + 1); }, 4000);
+          return;
+        }
+        $('msg').style.color = '#c0392b';
+        $('msg').textContent = '交接失败（网络异常），请手动输入口令';
+      });
+  }
+  redeemTry(tkB, 0);
 })();
 </script>
 </body>
