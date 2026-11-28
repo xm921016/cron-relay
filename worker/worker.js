@@ -14460,7 +14460,7 @@ async function regReconcile() {
   if (!d1ok()) return { skip: 'no-d1' };
   const out = { checked: 0, mailBack: 0, ledBack: 0, err: '' };
   try {
-    const toks = await d1All("SELECT uid,uname,phone,agent,plan,used_at,kind FROM reg_tokens " +
+    const toks = await d1All("SELECT uid,uname,phone,agent,plan,days,used_at,kind FROM reg_tokens " +
       "WHERE state='used' AND kind='new' AND used_at>=?",
       [new Date(Date.now() - 48 * 3600 * 1000).toISOString().replace('T', 'T')]);
     if (toks === null) { out.err = '读 reg_tokens 失败（' + (_d1LastErr || 'D1 异常') + '）'; return out; }
@@ -14475,14 +14475,27 @@ async function regReconcile() {
       const addedStr = acc ? String(acc.added || '') : '';
       const refDay = (addedStr.slice(0, 10)) || bjDayOf(String(t.used_at || ''));
       if (!refDay) continue;
+      /* 2026-11-28 补丁（15685161046 丢号案）：号不在 D1（登记时 D1 写抖动、号只在 KV
+         entry 键里后来彻底丢失）时原逻辑有两个坑：
+           ① 照样补排登记邮件 → 派发器只会打上 skip「账号已不在池里」，纯脏 pending；
+           ② 台账 exp 取 acc.exp='' → ledgerAdd 兜底写成 'forever'，1年单记成永久错账。
+         改法：acc 缺失 → 邮件不补排（out.noAcc 计数进 KV cron:reg_recon:last 可查）；
+         台账 exp 改用卡密上的套餐天数从登记日(refDay)推算，remark 标「对账补写」以便辨认。
+         正常路径（acc 在池）行为一字不变。 */
+      const accExp = String((acc && acc.exp) || '');
+      const _tkDays = Number(t.days) || 0;
+      const reconExp = accExp || (_tkDays > 0
+        ? new Date(Date.parse(refDay + 'T00:00:00Z') + _tkDays * 86400000).toISOString().slice(0, 10)
+        : '');
+      if (!acc) out.noAcc = (out.noAcc || 0) + 1;
       const nm = String((acc && acc.name) || t.uname || t.phone || '');
       const ag = String((acc && acc.agent) || t.agent || '');
-      /* ① 登记邮件：唯一键 (pool,uid,'reg',refDay) 查不到才补排 */
+      /* ① 登记邮件：唯一键 (pool,uid,'reg',refDay) 查不到才补排；号不在池时不补（排了也注定 skip） */
       const mQ = await d1All("SELECT ref FROM mail_queue WHERE pool=? AND uid=? AND kind='reg' AND ref=? LIMIT 1", [POOL_NAME, uid, refDay]);
       if (mQ === null) { out.err = '读 mail_queue 失败（uid ' + uid.slice(0, 6) + '…）'; break; }
-      if (!(mQ && mQ.length)) {
+      if (!(mQ && mQ.length) && acc) {
         const okM = await mailEnqueue(POOL_NAME, uid, 'reg', refDay,
-          String((acc && acc.email) || ''), nm, ag, String((acc && acc.exp) || ''));
+          String((acc && acc.email) || ''), nm, ag, accExp);
         if (okM) out.mailBack++;
       }
       /* ② 台账：唯一键 (pool,uid,day) 查不到才补写，价格/天数由 ledgerAdd 按 reg_cfg 现算 */
@@ -14492,14 +14505,14 @@ async function regReconcile() {
         const okL = await ledgerAdd({
           uid: uid, name: nm, agent: ag,
           plan: String((acc && acc.plan) || t.plan || ''),
-          exp: String((acc && acc.exp) || ''),
+          exp: reconExp,
           added: addedStr || (refDay + ' 00:00:00'),
-        }, { src: 'reg', start: addedStr || refDay });
+        }, { src: 'reg', start: addedStr || refDay, remark: acc ? '' : '对账补写（登记未落库，exp 按套餐推算）' });
         if (okL) out.ledBack++;
       }
     }
   } catch (e) { out.err = String((e && e.message) || e).slice(0, 140); }
-  if (out.mailBack || out.ledBack || out.err) {
+  if (out.mailBack || out.ledBack || out.noAcc || out.err) {
     try { await POOL.put('cron:reg_recon:last', JSON.stringify(Object.assign({ at: new Date().toISOString() }, out)), { expirationTtl: 604800 }); } catch (e) { }
     console.log('[reg-reconcile] ' + JSON.stringify(out));
   }
