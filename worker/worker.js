@@ -19541,8 +19541,11 @@ document.addEventListener('click',function(e){
 function cloudHandoffOpen(page){
   var t={};try{t=JSON.parse(TOKEN||'{}');}catch(e){}
   api('/api/cloud/handoff',{user:t.user||'xx1031',pass:t.pass||'',page:page}).then(function(o){
-    var u=location.origin+page+((o&&o.ok&&o.tk)?('#tk='+o.tk):'');
-    window.open(u,'_blank');
+    // 2026-11-28 修复：api() 返回 {ok,d} 包装，票据在 o.d.tk 不是 o.tk——
+    // 旧写法 o.tk 恒为 undefined，导致号体检/VIP赠送从未带过票据、每次都落口令框
+    // （签到管理的 signAdm 一直用的是 o.d.tk 所以正常）。对齐 signAdm 写法。
+    if(o.ok&&o.d&&o.d.ok&&o.d.tk){window.open(location.origin+page+'#tk='+encodeURIComponent(o.d.tk),'_blank');}
+    else{window.open(location.origin+page,'_blank');}
   });
 }
 if($('btnHealth'))$('btnHealth').onclick=function(){cloudHandoffOpen('/healthcloud');};
